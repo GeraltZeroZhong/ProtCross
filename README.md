@@ -1,2 +1,2 @@
-# CrossPoint
-Confidence-Aware Domain Adaptation on Protein Point Clouds for Robust Binding Site Prediction
+# ProtCross
+ProtCross: Bridging the PDB-AlphaFold Gap for Robust Binding Site Prediction on Protein Point Clouds
