@@ -1,0 +1,5 @@
+_target_: evopoint_da.data.datamodule.EvoPointDataModule
+data_dir_pdb: ${paths.data_dir}/processed_pdb
+data_dir_af2: ${paths.data_dir}/processed_af2
+batch_size: 8
+num_workers: 2

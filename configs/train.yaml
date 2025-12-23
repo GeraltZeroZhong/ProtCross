@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: protein_seg
+  - model: da_module
+  - trainer: default
+
+paths:
+  data_dir: ${hydra:runtime.cwd}/data
+  output_dir: ${hydra:runtime.cwd}/outputs
+
+seed: 42

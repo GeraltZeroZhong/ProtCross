@@ -1,0 +1,9 @@
+_target_: evopoint_da.models.module.EvoPointDALitModule
+lr: 1e-3
+weight_decay: 1e-4
+da_weight: 1.0
+feature_dim: 128
+pos_noise: 0.1
+use_esm: true
+use_da: true
+use_plddt_weight: true
