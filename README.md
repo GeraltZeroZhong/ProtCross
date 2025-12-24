@@ -84,6 +84,7 @@ python test.py
 ### 4) Benchmark / repeated experiments
 ```bash
 python run_benchmark.py
+python run_multiseed_benchmark.py
 python run_repeated_experiments.py
 ```
 
@@ -138,7 +139,7 @@ python train.py trainer.max_epochs=10
 ├── test.py
 ├── run_benchmark.py
 ├── run_evaluate_only.py
+├── run_multiseed_benchmark.py
 ├── run_repeated_experiments.py
 └── environment.yml
 ```
-
