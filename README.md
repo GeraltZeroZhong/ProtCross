@@ -61,7 +61,7 @@ python scripts/preprocess_esm.py \
   --is_af2
 ```
 
-**(Optional) Map labels from PDB to AF2**
+** Map labels from PDB to AF2**
 ```bash
 python scripts/map_labels.py
 ```
