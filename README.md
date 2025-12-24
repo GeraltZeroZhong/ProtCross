@@ -37,7 +37,7 @@ Raw and processed data are expected in the `data/` folder (created by you):
   processed_af2/    # Preprocessed .pt files (target domain)
 ```
 
-**Download AF2 structures (optional)**
+**Download AF2 structures based on raw .pdb files**
 ```bash
 python scripts/get_af2.py
 ```
