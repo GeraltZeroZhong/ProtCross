@@ -6,10 +6,11 @@ import pandas as pd
 from collections import defaultdict
 
 # === 配置区域 ===
-SEEDS = [42, 1234, 2024]
+# 你之前用的种子
+SEEDS = [2024, 1225, 1250, 318, 666]
 MAX_EPOCHS = 50
 
-# 定义四个关键实验 (与 run_benchmark.py 一致)
+# 定义四个关键实验
 EXPERIMENTS = [
     {
         "id": "A",
@@ -43,7 +44,7 @@ def clean_checkpoints():
     os.makedirs("checkpoints", exist_ok=True)
 
 def run_command(cmd, log_file):
-    """运行命令并将输出同时写入文件和控制台 (简化版输出)"""
+    """运行命令并将输出同时写入文件和控制台"""
     print(f"👉 Exec: {cmd}")
     output_buffer = ""
     try:
@@ -57,6 +58,9 @@ def run_command(cmd, log_file):
             process.wait()
             if process.returncode != 0:
                 print(f"❌ Command failed with return code {process.returncode}")
+                # 打印最后几行错误日志帮助调试
+                print("   Last 5 lines of output:")
+                print("   " + "\n   ".join(output_buffer.splitlines()[-5:]))
     except Exception as e:
         print(f"❌ Execution Error: {e}")
     return output_buffer
@@ -70,7 +74,6 @@ def parse_metrics(output):
         "Low_FPR": 0.0
     }
     
-    # 查找 <<<METRICS_START>>> 块 (兼容你的 test.py 输出格式)
     if "<<<METRICS_START>>>" in output:
         try:
             block = output.split("<<<METRICS_START>>>")[1].split("<<<METRICS_END>>>")[0]
@@ -78,7 +81,7 @@ def parse_metrics(output):
                 if ":" in line:
                     k, v = line.split(":")
                     key = k.strip()
-                    val = float(v.strip().replace('%', '')) # 移除%并转float
+                    val = float(v.strip().replace('%', ''))
                     if key in metrics:
                         metrics[key] = val
         except Exception as e:
@@ -87,7 +90,6 @@ def parse_metrics(output):
     return metrics
 
 def main():
-    # 存储结构: results[exp_id] = list of dicts (one per seed)
     results = defaultdict(list)
     
     print("="*60)
@@ -108,21 +110,22 @@ def main():
             # 1. 清理权重
             clean_checkpoints()
             
-            # 2. 训练 (加入 +seed_everything)
+            # 2. 训练
             log_train = f"logs/benchmark/train_{exp_id}_seed_{seed}.txt"
             os.makedirs(os.path.dirname(log_train), exist_ok=True)
             
+            # === 🛠️ 关键修改：添加了 + 号 ===
             train_cmd = (
                 f"python train.py {exp['args']} "
                 f"+seed_everything={seed} "
                 f"trainer.max_epochs={MAX_EPOCHS} "
-                f"trainer.default_root_dir=logs/benchmark/{exp_id}_{seed}"
+                f"+trainer.default_root_dir=logs/benchmark/{exp_id}_{seed}"  # <--- 加了 +
             )
             run_command(train_cmd, log_train)
             
             # 3. 测试
             log_test = f"logs/benchmark/test_{exp_id}_seed_{seed}.txt"
-            test_cmd = "python test.py" # test.py 会自动找 checkpoints 里最新的
+            test_cmd = "python test.py"
             test_output = run_command(test_cmd, log_test)
             
             # 4. 记录数据
@@ -137,7 +140,6 @@ def main():
     print("🏆 FINAL MULTI-SEED BENCHMARK REPORT")
     print("="*80)
 
-    # --- Helper to format Mean ± Std ---
     def fmt_stat(exp_id, metric_key):
         vals = [r[metric_key] for r in results[exp_id]]
         if not vals: return "N/A"
@@ -145,8 +147,7 @@ def main():
         std = np.std(vals)
         return f"{mean:.2f} ± {std:.2f}"
 
-    # --- Table 2: Ablation Study ---
-    print("\n### Table 2: Ablation Study (Mean ± Std over 3 runs)")
+    print("\n### Table 2: Ablation Study (Mean ± Std)")
     print("| ID | Model | ESM | DA | pLDDT | AF2 IoU (%) |")
     print("|---|---|---|---|---|---|")
     
@@ -159,8 +160,7 @@ def main():
         iou_str = fmt_stat(exp['id'], 'Overall_IoU')
         print(f"| {exp['id']} | {exp['name']} | {esm} | {da} | {plddt} | **{iou_str}** |")
 
-    # --- Table 3: Confidence Analysis (Experiment D only) ---
-    print("\n### Table 3: Analysis by Confidence (Experiment D, Mean ± Std)")
+    print("\n### Table 3: Analysis by Confidence (Experiment D)")
     print("| Region Type | Metric | Value |")
     print("|---|---|---|")
     
