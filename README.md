@@ -27,11 +27,11 @@ The project uses Hydra for configuration, PyTorch Lightning for training loops, 
 
 ## Usage
 ### 1) Prepare data
-Raw and processed data are expected in the `data/` folder (created by you):
+Raw and processed data are expected in the `data/` folder :
 
 ```
 ./data/
-  raw_pdb/          # Raw PDB or CIF files
+  raw_pdb/          # Raw PDB or CIF files (you provide)
   raw_af2/          # AlphaFold2 PDB files
   processed_pdb/    # Preprocessed .pt files (source domain)
   processed_af2/    # Preprocessed .pt files (target domain)
