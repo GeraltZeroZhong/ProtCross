@@ -79,6 +79,7 @@ python train.py model.use_esm=False model.use_da=False model.feature_dim=128
 ### 3) Test
 ```bash
 python test.py
+python test_adaptive.py
 ```
 
 ### 4) Benchmark / repeated experiments
@@ -141,5 +142,6 @@ python train.py trainer.max_epochs=10
 ├── run_evaluate_only.py
 ├── run_multiseed_benchmark.py
 ├── run_repeated_experiments.py
+├── test_adaptive.py
 └── environment.yml
 ```
