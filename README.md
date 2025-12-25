@@ -78,15 +78,12 @@ python train.py model.use_esm=False model.use_da=False model.feature_dim=128
 
 ### 3) Test
 ```bash
-python test.py
 python test_adaptive.py
 ```
 
 ### 4) Benchmark / repeated experiments
 ```bash
-python run_benchmark.py
 python run_multiseed_benchmark.py
-python run_repeated_experiments.py
 ```
 
 ## Configuration
