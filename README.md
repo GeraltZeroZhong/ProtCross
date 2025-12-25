@@ -61,7 +61,7 @@ python scripts/preprocess_esm.py \
   --is_af2
 ```
 
-** Map labels from PDB to AF2**
+**Map labels from PDB to AF2**
 ```bash
 python scripts/map_labels.py
 ```
@@ -134,11 +134,8 @@ python train.py trainer.max_epochs=10
 │           │   └── classifier.py
 │           └── module.py
 ├── train.py
-├── test.py
-├── run_benchmark.py
 ├── run_evaluate_only.py
 ├── run_multiseed_benchmark.py
-├── run_repeated_experiments.py
 ├── test_adaptive.py
 └── environment.yml
 ```
