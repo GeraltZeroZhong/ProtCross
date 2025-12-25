@@ -7,7 +7,7 @@ from collections import defaultdict
 import glob
 
 
-SEEDS = [42, 2025, 318, 666, 888]
+SEEDS = [42, 2025, 666]
 MAX_EPOCHS = 100
 
 EXPERIMENTS = [
@@ -144,3 +144,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
