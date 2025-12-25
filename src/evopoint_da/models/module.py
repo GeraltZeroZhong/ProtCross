@@ -38,9 +38,9 @@ class EvoPointDALitModule(pl.LightningModule):
     def __init__(self, 
                  lr: float = 3e-4, 
                  weight_decay: float = 1e-4,
-                 da_weight: float = 0.5,      # [Run 10 Fix] Back to 0.5 (Strong but stable)
+                 da_weight: float = 0.2,      # [Run 10 Fix] Back to 0.5 (Strong but stable)
                  feature_dim: int = 128,
-                 pos_noise: float = 0.05,     # Keep low noise
+                 pos_noise: float = 0.08,     # Keep low noise
                  # --- Experimental Flags ---
                  use_esm: bool = True,        # Table 1/2: Use ESM features?
                  use_da: bool = True,         # Table 2: Use Domain Adaptation?
@@ -139,7 +139,22 @@ class EvoPointDALitModule(pl.LightningModule):
         self.log("train/loss_da", loss_da)
         
         return total_loss
-
+    def validation_step(self, batch, batch_idx):
+        """计算验证集损失和指标"""
+        # 1. 前向传播
+        src_x = batch.x if self.hparams.use_esm else None
+        feats, _ = self.backbone(src_x, batch.pos, batch.batch)
+        logits = self.seg_head(feats)
+        
+        # 2. 计算分割损失 === 🛠️ 修复点在这里 ===
+        # 强制将 y 转为 long 类型，防止 float 报错
+        loss = torch.nn.functional.cross_entropy(logits, batch.y.long())
+        
+        # 3. 记录日志
+        self.log('val/loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
     def test_step(self, batch, batch_idx):
         batch_x = batch.x if self.hparams.use_esm else None
         feats, _ = self.backbone(batch_x, batch.pos, batch.batch)
