@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, f1_score, accuracy_score
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, f1_score
 from torch_geometric.data import Dataset, Data
 from torch_geometric.loader import DataLoader
 import sys
@@ -10,22 +10,18 @@ import glob
 import pandas as pd
 import warnings
 
-# 忽略一些不必要的警告
+# 忽略警告
 warnings.filterwarnings("ignore")
 
-# Add src to path
+# 添加 src 路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from src.evopoint_da.models.module import EvoPointDALitModule
 
 # ==========================================
-# 1. Helpers: Data Parsers
+# 1. Helpers: Data Parsers (保持不变)
 # ==========================================
 
 def get_residue_ids_from_pdb(pdb_path):
-    """
-    读取 PDB 文件并返回残基 ID 列表 (用于 P2Rank 对齐)。
-    格式: ["A_1", "A_2", "B_1", ...]
-    """
     res_ids = []
     seen = set()
     try:
@@ -33,12 +29,9 @@ def get_residue_ids_from_pdb(pdb_path):
             for line in f:
                 if line.startswith(('ATOM', 'HETATM')):
                     chain_id = line[21].strip()
-                    if chain_id == '': chain_id = 'A' # 默认链 A
+                    if chain_id == '': chain_id = 'A'
                     res_seq = line[22:27].strip()
-                    
-                    # 唯一标识符: Chain_ResNum (e.g., A_10)
                     unique_id = f"{chain_id}_{res_seq}"
-                    
                     if unique_id not in seen:
                         res_ids.append(unique_id)
                         seen.add(unique_id)
@@ -48,12 +41,8 @@ def get_residue_ids_from_pdb(pdb_path):
         return []
 
 def load_pesto_scores(pdb_path):
-    """
-    读取 PeSTo 生成的 PDB 文件 (B-factor 字段)。
-    """
     scores = []
     seen_residues = set()
-    
     try:
         with open(pdb_path, 'r') as f:
             for line in f:
@@ -61,10 +50,8 @@ def load_pesto_scores(pdb_path):
                     res_seq_id = line[22:27].strip()
                     chain_id = line[21]
                     unique_res_id = f"{chain_id}_{res_seq_id}"
-                    
                     if unique_res_id not in seen_residues:
                         try:
-                            # PeSTo 概率在 B-factor (60-66)
                             b_factor = float(line[60:66].strip())
                             scores.append(b_factor)
                             seen_residues.add(unique_res_id)
@@ -76,43 +63,23 @@ def load_pesto_scores(pdb_path):
         return None
 
 def load_p2rank_scores(csv_path, target_len, residue_ids_map):
-    """
-    读取 P2Rank 的 CSV 输出并映射到残基级概率。
-    """
     scores = np.zeros(target_len)
-    
-    if not os.path.exists(csv_path):
-        return None # 文件不存在，视为空
-
+    if not os.path.exists(csv_path): return None
     try:
-        # P2Rank CSV columns: name, rank, score, probability, ..., residue_ids
         df = pd.read_csv(csv_path, skipinitialspace=True)
-        
-        # 遍历每个预测的口袋
         for _, row in df.iterrows():
             prob = row['probability']
-            
-            # residue_ids 格式通常是 "A_1 A_2 A_3" (空格分隔)
-            # 或者 "1 2 3" (如果没有链ID)
             res_str_list = str(row['residue_ids']).strip().split()
-            
             for res_str in res_str_list:
-                # 尝试匹配 residue_ids_map
-                # P2Rank 输出通常包含链 (e.g. A_123)
                 target_id = res_str.strip()
-                
                 if target_id in residue_ids_map:
                     idx = residue_ids_map.index(target_id)
-                    # 如果残基属于多个口袋，取最大概率
                     scores[idx] = max(scores[idx], prob)
-                    
         return scores
     except Exception as e:
-        # print(f"⚠️ Error parsing P2Rank {csv_path}: {e}")
-        return np.zeros(target_len) # 解析失败返回全0
+        return np.zeros(target_len)
 
 def find_best_threshold(y_true, y_prob):
-    """自动寻找最佳 F1 阈值"""
     best_f1 = 0
     best_thresh = 0.5
     for thresh in np.arange(0.1, 1.0, 0.05):
@@ -145,197 +112,249 @@ class SimpleFolderDataset(Dataset):
             data = Data(**payload)
         else:
             data = payload
-        
         filename = os.path.basename(self.file_list[idx])
         data.pdb_id = os.path.splitext(filename)[0] 
         return data
 
 # ==========================================
-# 3. Main Evaluation Logic
+# 3. Inference Helper
 # ==========================================
-def evaluate_and_plot(ckpt_path, af2_data_folder, pesto_folder=None, p2rank_folder=None):
-    # --- Settings ---
-    BATCH_SIZE = 1 # 必须为 1 以便进行 PDB 对齐
-    
-    # --- Load Model ---
-    print(f"Loading checkpoint: {ckpt_path}")
-    model = EvoPointDALitModule.load_from_checkpoint(ckpt_path)
-    model.eval()
-    model.cuda()
-    
-    # --- Load Data ---
-    test_dataset = SimpleFolderDataset(af2_data_folder)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-    
-    # Storage
+def run_inference(ckpt_path, loader, device='cuda'):
+    """加载特定模型并在数据加载器上运行推理"""
+    print(f"\n🚀 Loading Model: {ckpt_path}")
+    try:
+        model = EvoPointDALitModule.load_from_checkpoint(ckpt_path)
+        model.eval()
+        model.to(device)
+    except Exception as e:
+        print(f"❌ Error loading checkpoint {ckpt_path}: {e}")
+        sys.exit(1)
+
     all_labels = []
-    all_probs_raw = []
-    all_probs_gated = []
+    all_probs_gated = [] # 我们主要关注 Gated (Confidence-Aware) 结果，或者是 Raw
     
-    all_probs_pesto = []
-    all_probs_p2rank = []
+    # 对于 Experiment A (Baseline)，它可能没有训练 pLDDT weight，但推理时可以用 pLDDT 过滤
+    # 为了公平对比，我们统一提取 Gated 结果，或者也可以提取 Raw。
+    # 这里我们提取 Gated，因为这是 ProtCross 的核心卖点。
     
-    has_pesto = pesto_folder is not None and os.path.exists(pesto_folder)
-    has_p2rank = p2rank_folder is not None and os.path.exists(p2rank_folder)
-
-    if has_pesto: print(f"🔹 Comparison: PeSTo enabled ({pesto_folder})")
-    if has_p2rank: print(f"🔹 Comparison: P2Rank enabled ({p2rank_folder})")
-
-    print("\nRunning Inference...")
     with torch.no_grad():
-        for i, batch in enumerate(test_loader):
-            batch = batch.cuda()
-            current_id = batch.pdb_id[0]
+        for batch in loader:
+            batch = batch.to(device)
             
-            # --- 1. ProtCross Inference ---
+            # Forward
             src_x = batch.x if model.hparams.use_esm else None
             feats, _ = model.backbone(src_x, batch.pos, batch.batch)
             logits = model.seg_head(feats)
             probs = torch.softmax(logits, dim=1)[:, 1]
             
-            # Confidence Gating
-            p = model._normalize_plddt(batch.plddt).squeeze()
+            # Confidence Gating Logic
+            if hasattr(model, '_normalize_plddt'):
+                p = model._normalize_plddt(batch.plddt).squeeze()
+            else:
+                p = batch.plddt.squeeze() / 100.0
+            
             is_reliable = (p > 0.65).float()
             probs_gated = probs * is_reliable
             
-            # --- 2. Baseline Alignment Prep ---
-            gt_len = len(batch.y)
-            pesto_val = None
-            p2rank_val = None
-            valid_sample = True
+            all_labels.append(batch.y.cpu().numpy())
+            all_probs_gated.append(probs_gated.cpu().numpy())
             
-            # --- 3. PeSTo Handling ---
-            if has_pesto:
-                pesto_path = os.path.join(pesto_folder, f"{current_id}.pdb")
-                # Fallback check
-                if not os.path.exists(pesto_path):
-                     pesto_path = os.path.join(pesto_folder, f"{current_id}_pesto.pdb")
-                
-                if os.path.exists(pesto_path):
-                    p_scores = load_pesto_scores(pesto_path)
-                    
-                    if p_scores is not None and len(p_scores) >= gt_len:
-                        pesto_val = p_scores[:gt_len] # Truncate if necessary
-                    else:
-                        # PeSTo mismatch (too short), skip this sample for fairness
-                        valid_sample = False
-                else:
-                    valid_sample = False # Missing PeSTo file
+    return np.concatenate(all_labels), np.concatenate(all_probs_gated)
 
-            # --- 4. P2Rank Handling ---
-            if has_p2rank and valid_sample:
-                # We need the Original PDB to map Residue IDs
-                # Assumption: PDB exists in PeSTo folder (it's the same PDB)
-                # OR we use the .pt file logic. Best is to use the PDB we used for PeSTo reading
-                # If no PDB available easily, we assume batch.residue_ids exists? 
-                # Let's rely on reading the PDB file from pesto_folder (which contains the PDBs)
-                
-                pdb_ref_path = os.path.join(pesto_folder, f"{current_id}.pdb")
-                if not os.path.exists(pdb_ref_path):
-                    # Try raw AF2 folder if pesto folder doesn't have it
-                    pdb_ref_path = os.path.join(af2_data_folder.replace("processed_af2", "raw_af2"), f"{current_id}.pdb")
+# ==========================================
+# 4. Main Evaluation Logic
+# ==========================================
+def evaluate_and_plot(ckpt_path_a, ckpt_path_d, af2_data_folder, pesto_folder=None, p2rank_folder=None):
+    BATCH_SIZE = 1
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # --- Load Data Iterator (Shared) ---
+    # 只需要加载一次数据集
+    test_dataset = SimpleFolderDataset(af2_data_folder)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    
+    # --- 1. Run Inference for Experiment A (Baseline) ---
+    print(f"\n--- Processing Experiment A (Baseline) ---")
+    y_true_a, y_probs_a = run_inference(ckpt_path_a, test_loader, device)
 
-                if os.path.exists(pdb_ref_path):
-                    # Get Mapping: Index -> "A_1"
-                    res_map = get_residue_ids_from_pdb(pdb_ref_path)
-                    
-                    # Ensure map length matches GT
-                    if len(res_map) >= gt_len:
-                         res_map = res_map[:gt_len]
-                         
-                         # Load CSV
-                         csv_name = f"{current_id}.pdb_predictions.csv" # Standard P2Rank output
-                         csv_path = os.path.join(p2rank_folder, csv_name)
-                         
-                         p2rank_val = load_p2rank_scores(csv_path, gt_len, res_map)
-                    else:
-                        # PDB parsing mismatch
-                        p2rank_val = np.zeros(gt_len)
+    # --- 2. Run Inference for Experiment D (ProtCross) ---
+    print(f"\n--- Processing Experiment D (ProtCross) ---")
+    y_true_d, y_probs_d = run_inference(ckpt_path_d, test_loader, device)
+    
+    # 确保标签一致
+    assert np.array_equal(y_true_a, y_true_d), "❌ Error: Data mismatch between runs!"
+    y_true = y_true_a # 使用其中一个作为 Ground Truth
+
+    # --- 3. Run Baselines (PeSTo / P2Rank) ---
+    # 这部分逻辑需要重新遍历 loader 来匹配 ID，或者更简单的，我们假设顺序一致
+    # 为了复用之前的逻辑，我们再跑一遍轻量级的循环来收集外部指标
+    
+    print("\n--- Collecting External Baselines (PeSTo/P2Rank) ---")
+    all_pesto = []
+    all_p2rank = []
+    valid_mask = [] # 用于记录哪些样本是有效的（PeSTo 对齐问题）
+    
+    has_pesto = pesto_folder and os.path.exists(pesto_folder)
+    has_p2rank = p2rank_folder and os.path.exists(p2rank_folder)
+    
+    for i, batch in enumerate(test_loader):
+        current_id = batch.pdb_id[0]
+        gt_len = len(batch.y)
+        
+        pesto_val = None
+        p2rank_val = None
+        is_valid = True
+        
+        # PeSTo
+        if has_pesto:
+            p_path = os.path.join(pesto_folder, f"{current_id}.pdb")
+            if not os.path.exists(p_path): p_path = os.path.join(pesto_folder, f"{current_id}_pesto.pdb")
+            if os.path.exists(p_path):
+                sc = load_pesto_scores(p_path)
+                if sc is not None and len(sc) >= gt_len:
+                    pesto_val = sc[:gt_len]
                 else:
-                    # Cannot map, default to 0
+                    is_valid = False
+            else:
+                is_valid = False
+        
+        # P2Rank
+        if has_p2rank and is_valid:
+            # 寻找原始 PDB 以获取 ID 映射
+            pdb_ref = os.path.join(pesto_folder, f"{current_id}.pdb") 
+            if not os.path.exists(pdb_ref):
+                pdb_ref = os.path.join(af2_data_folder.replace("processed_af2", "raw_af2"), f"{current_id}.pdb")
+            
+            if os.path.exists(pdb_ref):
+                res_map = get_residue_ids_from_pdb(pdb_ref)
+                if len(res_map) >= gt_len:
+                    res_map = res_map[:gt_len]
+                    csv_path = os.path.join(p2rank_folder, f"{current_id}.pdb_predictions.csv")
+                    p2rank_val = load_p2rank_scores(csv_path, gt_len, res_map)
+                else:
                     p2rank_val = np.zeros(gt_len)
+            else:
+                p2rank_val = np.zeros(gt_len)
+        
+        if is_valid:
+            valid_mask.append(True)
+            if has_pesto: all_pesto.append(pesto_val)
+            if has_p2rank: all_p2rank.append(p2rank_val)
+        else:
+            valid_mask.append(False)
 
-            # --- 5. Aggregation ---
-            # Only add if valid (mainly for PeSTo strict alignment)
-            if valid_sample:
-                all_labels.append(batch.y.cpu().numpy())
-                all_probs_raw.append(probs.cpu().numpy())
-                all_probs_gated.append(probs_gated.cpu().numpy())
-                
-                if has_pesto:
-                    all_probs_pesto.append(pesto_val)
-                if has_p2rank:
-                    all_probs_p2rank.append(p2rank_val)
+    # --- Data Filtering for Plotting ---
+    # 因为 PeSTo 可能导致某些样本不可用，我们需要过滤 y_true, y_probs_a, y_probs_d
+    # 这里的 mask 是样本级的 (batch 级)，我们需要将其扩展到残基级
+    # 但为了简化，我们可以假设所有样本都有效，或者只在画外部对比时过滤
+    # 更加严谨的做法：重新拼接所有数据
+    
+    # 简便起见：如果启用了 PeSTo，我们只取 PeSTo 有效的子集进行画图
+    if has_pesto:
+        # 重构 y_true / probs 为 list of arrays
+        list_y = []
+        list_a = []
+        list_d = []
+        idx_start = 0
+        
+        # 重新遍历以切分 array (因为之前 concat 了)
+        # 这比较麻烦，不如重新 run 一次 loader。
+        # 为了代码简洁，这里采用一种策略：
+        # 如果样本丢失很少，直接用全部数据的 A/D 和 仅有效数据的 PeSTo 对比（虽然有点不齐）
+        # 严谨做法：只画全部数据的 A/D。如果需要对比，另外画。
+        # 为了满足用户需求，我们假设数据都是对齐的（通常 benchmark 数据集也是清洗过的）。
+        pass
+    
+    # 最终数据拼接
+    y_pesto_flat = np.concatenate(all_pesto) if all_pesto else None
+    y_p2rank_flat = np.concatenate(all_p2rank) if all_p2rank else None
+    
+    # 如果 PeSTo 过滤了数据，我们需要对 A 和 D 也做同样的过滤，否则曲线没法比
+    if has_pesto and len(all_pesto) < len(test_loader):
+        print("⚠️  Warning: Aligning datasets to PeSTo valid samples...")
+        # 重新收集 A 和 D
+        filtered_a, filtered_d, filtered_y = [], [], []
+        curr_idx = 0
+        dataset_files = sorted(glob.glob(os.path.join(af2_data_folder, "*.pt")))
+        
+        for i, is_ok in enumerate(valid_mask):
+            # 加载该文件的大小
+            d = torch.load(dataset_files[i])
+            length = len(d['y']) if isinstance(d, dict) else len(d.y)
             
-            if i % 20 == 0:
-                print(f"Processing {i} / {len(test_loader)}...")
+            segment_y = y_true[curr_idx : curr_idx+length]
+            segment_a = y_probs_a[curr_idx : curr_idx+length]
+            segment_d = y_probs_d[curr_idx : curr_idx+length]
+            
+            if is_ok:
+                filtered_y.append(segment_y)
+                filtered_a.append(segment_a)
+                filtered_d.append(segment_d)
+            
+            curr_idx += length
+            
+        y_true = np.concatenate(filtered_y)
+        y_probs_a = np.concatenate(filtered_a)
+        y_probs_d = np.concatenate(filtered_d)
 
-    # Concatenate
-    y_true = np.concatenate(all_labels)
-    y_raw = np.concatenate(all_probs_raw)
-    y_gated = np.concatenate(all_probs_gated)
-    
-    y_pesto = np.concatenate(all_probs_pesto) if has_pesto and len(all_probs_pesto) > 0 else None
-    y_p2rank = np.concatenate(all_probs_p2rank) if has_p2rank and len(all_probs_p2rank) > 0 else None
-    
-    print("\nCalculating Metrics...")
+    print("\nCalculating Metrics & Plotting...")
 
     # ==========================================
-    # 4. Plotting
+    # 5. Plotting
     # ==========================================
     plt.rcParams.update({'font.size': 12, 'axes.linewidth': 1.5})
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7), dpi=300)
 
     # Colors
-    c_raw = '#95a5a6'   # Grey
-    c_ours = '#d35400'  # Orange
+    c_base = '#95a5a6'  # Grey (Baseline A)
+    c_ours = '#d35400'  # Orange (ProtCross D)
     c_pesto = '#27ae60' # Green
     c_p2 = '#2980b9'    # Blue
 
     # --- ROC ---
-    # Ours Raw
-    fpr_raw, tpr_raw, _ = roc_curve(y_true, y_raw)
-    ax1.plot(fpr_raw, tpr_raw, color=c_raw, ls='--', lw=1.5, label=f'PointNet++ with ESM (AUC={auc(fpr_raw, tpr_raw):.2f})')
+    # Exp A (Baseline)
+    fpr_a, tpr_a, _ = roc_curve(y_true, y_probs_a)
+    ax1.plot(fpr_a, tpr_a, color=c_base, ls='--', lw=2, label=f'Baseline (Pure Geom) (AUC={auc(fpr_a, tpr_a):.2f})')
     
+    # Exp D (ProtCross)
+    fpr_d, tpr_d, _ = roc_curve(y_true, y_probs_d)
+    ax1.plot(fpr_d, tpr_d, color=c_ours, lw=3, label=f'ProtCross (AUC={auc(fpr_d, tpr_d):.2f})')
+
     # PeSTo
-    if y_pesto is not None:
-        fpr_p, tpr_p, _ = roc_curve(y_true, y_pesto)
-        ax1.plot(fpr_p, tpr_p, color=c_pesto, lw=2.5, label=f'PeSTo (AUC={auc(fpr_p, tpr_p):.2f})')
+    if y_pesto_flat is not None:
+        fpr_p, tpr_p, _ = roc_curve(y_true, y_pesto_flat)
+        ax1.plot(fpr_p, tpr_p, color=c_pesto, lw=2.5, ls='-', alpha=0.8, label=f'PeSTo (AUC={auc(fpr_p, tpr_p):.2f})')
 
     # P2Rank
-    if y_p2rank is not None:
-        fpr_p2, tpr_p2, _ = roc_curve(y_true, y_p2rank)
-        ax1.plot(fpr_p2, tpr_p2, color=c_p2, lw=2.5, ls='-.', label=f'P2Rank (AUC={auc(fpr_p2, tpr_p2):.2f})')
-
-    # Ours Gated
-    fpr_g, tpr_g, _ = roc_curve(y_true, y_gated)
-    ax1.plot(fpr_g, tpr_g, color=c_ours, lw=3, label=f'ProtCross (AUC={auc(fpr_g, tpr_g):.2f})')
+    if y_p2rank_flat is not None:
+        fpr_p2, tpr_p2, _ = roc_curve(y_true, y_p2rank_flat)
+        ax1.plot(fpr_p2, tpr_p2, color=c_p2, lw=2.5, ls='-.', alpha=0.8, label=f'P2Rank (AUC={auc(fpr_p2, tpr_p2):.2f})')
     
     ax1.plot([0,1],[0,1], 'k:', alpha=0.5)
     ax1.set_xlabel('False Positive Rate')
     ax1.set_ylabel('True Positive Rate')
-    ax1.set_title('ROC Curve')
+    ax1.set_title(f'ROC Curve')
     ax1.legend(loc="lower right")
     ax1.grid(True, linestyle='--', alpha=0.5)
 
     # --- PR ---
-    # Ours Raw
-    p_raw, r_raw, _ = precision_recall_curve(y_true, y_raw)
-    ax2.plot(r_raw, p_raw, color=c_raw, ls='--', lw=1.5, label=f'Ours (Raw) (AP={average_precision_score(y_true, y_raw):.2f})')
+    # Exp A
+    p_a, r_a, _ = precision_recall_curve(y_true, y_probs_a)
+    ax2.plot(r_a, p_a, color=c_base, ls='--', lw=2, label=f'Baseline (Pure Geom) (AP={average_precision_score(y_true, y_probs_a):.2f})')
+
+    # Exp D
+    p_d, r_d, _ = precision_recall_curve(y_true, y_probs_d)
+    ax2.plot(r_d, p_d, color=c_ours, lw=3, label=f'ProtCross (AP={average_precision_score(y_true, y_probs_d):.2f})')
 
     # PeSTo
-    if y_pesto is not None:
-        p_p, r_p, _ = precision_recall_curve(y_true, y_pesto)
-        ax2.plot(r_p, p_p, color=c_pesto, lw=2.5, label=f'PeSTo (AP={average_precision_score(y_true, y_pesto):.2f})')
+    if y_pesto_flat is not None:
+        p_p, r_p, _ = precision_recall_curve(y_true, y_pesto_flat)
+        ax2.plot(r_p, p_p, color=c_pesto, lw=2.5, ls='-', alpha=0.8, label=f'PeSTo (AP={average_precision_score(y_true, y_pesto_flat):.2f})')
 
     # P2Rank
-    if y_p2rank is not None:
-        p_p2, r_p2, _ = precision_recall_curve(y_true, y_p2rank)
-        ax2.plot(r_p2, p_p2, color=c_p2, lw=2.5, ls='-.', label=f'P2Rank (AP={average_precision_score(y_true, y_p2rank):.2f})')
-
-    # Ours Gated
-    p_g, r_g, _ = precision_recall_curve(y_true, y_gated)
-    ax2.plot(r_g, p_g, color=c_ours, lw=3, label=f'ProtCross (AP={average_precision_score(y_true, y_gated):.2f})')
+    if y_p2rank_flat is not None:
+        p_p2, r_p2, _ = precision_recall_curve(y_true, y_p2rank_flat)
+        ax2.plot(r_p2, p_p2, color=c_p2, lw=2.5, ls='-.', alpha=0.8, label=f'P2Rank (AP={average_precision_score(y_true, y_p2rank_flat):.2f})')
 
     ax2.set_xlabel('Recall')
     ax2.set_ylabel('Precision')
@@ -344,49 +363,65 @@ def evaluate_and_plot(ckpt_path, af2_data_folder, pesto_folder=None, p2rank_fold
     ax2.grid(True, linestyle='--', alpha=0.5)
 
     plt.tight_layout()
-    plt.savefig('comparison_metrics.png')
-    print("✅ Plot saved to comparison_metrics.png")
+    plt.savefig('comparison_metrics_A_vs_D.png')
+    print("✅ Plot saved to comparison_metrics_A_vs_D.png")
 
     # ==========================================
-    # 5. Stats Table
+    # 6. Stats Table
     # ==========================================
-    print("\n" + "="*70)
-    print(f"{'Model':<20} | {'AUC':<6} | {'AP':<6} | {'Max F1':<8} | {'Threshold':<9} |")
-    print("-" * 70)
+    print("\n" + "="*80)
+    print(f"{'Model':<25} | {'AUC':<6} | {'AP':<6} | {'Max F1':<8} | {'Threshold':<9} |")
+    print("-" * 80)
     
-    # Ours Raw
-    bt, bf1 = find_best_threshold(y_true, y_raw)
-    print(f"{'Ours (Raw)':<20} | {auc(fpr_raw, tpr_raw):.4f} | {average_precision_score(y_true, y_raw):.4f} | {bf1:.4f}   | {bt:.2f}      |")
-    
-    # ProtCross
-    bt, bf1 = find_best_threshold(y_true, y_gated)
-    print(f"{'ProtCross (Gated)':<20} | {auc(fpr_g, tpr_g):.4f} | {average_precision_score(y_true, y_gated):.4f} | {bf1:.4f}   | {bt:.2f}      |")
+    def print_row(name, y_t, y_p):
+        auc_s = auc(roc_curve(y_t, y_p)[0], roc_curve(y_t, y_p)[1])
+        ap_s = average_precision_score(y_t, y_p)
+        bt, bf1 = find_best_threshold(y_t, y_p)
+        print(f"{name:<25} | {auc_s:.4f} | {ap_s:.4f} | {bf1:.4f}   | {bt:.2f}      |")
 
-    # PeSTo
-    if y_pesto is not None:
-        bt, bf1 = find_best_threshold(y_true, y_pesto)
-        print(f"{'PeSTo':<20} | {auc(fpr_p, tpr_p):.4f} | {average_precision_score(y_true, y_pesto):.4f} | {bf1:.4f}   | {bt:.2f}      |")
-
-    # P2Rank
-    if y_p2rank is not None:
-        bt, bf1 = find_best_threshold(y_true, y_p2rank)
-        print(f"{'P2Rank':<20} | {auc(fpr_p2, tpr_p2):.4f} | {average_precision_score(y_true, y_p2rank):.4f} | {bf1:.4f}   | {bt:.2f}      |")
+    print_row("Baseline (Exp A, Seed 42)", y_true, y_probs_a)
+    print_row("ProtCross (Exp D, Seed 42)", y_true, y_probs_d)
     
-    print("="*70)
+    if y_pesto_flat is not None:
+        print_row("PeSTo", y_true, y_pesto_flat)
+    if y_p2rank_flat is not None:
+        print_row("P2Rank", y_true, y_p2rank_flat)
+    
+    print("="*80)
+
+def find_ckpt(folder):
+    """在文件夹中查找 last.ckpt 或 best*.ckpt"""
+    # 优先找 last.ckpt
+    last = os.path.join(folder, "last.ckpt")
+    if os.path.exists(last): return last
+    
+    # 否则找 best
+    cands = glob.glob(os.path.join(folder, "*.ckpt"))
+    if cands: return cands[0] # 返回第一个
+    return None
 
 if __name__ == "__main__":
     # --- Configuration ---
     
-    # 1. Checkpoint
-    CKPT_PATH = "checkpoints/last.ckpt" 
+    # 1. 定义实验目录
+    DIR_A = "saved_weights/A_42"
+    DIR_D = "saved_weights/D_42"
+    
+    ckpt_a = find_ckpt(DIR_A)
+    ckpt_d = find_ckpt(DIR_D)
+    
+    if not ckpt_a:
+        print(f"❌ Error: Checkpoint not found in {DIR_A}")
+        sys.exit(1)
+    if not ckpt_d:
+        print(f"❌ Error: Checkpoint not found in {DIR_D}")
+        sys.exit(1)
 
     # 2. GT Data (.pt files)
     AF2_DATA_FOLDER = "data/processed_af2"
 
-    # 3. PeSTo Results (Folder containing .pdb files with B-factor)
+    # 3. PeSTo / P2Rank Results (Optional)
     PESTO_FOLDER = "data/PeSTo_results" 
-    
-    # 4. P2Rank Results (Folder containing .csv files)
     P2RANK_FOLDER = "data/p2rank_results"
 
-    evaluate_and_plot(CKPT_PATH, AF2_DATA_FOLDER, PESTO_FOLDER, P2RANK_FOLDER)
+    evaluate_and_plot(ckpt_a, ckpt_d, AF2_DATA_FOLDER, PESTO_FOLDER, P2RANK_FOLDER)
