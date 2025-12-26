@@ -4,10 +4,9 @@ import shutil
 import numpy as np
 import pandas as pd
 from collections import defaultdict
-import glob
+import glob  # 新增: 用于查找文件
 
-
-SEEDS = [42, 2025, 666]
+SEEDS = [42, 2025, 1]
 MAX_EPOCHS = 100
 
 EXPERIMENTS = [
@@ -34,12 +33,31 @@ EXPERIMENTS = [
 ]
 
 def clean_checkpoints():
+    """训练前清空临时目录，防止混淆"""
     if os.path.exists("checkpoints"):
         try:
             shutil.rmtree("checkpoints")
         except Exception as e:
             print(f"⚠️ Warning: Failed to clean checkpoints: {e}")
     os.makedirs("checkpoints", exist_ok=True)
+
+def backup_checkpoints(exp_id, seed):
+    """
+    [新增功能] 将训练好的权重备份到 saved_weights/ 目录
+    结构: saved_weights/A_42/best-epoch=xx.ckpt
+    """
+    backup_dir = os.path.join("saved_weights", f"{exp_id}_{seed}")
+    os.makedirs(backup_dir, exist_ok=True)
+    
+    # 查找 checkpoints 目录下的所有 .ckpt 文件
+    found = False
+    for ckpt in glob.glob(os.path.join("checkpoints", "*.ckpt")):
+        shutil.copy(ckpt, backup_dir)
+        print(f"📦 Backup: {ckpt} -> {backup_dir}/")
+        found = True
+    
+    if not found:
+        print(f"⚠️ Warning: No checkpoints found to backup for Exp {exp_id} Seed {seed}")
 
 def run_command(cmd, log_file):
     print(f"👉 Exec: {cmd}")
@@ -50,11 +68,13 @@ def run_command(cmd, log_file):
                 cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
             for line in process.stdout:
+                print(line, end="")
                 f.write(line)
                 output_buffer += line
             process.wait()
             if process.returncode != 0:
                 print(f"❌ Command failed with return code {process.returncode}")
+                # 打印最后几行错误日志
                 print("   [Last 5 lines of log]")
                 print("   " + "\n   ".join(output_buffer.splitlines()[-5:]))
     except Exception as e:
@@ -96,27 +116,33 @@ def main():
             exp_id = exp['id']
             print(f"[{current_run}/{total_runs}] Running Experiment {exp_id} (Seed {seed})...")
             
+            # 1. 清理临时权重目录 (准备开始新训练)
             clean_checkpoints()
             
             log_train = f"logs/benchmark/train_{exp_id}_seed_{seed}.txt"
             os.makedirs(os.path.dirname(log_train), exist_ok=True)
             
-            # === 🛠️ 关键修正：确保每个参数后面都有空格 ===
+            # 2. 训练
             train_cmd = " ".join([
                 "python train.py",
                 exp['args'],
                 f"+seed_everything={seed}",
                 f"trainer.max_epochs={MAX_EPOCHS}",
                 f"+trainer.default_root_dir=logs/benchmark/{exp_id}_{seed}",
-                "trainer.accelerator=cpu"
+                "trainer.accelerator=cpu" # 如果有GPU请改为 gpu
             ])
-            
             run_command(train_cmd, log_train)
             
+            # 3. 测试
             log_test = f"logs/benchmark/test_{exp_id}_seed_{seed}.txt"
             test_cmd = "python test_adaptive.py" 
             test_output = run_command(test_cmd, log_test)
             
+            # 4. [修改点] 备份权重！
+            # 必须在 clean_checkpoints 之前 (即下一次循环开始前) 执行
+            backup_checkpoints(exp_id, seed)
+
+            # 5. 记录结果
             m = parse_metrics(test_output)
             results[exp_id].append(m)
             print(f"✅ Exp {exp_id} (Seed {seed}) Result: IoU={m['Overall_IoU']}% (Thresh={m['Best_Threshold']})")
@@ -140,8 +166,7 @@ def main():
         thresh_str = fmt_stat(exp['id'], 'Best_Threshold')
         print(f"| {exp['id']} | {exp['name']} | **{iou_str}** | {thresh_str} |")
 
-    print("\n✅ Done.")
+    print("\n✅ Done. All weights saved to 'saved_weights/' directory.")
 
 if __name__ == "__main__":
     main()
-
