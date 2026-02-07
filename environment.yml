@@ -10,7 +10,6 @@ dependencies:
   - torchvision
   - torchaudio
   - pytorch-cuda=12.1
-  
 
   - numpy
   - pandas
@@ -21,13 +20,14 @@ dependencies:
   - pytorch-lightning
   - hydra-core
   - wandb
-  
 
   - pip
   - pip:
       - --find-links https://data.pyg.org/whl/torch-2.3.0+cu121.html
       
-      - fair-esm
+      - esm>=3.1.0
+      - huggingface-hub
+      
       - torch-geometric>=2.5.0
       - pyg_lib
       - torch_scatter
