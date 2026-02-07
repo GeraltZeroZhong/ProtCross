@@ -4,6 +4,7 @@ import sys
 import glob
 import json
 import numpy as np
+import pandas as pd 
 from tqdm import tqdm
 from Bio.PDB import Superimposer, Atom
 from Bio.Align import PairwiseAligner
@@ -40,7 +41,6 @@ def get_sequence_and_indices(parser, raw_path):
             seq = seq[:MAX_LEN]
         return seq, parsed
     except Exception as e:
-        # print(f"Error parsing {raw_path}: {e}")
         return None, None
 
 def robust_align_and_map(af2_data, pdb_data, af2_seq, pdb_seq, threshold=4.0):
@@ -54,8 +54,6 @@ def robust_align_and_map(af2_data, pdb_data, af2_seq, pdb_seq, threshold=4.0):
     aligner.open_gap_score = -10.0  
     aligner.extend_gap_score = -0.5
     
-    # [API 修复]：使用新版 Biopython 属性设置末端空位免费 (Semiglobal)
-    # 这消除了 DeprecationWarning
     aligner.target_end_open_gap_score = 0.0
     aligner.target_end_extend_gap_score = 0.0
     aligner.query_end_open_gap_score = 0.0
@@ -73,7 +71,6 @@ def robust_align_and_map(af2_data, pdb_data, af2_seq, pdb_seq, threshold=4.0):
     af2_indices = []
     pdb_indices = []
     
-    # 使用 aligned 属性获取对齐片段
     aligned_af2 = alignment.aligned[0]
     aligned_pdb = alignment.aligned[1]
     
@@ -130,23 +127,21 @@ def find_file_robust(directory, pattern_lower, pattern_upper):
     return []
 
 def main():
-    # ==========================================
-    # ⚙️ 路径设置
-    # ==========================================
+
     processed_pdb_dir = "./data/processed_pdb"
     processed_af2_dir = "./data/processed_af2"
     raw_pdb_dir = "./data/raw_pdb" 
     raw_af2_dir = "./data/raw_af2" 
     mapping_file = "./pdb_uniprot_mapping.json"
     DIST_THRESHOLD = 4.0 
+    OUTPUT_CSV = "mapping_report.csv"  
 
-    # === 路径检查 ===
     print(f"Checking directories...")
     if not os.path.exists(raw_pdb_dir):
-        print(f"❌ Error: Raw PDB directory not found: {raw_pdb_dir}")
+        print(f" Error: Raw PDB directory not found: {raw_pdb_dir}")
         return
     if not os.path.exists(raw_af2_dir):
-        print(f"❌ Error: Raw AF2 directory not found: {raw_af2_dir}")
+        print(f" Error: Raw AF2 directory not found: {raw_af2_dir}")
         return
 
     parser = StructureParser()
@@ -161,7 +156,14 @@ def main():
     af2_files = glob.glob(os.path.join(processed_af2_dir, "*.pt"))
     print(f"Scanning {len(af2_files)} processed AF2 files...")
     
-    stats = {"matched": 0, "failed": 0, "skip": 0}
+
+    stats = {
+        "matched": 0, "failed": 0, "skip": 0,
+        "total_pdb_sites": 0,
+        "mapped_af2_sites": 0,
+        "high_rmsd_drops": 0
+    }
+    
     debug_limit = 5
     debug_count = 0
 
@@ -182,7 +184,6 @@ def main():
             
         pdb_pt_path = os.path.join(processed_pdb_dir, f"{target_pdb_id}.pt")
         
-        # 查找原始文件 (兼容大小写)
         raw_af2_candidates = find_file_robust(raw_af2_dir, f"*{current_uid}*.pdb", f"*{current_uid.upper()}*.pdb")
         raw_pdb_candidates = find_file_robust(raw_pdb_dir, f"{target_pdb_id}.pdb", f"{target_pdb_id.upper()}.pdb")
         if not raw_pdb_candidates:
@@ -196,7 +197,7 @@ def main():
         if missing:
             stats["skip"] += 1
             if debug_count < debug_limit:
-                print(f"⚠️  Skip {basename}: Missing {missing}")
+                print(f"️Skip {basename}: Missing {missing}")
                 debug_count += 1
             continue
             
@@ -222,23 +223,64 @@ def main():
                 af2_data, pdb_data, af2_seq, pdb_seq, threshold=DIST_THRESHOLD
             )
             
-            if new_labels is not None and new_labels.sum() > 0:
-                af2_data['y'] = new_labels
-                torch.save(af2_data, af2_pt_path)
-                stats["matched"] += 1
+            if msg.startswith("High RMSD"):
+                stats["high_rmsd_drops"] += 1
+
+            if new_labels is not None:
+                n_pdb_pos = (pdb_data['y'] > 0.5).sum().item()
+                n_af2_pos = new_labels.sum().item()
+                
+                stats["total_pdb_sites"] += int(n_pdb_pos)
+                stats["mapped_af2_sites"] += int(n_af2_pos)
+                
+                if n_af2_pos > 0:
+                    af2_data['y'] = new_labels
+                    torch.save(af2_data, af2_pt_path)
+                    stats["matched"] += 1
+                else:
+                    stats["failed"] += 1
             else:
                 stats["failed"] += 1
-                # 可以在这里取消注释以查看失败原因
-                print(f"❌ {basename}: {msg}")
                 
         except Exception as e:
             print(f"Error {basename}: {e}")
             stats["failed"] += 1
 
-    print(f"\n✅ Processing Complete.")
-    print(f"   Matches Saved : {stats['matched']}")
-    print(f"   Skipped       : {stats['skip']}")
-    print(f"   Failed        : {stats['failed']}")
+    # === 计算派生指标 ===
+    total_samples = stats['matched'] + stats['failed'] + stats['skip']
+    success_rate = stats['matched'] / total_samples if total_samples > 0 else 0.0
+    
+    if stats["total_pdb_sites"] > 0:
+        loss_rate = 1 - (stats["mapped_af2_sites"] / stats["total_pdb_sites"])
+    else:
+        loss_rate = 0.0
+
+    # === 打印报告 ===
+    print(f"\n Processing Complete.")
+    print("\n" + "="*40)
+    print(" Mapping Statistics & Bias Report")
+    print("="*40)
+    print(f"Alignment Success Rate : {success_rate:.2%}")
+    print(f"High RMSD Exclusions : {stats['high_rmsd_drops']} proteins")
+    print(f"Label Loss Rate      : {loss_rate:.2%}")
+    print(f"Mapped/Total Sites   : {stats['mapped_af2_sites']}/{stats['total_pdb_sites']}")
+
+    # === 保存 CSV ===
+    report_data = {
+        "Total_Samples": [total_samples],
+        "Matched_Proteins": [stats['matched']],
+        "Failed_Proteins": [stats['failed']],
+        "Skipped_Proteins": [stats['skip']],
+        "Success_Rate": [success_rate],
+        "High_RMSD_Drops": [stats['high_rmsd_drops']],
+        "Total_PDB_Sites": [stats['total_pdb_sites']],
+        "Mapped_AF2_Sites": [stats['mapped_af2_sites']],
+        "Label_Loss_Rate": [loss_rate]
+    }
+    
+    df = pd.DataFrame(report_data)
+    df.to_csv(OUTPUT_CSV, index=False)
+    print(f"\n Report saved to: {OUTPUT_CSV}")
 
 if __name__ == "__main__":
     main()
