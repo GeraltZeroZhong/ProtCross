@@ -38,13 +38,13 @@ class EvoPointDALitModule(pl.LightningModule):
     def __init__(self, 
                  lr: float = 3e-4, 
                  weight_decay: float = 1e-4,
-                 da_weight: float = 0.2,      # [Run 10 Fix] Back to 0.5 (Strong but stable)
+                 da_weight: float = 0.2,      
                  feature_dim: int = 128,
-                 pos_noise: float = 0.08,     # Keep low noise
+                 pos_noise: float = 0.08,    
                  # --- Experimental Flags ---
-                 use_esm: bool = True,        # Table 1/2: Use ESM features?
-                 use_da: bool = True,         # Table 2: Use Domain Adaptation?
-                 use_plddt_weight: bool = True # Table 2: Use pLDDT weighting?
+                 use_esm: bool = True,        
+                 use_da: bool = True,         
+                 use_plddt_weight: bool = True 
                  ):
         super().__init__()
         self.save_hyperparameters()
@@ -161,15 +161,9 @@ class EvoPointDALitModule(pl.LightningModule):
         logits = self.seg_head(feats)
         probs = torch.softmax(logits, dim=1)[:, 1]
         
-        # [Run 10 Final Logic] "The Best of Both Worlds"
-        # 1. Training used Strong DA (0.5) to align features.
-        # 2. Testing uses Filter (0.65) to kill remaining noise.
-        # This combination should yield the highest IoU > 22%.
         
-        p = self._normalize_plddt(batch.plddt).squeeze()
-        is_reliable = (p > 0.65)
-        
-        preds = ((probs > 0.35) & is_reliable).long() 
+        p = self._normalize_plddt(batch.plddt).squeeze() 
+        preds = (probs > 0.35).long() 
         
         # Metrics
         self.test_iou(preds, batch.y)
