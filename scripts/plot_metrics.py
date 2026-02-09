@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, f1_score
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
 from torch_geometric.data import Dataset, Data
 from torch_geometric.loader import DataLoader
 import sys
@@ -9,6 +9,7 @@ import os
 import glob
 import pandas as pd
 import warnings
+from tqdm import tqdm
 
 # 忽略警告
 warnings.filterwarnings("ignore")
@@ -18,9 +19,61 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from src.evopoint_da.models.module import EvoPointDALitModule
 
 # ==========================================
-# 1. Helpers: Data Parsers (保持不变)
+# 1. Custom Dataset for Evaluation
 # ==========================================
+class EvalDataset(Dataset):
+    """
+    专门用于评估的 Dataset。
+    1. 不使用缓存 (InMemory)，直接读取文件，方便获取 pdb_id。
+    2. 保留 pdb_id 用于匹配 external baselines (PeSTo/P2Rank)。
+    """
+    def __init__(self, root, split="test"):
+        super().__init__()
+        self.root = root
+        
+        # 扫描所有 .pt 文件
+        all_files = sorted(glob.glob(os.path.join(root, "*.pt")))
+        num = len(all_files)
+        
+        if num == 0:
+            self.files = []
+        elif split == "train":
+            self.files = all_files[:int(num*0.8)]
+        elif split == "val":
+            self.files = all_files[int(num*0.8):int(num*0.9)]
+        elif split == "test":
+            self.files = all_files # Test 模式默认加载全部，或按需 files[int(num*0.9):]
+        else:
+            self.files = all_files 
+            
+        print(f"[{split}] Loaded {len(self.files)} files from {root}")
 
+    def len(self):
+        return len(self.files)
+
+    def get(self, idx):
+        file_path = self.files[idx]
+        try:
+            payload = torch.load(file_path)
+        except Exception as e:
+            print(f"Error loading {file_path}: {e}")
+            return Data() # Return empty data to avoid crash
+            
+        if isinstance(payload, dict):
+            data = Data(**payload)
+        else:
+            data = payload
+            
+        # [关键] 强制添加 pdb_id
+        filename = os.path.basename(file_path)
+        pdb_id = os.path.splitext(filename)[0]
+        data.pdb_id = pdb_id
+        
+        return data
+
+# ==========================================
+# 2. Helpers: Data Parsers
+# ==========================================
 def get_residue_ids_from_pdb(pdb_path):
     res_ids = []
     seen = set()
@@ -36,31 +89,25 @@ def get_residue_ids_from_pdb(pdb_path):
                         res_ids.append(unique_id)
                         seen.add(unique_id)
         return res_ids
-    except Exception as e:
-        print(f"⚠️ Failed to parse PDB residues for {pdb_path}: {e}")
-        return []
+    except: return []
 
 def load_pesto_scores(pdb_path):
     scores = []
-    seen_residues = set()
+    seen = set()
     try:
         with open(pdb_path, 'r') as f:
             for line in f:
                 if line.startswith(('ATOM', 'HETATM')):
-                    res_seq_id = line[22:27].strip()
-                    chain_id = line[21]
-                    unique_res_id = f"{chain_id}_{res_seq_id}"
-                    if unique_res_id not in seen_residues:
+                    res_seq = line[22:27].strip()
+                    chain = line[21]
+                    uid = f"{chain}_{res_seq}"
+                    if uid not in seen:
                         try:
-                            b_factor = float(line[60:66].strip())
-                            scores.append(b_factor)
-                            seen_residues.add(unique_res_id)
-                        except ValueError:
-                            continue
+                            scores.append(float(line[60:66].strip()))
+                            seen.add(uid)
+                        except: continue
         return np.array(scores)
-    except Exception as e:
-        print(f"⚠️ Warning: Failed to parse PeSTo PDB {pdb_path}: {e}")
-        return None
+    except: return None
 
 def load_p2rank_scores(csv_path, target_len, residue_ids_map):
     scores = np.zeros(target_len)
@@ -76,352 +123,344 @@ def load_p2rank_scores(csv_path, target_len, residue_ids_map):
                     idx = residue_ids_map.index(target_id)
                     scores[idx] = max(scores[idx], prob)
         return scores
-    except Exception as e:
-        return np.zeros(target_len)
-
-def find_best_threshold(y_true, y_prob):
-    best_f1 = 0
-    best_thresh = 0.5
-    for thresh in np.arange(0.1, 1.0, 0.05):
-        y_pred = (y_prob > thresh).astype(int)
-        score = f1_score(y_true, y_pred)
-        if score > best_f1:
-            best_f1 = score
-            best_thresh = thresh
-    return best_thresh, best_f1
+    except: return np.zeros(target_len)
 
 # ==========================================
-# 2. Dataset Loader
+# 3. Checkpoint Scanner
 # ==========================================
-class SimpleFolderDataset(Dataset):
-    def __init__(self, folder_path):
-        super().__init__()
-        self.folder_path = folder_path
-        self.file_list = sorted(glob.glob(os.path.join(folder_path, "*.pt")))
-        if len(self.file_list) == 0:
-            raise RuntimeError(f"❌ Error: No .pt files found in '{folder_path}'")
-        else:
-            print(f"✅ Loaded {len(self.file_list)} files from {folder_path}")
+def get_grouped_checkpoints(root_dir):
+    """
+    扫描 saved_weights，将实验分为 'A' (Baseline) 和 'D' (ProtCross) 两组
+    """
+    if not os.path.exists(root_dir):
+        print(f"❌ Error: {root_dir} not found.")
+        return {'A': [], 'D': []}
 
-    def len(self):
-        return len(self.file_list)
-
-    def get(self, idx):
-        payload = torch.load(self.file_list[idx])
-        if isinstance(payload, dict):
-            data = Data(**payload)
-        else:
-            data = payload
-        filename = os.path.basename(self.file_list[idx])
-        data.pdb_id = os.path.splitext(filename)[0] 
-        return data
+    groups = {'A': [], 'D': []}
+    subdirs = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
+    
+    print(f"📂 Scanning {len(subdirs)} folders in '{root_dir}'...")
+    
+    for folder_name in subdirs:
+        folder_path = os.path.join(root_dir, folder_name)
+        
+        # 找 ckpt
+        target_ckpt = os.path.join(folder_path, "last.ckpt")
+        if not os.path.exists(target_ckpt):
+            cands = glob.glob(os.path.join(folder_path, "*.ckpt"))
+            if cands: target_ckpt = cands[0]
+            else: continue
+        
+        # 分组
+        if folder_name.startswith("A_"):
+            groups['A'].append(target_ckpt)
+        elif folder_name.startswith("D_"):
+            groups['D'].append(target_ckpt)
+            
+    print(f"   ✅ Found {len(groups['A'])} checkpoints for Baseline (A)")
+    print(f"   ✅ Found {len(groups['D'])} checkpoints for ProtCross (D)")
+    return groups
 
 # ==========================================
-# 3. Inference Helper
+# 4. Inference Engine
 # ==========================================
 def run_inference(ckpt_path, loader, device='cuda'):
-    """加载特定模型并在数据加载器上运行推理"""
-    print(f"\n🚀 Loading Model: {ckpt_path}")
+    """运行单个模型的推理"""
     try:
+        import logging
+        logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+        
         model = EvoPointDALitModule.load_from_checkpoint(ckpt_path)
         model.eval()
         model.to(device)
     except Exception as e:
-        print(f"❌ Error loading checkpoint {ckpt_path}: {e}")
-        sys.exit(1)
+        print(f"❌ Error loading {os.path.basename(ckpt_path)}: {e}")
+        return None, None
 
-    all_labels = []
-    all_probs_gated = [] # 我们主要关注 Gated (Confidence-Aware) 结果，或者是 Raw
-    
-    # 对于 Experiment A (Baseline)，它可能没有训练 pLDDT weight，但推理时可以用 pLDDT 过滤
-    # 为了公平对比，我们统一提取 Gated 结果，或者也可以提取 Raw。
-    # 这里我们提取 Gated，因为这是 ProtCross 的核心卖点。
+    all_y = []
+    all_p = []
     
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
+            # 兼容处理
+            src_x = batch.x if hasattr(model.hparams, 'use_esm') and model.hparams.use_esm else None
             
-            # Forward
-            src_x = batch.x if model.hparams.use_esm else None
             feats, _ = model.backbone(src_x, batch.pos, batch.batch)
             logits = model.seg_head(feats)
             probs = torch.softmax(logits, dim=1)[:, 1]
             
-            # Confidence Gating Logic
-            if hasattr(model, '_normalize_plddt'):
-                p = model._normalize_plddt(batch.plddt).squeeze()
-            else:
-                p = batch.plddt.squeeze() / 100.0
+            all_y.append(batch.y.cpu().numpy())
+            all_p.append(probs.cpu().numpy())
             
-            is_reliable = (p > 0.65).float()
-            probs_gated = probs * is_reliable
-            
-            all_labels.append(batch.y.cpu().numpy())
-            all_probs_gated.append(probs_gated.cpu().numpy())
-            
-    return np.concatenate(all_labels), np.concatenate(all_probs_gated)
+    return np.concatenate(all_y), np.concatenate(all_p)
 
 # ==========================================
-# 4. Main Evaluation Logic
+# 5. Statistical Aggregator (Fixed)
 # ==========================================
-def evaluate_and_plot(ckpt_path_a, ckpt_path_d, af2_data_folder, pesto_folder=None, p2rank_folder=None):
-    BATCH_SIZE = 1
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+def aggregate_roc_results(ckpt_list, loader, device):
+    """收集多个模型的 ROC 数据并计算 Mean ± Std"""
+    tprs = []
+    aucs = []
+    mean_fpr = np.linspace(0, 1, 100)
     
-    # --- Load Data Iterator (Shared) ---
-    # 只需要加载一次数据集
-    test_dataset = SimpleFolderDataset(af2_data_folder)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-    
-    # --- 1. Run Inference for Experiment A (Baseline) ---
-    print(f"\n--- Processing Experiment A (Baseline) ---")
-    y_true_a, y_probs_a = run_inference(ckpt_path_a, test_loader, device)
-
-    # --- 2. Run Inference for Experiment D (ProtCross) ---
-    print(f"\n--- Processing Experiment D (ProtCross) ---")
-    y_true_d, y_probs_d = run_inference(ckpt_path_d, test_loader, device)
-    
-    # 确保标签一致
-    assert np.array_equal(y_true_a, y_true_d), "❌ Error: Data mismatch between runs!"
-    y_true = y_true_a # 使用其中一个作为 Ground Truth
-
-    # --- 3. Run Baselines (PeSTo / P2Rank) ---
-    # 这部分逻辑需要重新遍历 loader 来匹配 ID，或者更简单的，我们假设顺序一致
-    # 为了复用之前的逻辑，我们再跑一遍轻量级的循环来收集外部指标
-    
-    print("\n--- Collecting External Baselines (PeSTo/P2Rank) ---")
-    all_pesto = []
-    all_p2rank = []
-    valid_mask = [] # 用于记录哪些样本是有效的（PeSTo 对齐问题）
-    
-    has_pesto = pesto_folder and os.path.exists(pesto_folder)
-    has_p2rank = p2rank_folder and os.path.exists(p2rank_folder)
-    
-    for i, batch in enumerate(test_loader):
-        current_id = batch.pdb_id[0]
-        gt_len = len(batch.y)
+    pbar = tqdm(ckpt_list, desc="Aggregating ROC", leave=False)
+    for ckpt in pbar:
+        y_true, y_score = run_inference(ckpt, loader, device)
+        if y_true is None: continue
         
-        pesto_val = None
-        p2rank_val = None
-        is_valid = True
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        roc_auc = auc(fpr, tpr)
+        aucs.append(roc_auc)
+        
+        # [Fix] 去重 FPR 以避免插值错误
+        _, unique_indices = np.unique(fpr, return_index=True)
+        fpr_unique = fpr[unique_indices]
+        tpr_unique = tpr[unique_indices]
+
+        interp_tpr = np.interp(mean_fpr, fpr_unique, tpr_unique)
+        interp_tpr[0] = 0.0
+        tprs.append(interp_tpr)
+        
+    mean_tpr = np.mean(tprs, axis=0)
+    mean_tpr[-1] = 1.0
+    std_tpr = np.std(tprs, axis=0)
+    mean_auc = np.mean(aucs)
+    std_auc = np.std(aucs)
+    
+    return mean_fpr, mean_tpr, std_tpr, mean_auc, std_auc
+
+def aggregate_pr_results(ckpt_list, loader, device):
+    """收集多个模型的 PR 数据并计算 Mean ± Std (修复起点问题)"""
+    precs = []
+    aps = []
+    mean_recall = np.linspace(0, 1, 100)
+    
+    pbar = tqdm(ckpt_list, desc="Aggregating PR", leave=False)
+    for ckpt in pbar:
+        y_true, y_score = run_inference(ckpt, loader, device)
+        if y_true is None: continue
+        
+        precision, recall, _ = precision_recall_curve(y_true, y_score)
+        ap = average_precision_score(y_true, y_score)
+        aps.append(ap)
+        
+        # 1. 翻转为升序 recall
+        recall_rev = recall[::-1]
+        precision_rev = precision[::-1]
+        
+        # 2. [关键修复] 去重
+        _, unique_indices = np.unique(recall_rev, return_index=True)
+        recall_unique = recall_rev[unique_indices]
+        precision_unique = precision_rev[unique_indices]
+        
+        # 3. [关键修复] 强制起点 (Recall=0 -> Precision=1)
+        if recall_unique[0] == 0:
+            precision_unique[0] = 1.0
+            
+        interp_prec = np.interp(mean_recall, recall_unique, precision_unique)
+        precs.append(interp_prec)
+        
+    mean_prec = np.mean(precs, axis=0)
+    std_prec = np.std(precs, axis=0)
+    mean_ap = np.mean(aps)
+    std_ap = np.std(aps)
+    
+    return mean_recall, mean_prec, std_prec, mean_ap, std_ap
+
+# ==========================================
+# 6. External Baselines
+# ==========================================
+def get_external_baselines(loader, pesto_dir, p2rank_dir, af2_dir):
+    """收集 PeSTo 和 P2Rank 的结果"""
+    # 检查是否有数据
+    if len(loader.dataset) == 0: return None, None, None
+    sample = loader.dataset[0]
+    if not hasattr(sample, 'pdb_id'): 
+        print("⚠️ Warning: No 'pdb_id' in dataset. Skipping external baselines.")
+        return None, None, None
+
+    y_true_all = []
+    pesto_scores = []
+    p2rank_scores = []
+    
+    has_pesto = pesto_dir and os.path.exists(pesto_dir)
+    has_p2rank = p2rank_dir and os.path.exists(p2rank_dir)
+    
+    print("   Running External Baselines...")
+    for batch in tqdm(loader, desc="Ext Baselines", leave=False):
+        # 处理 batch (batch_size=1)
+        if isinstance(batch.pdb_id, list): pid = batch.pdb_id[0]
+        else: pid = batch.pdb_id
+        
+        y_true = batch.y.numpy()
+        gt_len = len(y_true)
+        y_true_all.append(y_true)
         
         # PeSTo
         if has_pesto:
-            p_path = os.path.join(pesto_folder, f"{current_id}.pdb")
-            if not os.path.exists(p_path): p_path = os.path.join(pesto_folder, f"{current_id}_pesto.pdb")
-            if os.path.exists(p_path):
-                sc = load_pesto_scores(p_path)
-                if sc is not None and len(sc) >= gt_len:
-                    pesto_val = sc[:gt_len]
-                else:
-                    is_valid = False
-            else:
-                is_valid = False
-        
+            p_path = os.path.join(pesto_dir, f"{pid}_i3.pdb")
+            if not os.path.exists(p_path): p_path = os.path.join(pesto_dir, f"{pid}.pdb")
+            sc = load_pesto_scores(p_path)
+            if sc is not None and len(sc) >= gt_len: pesto_scores.append(sc[:gt_len])
+            else: pesto_scores.append(np.zeros(gt_len))
+            
         # P2Rank
-        if has_p2rank and is_valid:
-            # 寻找原始 PDB 以获取 ID 映射
-            pdb_ref = os.path.join(pesto_folder, f"{current_id}.pdb") 
-            if not os.path.exists(pdb_ref):
-                pdb_ref = os.path.join(af2_data_folder.replace("processed_af2", "raw_af2"), f"{current_id}.pdb")
+        if has_p2rank:
+            raw_pdb = os.path.join(af2_dir.replace("processed_af2", "raw_af2"), f"{pid}.pdb")
+            if not os.path.exists(raw_pdb): raw_pdb = os.path.join(pesto_dir, f"{pid}.pdb")
+            res_map = get_residue_ids_from_pdb(raw_pdb)
             
-            if os.path.exists(pdb_ref):
-                res_map = get_residue_ids_from_pdb(pdb_ref)
-                if len(res_map) >= gt_len:
-                    res_map = res_map[:gt_len]
-                    csv_path = os.path.join(p2rank_folder, f"{current_id}.pdb_predictions.csv")
-                    p2rank_val = load_p2rank_scores(csv_path, gt_len, res_map)
-                else:
-                    p2rank_val = np.zeros(gt_len)
+            csv_path = os.path.join(p2rank_dir, f"{pid}.pdb_predictions.csv")
+            if res_map and len(res_map) >= gt_len:
+                sc = load_p2rank_scores(csv_path, gt_len, res_map[:gt_len])
+                p2rank_scores.append(sc)
             else:
-                p2rank_val = np.zeros(gt_len)
-        
-        if is_valid:
-            valid_mask.append(True)
-            if has_pesto: all_pesto.append(pesto_val)
-            if has_p2rank: all_p2rank.append(p2rank_val)
-        else:
-            valid_mask.append(False)
+                p2rank_scores.append(np.zeros(gt_len))
 
-    # --- Data Filtering for Plotting ---
-    # 因为 PeSTo 可能导致某些样本不可用，我们需要过滤 y_true, y_probs_a, y_probs_d
-    # 这里的 mask 是样本级的 (batch 级)，我们需要将其扩展到残基级
-    # 但为了简化，我们可以假设所有样本都有效，或者只在画外部对比时过滤
-    # 更加严谨的做法：重新拼接所有数据
+    y_cat = np.concatenate(y_true_all)
+    p_cat = np.concatenate(pesto_scores) if pesto_scores else None
+    p2_cat = np.concatenate(p2rank_scores) if p2rank_scores else None
     
-    # 简便起见：如果启用了 PeSTo，我们只取 PeSTo 有效的子集进行画图
-    if has_pesto:
-        # 重构 y_true / probs 为 list of arrays
-        list_y = []
-        list_a = []
-        list_d = []
-        idx_start = 0
-        
-        # 重新遍历以切分 array (因为之前 concat 了)
-        # 这比较麻烦，不如重新 run 一次 loader。
-        # 为了代码简洁，这里采用一种策略：
-        # 如果样本丢失很少，直接用全部数据的 A/D 和 仅有效数据的 PeSTo 对比（虽然有点不齐）
-        # 严谨做法：只画全部数据的 A/D。如果需要对比，另外画。
-        # 为了满足用户需求，我们假设数据都是对齐的（通常 benchmark 数据集也是清洗过的）。
-        pass
-    
-    # 最终数据拼接
-    y_pesto_flat = np.concatenate(all_pesto) if all_pesto else None
-    y_p2rank_flat = np.concatenate(all_p2rank) if all_p2rank else None
-    
-    # 如果 PeSTo 过滤了数据，我们需要对 A 和 D 也做同样的过滤，否则曲线没法比
-    if has_pesto and len(all_pesto) < len(test_loader):
-        print("⚠️  Warning: Aligning datasets to PeSTo valid samples...")
-        # 重新收集 A 和 D
-        filtered_a, filtered_d, filtered_y = [], [], []
-        curr_idx = 0
-        dataset_files = sorted(glob.glob(os.path.join(af2_data_folder, "*.pt")))
-        
-        for i, is_ok in enumerate(valid_mask):
-            # 加载该文件的大小
-            d = torch.load(dataset_files[i])
-            length = len(d['y']) if isinstance(d, dict) else len(d.y)
-            
-            segment_y = y_true[curr_idx : curr_idx+length]
-            segment_a = y_probs_a[curr_idx : curr_idx+length]
-            segment_d = y_probs_d[curr_idx : curr_idx+length]
-            
-            if is_ok:
-                filtered_y.append(segment_y)
-                filtered_a.append(segment_a)
-                filtered_d.append(segment_d)
-            
-            curr_idx += length
-            
-        y_true = np.concatenate(filtered_y)
-        y_probs_a = np.concatenate(filtered_a)
-        y_probs_d = np.concatenate(filtered_d)
+    return y_cat, p_cat, p2_cat
 
-    print("\nCalculating Metrics & Plotting...")
+# ==========================================
+# 7. Main Logic
+# ==========================================
+def main():
+    # --- Config ---
+    WEIGHTS_DIR = "saved_weights"
+    AF2_DATA = "data/processed_af2"
+    PESTO_DIR = "data/PeSTo_results"
+    P2RANK_DIR = "data/p2rank_results"
+    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # 1. Load Dataset
+    print(f"📦 Loading Dataset from {AF2_DATA}...")
+    try:
+        ds = EvalDataset(root=AF2_DATA, split="test")
+        if len(ds) == 0: raise ValueError("Empty split")
+    except:
+        print("   ⚠️ Test split empty or failed, trying ALL files.")
+        ds = EvalDataset(root=AF2_DATA, split="all")
+    
+    loader = DataLoader(ds, batch_size=1, shuffle=False)
+    
+    # 2. Group Checkpoints
+    groups = get_grouped_checkpoints(WEIGHTS_DIR)
+    if not groups['A'] and not groups['D']:
+        print("❌ No checkpoints found.")
+        return
 
-    # ==========================================
+    # 3. Calculate Stats
+    stats = {}
+    print_table_rows = []
+
+    for name, label in [('A', 'Baseline'), ('D', 'ProtCross')]:
+        if not groups[name]: continue
+        print(f"\n📈 Processing {label} ({len(groups[name])} runs)...")
+        
+        # ROC Stats
+        fpr, tpr, tpr_std, auc_m, auc_s = aggregate_roc_results(groups[name], loader, device)
+        # PR Stats
+        rec, prec, prec_std, ap_m, ap_s = aggregate_pr_results(groups[name], loader, device)
+        
+        stats[name] = {
+            'roc': (fpr, tpr, tpr_std, auc_m, auc_s),
+            'pr': (rec, prec, prec_std, ap_m, ap_s)
+        }
+        
+        print_table_rows.append({
+            "Model": label,
+            "AUC": f"{auc_m:.4f} ± {auc_s:.4f}",
+            "AP": f"{ap_m:.4f} ± {ap_s:.4f}"
+        })
+
+    # 4. External Baselines
+    y_ext, p_ext, p2_ext = get_external_baselines(loader, PESTO_DIR, P2RANK_DIR, AF2_DATA)
+    if p_ext is not None:
+        p_auc = auc(roc_curve(y_ext, p_ext)[0], roc_curve(y_ext, p_ext)[1])
+        p_ap = average_precision_score(y_ext, p_ext)
+        print_table_rows.append({"Model": "PeSTo", "AUC": f"{p_auc:.4f}", "AP": f"{p_ap:.4f}"})
+        
+    if p2_ext is not None:
+        p2_auc = auc(roc_curve(y_ext, p2_ext)[0], roc_curve(y_ext, p2_ext)[1])
+        p2_ap = average_precision_score(y_ext, p2_ext)
+        print_table_rows.append({"Model": "P2Rank", "AUC": f"{p2_auc:.4f}", "AP": f"{p2_ap:.4f}"})
+
     # 5. Plotting
-    # ==========================================
-    plt.rcParams.update({'font.size': 12, 'axes.linewidth': 1.5})
+    plt.rcParams.update({'font.size': 14, 'axes.linewidth': 1.5, 'font.family': 'sans-serif'})
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7), dpi=300)
-
+    
     # Colors
-    c_base = '#95a5a6'  # Grey (Baseline A)
-    c_ours = '#d35400'  # Orange (ProtCross D)
-    c_pesto = '#27ae60' # Green
-    c_p2 = '#2980b9'    # Blue
+    c_A = '#7f8c8d' # Grey (Baseline)
+    c_D = '#d35400' # Orange (ProtCross)
+    c_P = '#27ae60' # Green
+    c_P2 = '#2980b9' # Blue
 
-    # --- ROC ---
-    # Exp A (Baseline)
-    fpr_a, tpr_a, _ = roc_curve(y_true, y_probs_a)
-    ax1.plot(fpr_a, tpr_a, color=c_base, ls='--', lw=2, label=f'Baseline (Pure Geom) (AUC={auc(fpr_a, tpr_a):.2f})')
+    # --- Plot ROC (On ax1) ---
+    ax1.plot([0, 1], [0, 1], 'k:', alpha=0.5)
     
-    # Exp D (ProtCross)
-    fpr_d, tpr_d, _ = roc_curve(y_true, y_probs_d)
-    ax1.plot(fpr_d, tpr_d, color=c_ours, lw=3, label=f'ProtCross (AUC={auc(fpr_d, tpr_d):.2f})')
+    if 'A' in stats:
+        fpr, tpr, std, auc_m, auc_s = stats['A']['roc']
+        ax1.plot(fpr, tpr, color=c_A, lw=2, label=f'Baseline (AUC={auc_m:.2f}±{auc_s:.2f})')
+        ax1.fill_between(fpr, np.maximum(tpr-std, 0), np.minimum(tpr+std, 1), color=c_A, alpha=0.2)
+        
+    if 'D' in stats:
+        fpr, tpr, std, auc_m, auc_s = stats['D']['roc']
+        ax1.plot(fpr, tpr, color=c_D, lw=3, label=f'ProtCross (AUC={auc_m:.2f}±{auc_s:.2f})')
+        ax1.fill_between(fpr, np.maximum(tpr-std, 0), np.minimum(tpr+std, 1), color=c_D, alpha=0.2)
+        
+    if p_ext is not None:
+        fpr_p, tpr_p, _ = roc_curve(y_ext, p_ext)
+        ax1.plot(fpr_p, tpr_p, color=c_P, lw=2, ls='--', label=f'PeSTo (AUC={p_auc:.2f})')
+    if p2_ext is not None:
+        fpr_2, tpr_2, _ = roc_curve(y_ext, p2_ext)
+        ax1.plot(fpr_2, tpr_2, color=c_P2, lw=2, ls='--', label=f'P2Rank (AUC={p2_auc:.2f})')
 
-    # PeSTo
-    if y_pesto_flat is not None:
-        fpr_p, tpr_p, _ = roc_curve(y_true, y_pesto_flat)
-        ax1.plot(fpr_p, tpr_p, color=c_pesto, lw=2.5, ls='-', alpha=0.8, label=f'PeSTo (AUC={auc(fpr_p, tpr_p):.2f})')
-
-    # P2Rank
-    if y_p2rank_flat is not None:
-        fpr_p2, tpr_p2, _ = roc_curve(y_true, y_p2rank_flat)
-        ax1.plot(fpr_p2, tpr_p2, color=c_p2, lw=2.5, ls='-.', alpha=0.8, label=f'P2Rank (AUC={auc(fpr_p2, tpr_p2):.2f})')
-    
-    ax1.plot([0,1],[0,1], 'k:', alpha=0.5)
     ax1.set_xlabel('False Positive Rate')
     ax1.set_ylabel('True Positive Rate')
-    ax1.set_title(f'ROC Curve')
-    ax1.legend(loc="lower right")
-    ax1.grid(True, linestyle='--', alpha=0.5)
+    ax1.set_title('ROC Curve')
+    ax1.legend(loc="lower right", frameon=True, fontsize=10)
+    ax1.grid(True, linestyle='--', alpha=0.3)
 
-    # --- PR ---
-    # Exp A
-    p_a, r_a, _ = precision_recall_curve(y_true, y_probs_a)
-    ax2.plot(r_a, p_a, color=c_base, ls='--', lw=2, label=f'Baseline (Pure Geom) (AP={average_precision_score(y_true, y_probs_a):.2f})')
-
-    # Exp D
-    p_d, r_d, _ = precision_recall_curve(y_true, y_probs_d)
-    ax2.plot(r_d, p_d, color=c_ours, lw=3, label=f'ProtCross (AP={average_precision_score(y_true, y_probs_d):.2f})')
-
-    # PeSTo
-    if y_pesto_flat is not None:
-        p_p, r_p, _ = precision_recall_curve(y_true, y_pesto_flat)
-        ax2.plot(r_p, p_p, color=c_pesto, lw=2.5, ls='-', alpha=0.8, label=f'PeSTo (AP={average_precision_score(y_true, y_pesto_flat):.2f})')
-
-    # P2Rank
-    if y_p2rank_flat is not None:
-        p_p2, r_p2, _ = precision_recall_curve(y_true, y_p2rank_flat)
-        ax2.plot(r_p2, p_p2, color=c_p2, lw=2.5, ls='-.', alpha=0.8, label=f'P2Rank (AP={average_precision_score(y_true, y_p2rank_flat):.2f})')
+    # --- Plot PR (On ax2) ---
+    if 'A' in stats:
+        rec, prec, std, ap_m, ap_s = stats['A']['pr']
+        ax2.plot(rec, prec, color=c_A, lw=2, label=f'Baseline (AP={ap_m:.2f}±{ap_s:.2f})')
+        ax2.fill_between(rec, np.maximum(prec-std, 0), np.minimum(prec+std, 1), color=c_A, alpha=0.2)
+        
+    if 'D' in stats:
+        rec, prec, std, ap_m, ap_s = stats['D']['pr']
+        ax2.plot(rec, prec, color=c_D, lw=3, label=f'ProtCross (AP={ap_m:.2f}±{ap_s:.2f})')
+        ax2.fill_between(rec, np.maximum(prec-std, 0), np.minimum(prec+std, 1), color=c_D, alpha=0.2)
+        
+    if p_ext is not None:
+        p_p, r_p, _ = precision_recall_curve(y_ext, p_ext)
+        ax2.plot(r_p, p_p, color=c_P, lw=2, ls='--', label=f'PeSTo (AP={p_ap:.2f})')
+    if p2_ext is not None:
+        p_2, r_2, _ = precision_recall_curve(y_ext, p2_ext)
+        ax2.plot(r_2, p_2, color=c_P2, lw=2, ls='--', label=f'P2Rank (AP={p2_ap:.2f})')
 
     ax2.set_xlabel('Recall')
     ax2.set_ylabel('Precision')
     ax2.set_title('Precision-Recall Curve')
-    ax2.legend(loc="upper right")
-    ax2.grid(True, linestyle='--', alpha=0.5)
+    ax2.legend(loc="lower left", frameon=True, fontsize=10)
+    ax2.grid(True, linestyle='--', alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('comparison_metrics_A_vs_D.png')
-    print("✅ Plot saved to comparison_metrics_A_vs_D.png")
-
-    # ==========================================
-    # 6. Stats Table
-    # ==========================================
-    print("\n" + "="*80)
-    print(f"{'Model':<25} | {'AUC':<6} | {'AP':<6} | {'Max F1':<8} | {'Threshold':<9} |")
-    print("-" * 80)
+    out_file = "aggregated_metrics_plot.png"
+    plt.savefig(out_file)
+    print(f"\n✅ Plot saved to {out_file}")
     
-    def print_row(name, y_t, y_p):
-        auc_s = auc(roc_curve(y_t, y_p)[0], roc_curve(y_t, y_p)[1])
-        ap_s = average_precision_score(y_t, y_p)
-        bt, bf1 = find_best_threshold(y_t, y_p)
-        print(f"{name:<25} | {auc_s:.4f} | {ap_s:.4f} | {bf1:.4f}   | {bt:.2f}      |")
-
-    print_row("Baseline (Exp A, Seed 42)", y_true, y_probs_a)
-    print_row("ProtCross (Exp D, Seed 42)", y_true, y_probs_d)
-    
-    if y_pesto_flat is not None:
-        print_row("PeSTo", y_true, y_pesto_flat)
-    if y_p2rank_flat is not None:
-        print_row("P2Rank", y_true, y_p2rank_flat)
-    
-    print("="*80)
-
-def find_ckpt(folder):
-    """在文件夹中查找 last.ckpt 或 best*.ckpt"""
-    # 优先找 last.ckpt
-    last = os.path.join(folder, "last.ckpt")
-    if os.path.exists(last): return last
-    
-    # 否则找 best
-    cands = glob.glob(os.path.join(folder, "*.ckpt"))
-    if cands: return cands[0] # 返回第一个
-    return None
+    # 6. Print Summary Table
+    print("\n" + "="*50)
+    print(f"{'Model':<20} | {'AUC':<18} | {'AP':<18}")
+    print("-" * 60)
+    for row in print_table_rows:
+        print(f"{row['Model']:<20} | {row['AUC']:<18} | {row['AP']:<18}")
+    print("="*50 + "\n")
 
 if __name__ == "__main__":
-    # --- Configuration ---
-    
-    # 1. 定义实验目录
-    DIR_A = "saved_weights/A_42"
-    DIR_D = "saved_weights/D_42"
-    
-    ckpt_a = find_ckpt(DIR_A)
-    ckpt_d = find_ckpt(DIR_D)
-    
-    if not ckpt_a:
-        print(f"❌ Error: Checkpoint not found in {DIR_A}")
-        sys.exit(1)
-    if not ckpt_d:
-        print(f"❌ Error: Checkpoint not found in {DIR_D}")
-        sys.exit(1)
-
-    # 2. GT Data (.pt files)
-    AF2_DATA_FOLDER = "data/processed_af2"
-
-    # 3. PeSTo / P2Rank Results (Optional)
-    PESTO_FOLDER = "data/PeSTo_results" 
-    P2RANK_FOLDER = "data/p2rank_results"
-
-    evaluate_and_plot(ckpt_a, ckpt_d, AF2_DATA_FOLDER, PESTO_FOLDER, P2RANK_FOLDER)
+    main()
