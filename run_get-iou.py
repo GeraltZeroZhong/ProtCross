@@ -16,9 +16,11 @@ OUTPUT_CSV = "standard_iou_results.csv"  # 结果保存文件
 SEED = 42 # 固定种子
 
 # 引入项目模块
+# 将 src 加入路径，以便可以直接 import evopoint_da
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-from src.evopoint_da.models.module import EvoPointDALitModule
-from scripts.plot_metrics import SimpleFolderDataset 
+from evopoint_da.models.module import EvoPointDALitModule
+# [修改 1] 引入 EvoPointDataset，不再使用 SimpleFolderDataset
+from evopoint_da.data.dataset import EvoPointDataset 
 
 def get_checkpoints_from_dir(root_dir):
     """自动扫描 saved_weights 目录"""
@@ -74,13 +76,17 @@ def evaluate_standard_iou(ckpt_info, data_folder):
         print(f"❌ Load Error: {e}")
         return None
     
-    # 2. 加载数据
+    # 2. [修改 2] 使用 EvoPointDataset 加载数据
+    # 逻辑与 test_adaptive.py 保持一致：优先尝试 test split，如果不存在则回退到 train
     try:
-        dataset = SimpleFolderDataset(data_folder)
-        loader = DataLoader(dataset, batch_size=1, shuffle=False)
+        dataset = EvoPointDataset(root=data_folder, split="test")
+        print(f"   ✅ Loaded EvoPointDataset (split='test', n={len(dataset)})")
     except Exception as e:
-        print(f"❌ Data Error: {e}")
-        return None
+        print(f"   ⚠️ 'test' split failed, trying 'train' split ({e})")
+        dataset = EvoPointDataset(root=data_folder, split="train")
+        print(f"   ✅ Loaded EvoPointDataset (split='train', n={len(dataset)})")
+    
+    loader = DataLoader(dataset, batch_size=1, shuffle=False)
     
     all_labels = []
     all_probs = []
@@ -96,15 +102,10 @@ def evaluate_standard_iou(ckpt_info, data_folder):
             logits = model.seg_head(feats)
             probs = torch.softmax(logits, dim=1)[:, 1]
             
-            # 这里的置信度过滤保持与模型训练时的配置一致
-            if hasattr(model, '_normalize_plddt'):
-                p = model._normalize_plddt(batch.plddt).squeeze()
-            else:
-                p = batch.plddt.squeeze() / 100.0
-            
-            # [修改] 注释掉硬截断逻辑，保留原始概率
-            # 如果模型使用了 plddt 权重，则应用过滤逻辑
-            # if model.hparams.use_plddt_weight:
+            # [注意] 如果你需要在 run_get-iou.py 中也恢复 pLDDT 过滤逻辑
+            # 请取消下面代码的注释。目前保持注释状态以符合你的原始设置。
+            # if hasattr(model, '_normalize_plddt') and getattr(model.hparams, 'use_plddt_weight', False):
+            #     p = model._normalize_plddt(batch.plddt).squeeze()
             #     is_reliable = (p > 0.65).float()
             #     probs = probs * is_reliable
             
@@ -118,7 +119,7 @@ def evaluate_standard_iou(ckpt_info, data_folder):
     best_iou = 0.0
     best_thresh = 0.0
     
-    # 遍历阈值
+    # 遍历阈值 (保持 0.05 的步长)
     for thresh in np.arange(0.1, 0.95, 0.05):
         y_pred = (y_scores > thresh).astype(int)
         
@@ -141,7 +142,6 @@ def evaluate_standard_iou(ckpt_info, data_folder):
 
 def main():
     # 2. 关键修复：固定全局随机种子
-    # 这确保了 PointNet++ 中的采样 (FPS) 以及任何其他随机操作每次都是确定的
     pl.seed_everything(SEED, workers=True)
     print(f"🔒 Global seed set to {SEED}")
 
@@ -157,6 +157,7 @@ def main():
         metrics = evaluate_standard_iou(task, AF2_DATA_FOLDER)
         if metrics:
             results.append(metrics)
+            # 实时保存结果
             pd.DataFrame(results).to_csv(OUTPUT_CSV, index=False)
 
     if len(results) > 0:

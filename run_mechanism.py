@@ -162,15 +162,7 @@ def collect_data(model, loader, model_name):
             seg_logits = model.seg_head(feats)
             probs = torch.softmax(seg_logits, dim=1)[:, 1]
 
-            # 4) test.py optional pLDDT hard filter (use_plddt_weight)
-            if hasattr(model.hparams, "use_plddt_weight") and model.hparams.use_plddt_weight:
-                if hasattr(model, "_normalize_plddt"):
-                    p = model._normalize_plddt(batch.plddt).squeeze()
-                else:
-                    p_np = batch.plddt.detach().cpu().numpy().flatten()
-                    p = torch.from_numpy(normalize_plddt_like_test(p_np)).to(batch.plddt.device)
-                is_reliable = (p > 0.65).float()
-                probs = probs * is_reliable
+            
 
             # 5) pLDDT output stored as 0-100 for plots/stats
             plddt = batch.plddt

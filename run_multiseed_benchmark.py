@@ -4,10 +4,11 @@ import shutil
 import numpy as np
 import pandas as pd
 from collections import defaultdict
-import glob  # 新增: 用于查找文件
+import glob
 
-SEEDS = [42, 2025, 1]
-MAX_EPOCHS = 100
+#SEEDS = [42, 2025, 1]
+SEEDS = [1]
+MAX_EPOCHS = 70
 
 EXPERIMENTS = [
     {
@@ -38,12 +39,12 @@ def clean_checkpoints():
         try:
             shutil.rmtree("checkpoints")
         except Exception as e:
-            print(f"⚠️ Warning: Failed to clean checkpoints: {e}")
+            print(f" Warning: Failed to clean checkpoints: {e}")
     os.makedirs("checkpoints", exist_ok=True)
 
 def backup_checkpoints(exp_id, seed):
     """
-    [新增功能] 将训练好的权重备份到 saved_weights/ 目录
+    将训练好的权重备份到 saved_weights/ 目录
     结构: saved_weights/A_42/best-epoch=xx.ckpt
     """
     backup_dir = os.path.join("saved_weights", f"{exp_id}_{seed}")
@@ -53,14 +54,14 @@ def backup_checkpoints(exp_id, seed):
     found = False
     for ckpt in glob.glob(os.path.join("checkpoints", "*.ckpt")):
         shutil.copy(ckpt, backup_dir)
-        print(f"📦 Backup: {ckpt} -> {backup_dir}/")
+        print(f" Backup: {ckpt} -> {backup_dir}/")
         found = True
     
     if not found:
-        print(f"⚠️ Warning: No checkpoints found to backup for Exp {exp_id} Seed {seed}")
+        print(f" Warning: No checkpoints found to backup for Exp {exp_id} Seed {seed}")
 
 def run_command(cmd, log_file):
-    print(f"👉 Exec: {cmd}")
+    print(f" Exec: {cmd}")
     output_buffer = ""
     try:
         with open(log_file, "w") as f:
@@ -102,14 +103,14 @@ def parse_metrics(output):
 def main():
     results = defaultdict(list)
     print("="*60)
-    print(f"🧬 EvoPoint-DA Multi-Seed Benchmark (100 Epochs, GPU Enabled)")
+    print(f"Multi-Seed Benchmark")
     print("="*60)
 
     total_runs = len(SEEDS) * len(EXPERIMENTS)
     current_run = 0
 
     for seed in SEEDS:
-        print(f"\n🌱 === Starting Loop for SEED {seed} ===\n")
+        print(f"\n === Starting Loop for SEED {seed} ===\n")
         
         for exp in EXPERIMENTS:
             current_run += 1
@@ -129,7 +130,7 @@ def main():
                 f"+seed_everything={seed}",
                 f"trainer.max_epochs={MAX_EPOCHS}",
                 f"+trainer.default_root_dir=logs/benchmark/{exp_id}_{seed}",
-                "trainer.accelerator=cpu" # 如果有GPU请改为 gpu
+                "trainer.accelerator=gpu" # 如果有GPU请改为 gpu
             ])
             run_command(train_cmd, log_train)
             
@@ -145,11 +146,11 @@ def main():
             # 5. 记录结果
             m = parse_metrics(test_output)
             results[exp_id].append(m)
-            print(f"✅ Exp {exp_id} (Seed {seed}) Result: IoU={m['Overall_IoU']}% (Thresh={m['Best_Threshold']})")
+            print(f" Exp {exp_id} (Seed {seed}) Result: IoU={m['Overall_IoU']}% (Thresh={m['Best_Threshold']})")
 
     # === Report ===
     print("\n\n" + "="*80)
-    print("🏆 FINAL BENCHMARK REPORT (100 Epochs)")
+    print("FINAL BENCHMARK REPORT")
     print("="*80)
 
     def fmt_stat(exp_id, key):

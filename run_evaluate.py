@@ -14,8 +14,9 @@ OUTPUT_CSV = "evaluation_results_all.csv"
 
 # 引入项目模块
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-from src.evopoint_da.models.module import EvoPointDALitModule
-from scripts.plot_metrics import SimpleFolderDataset 
+from evopoint_da.models.module import EvoPointDALitModule
+# [修改 1] 引入 EvoPointDataset
+from evopoint_da.data.dataset import EvoPointDataset
 
 def get_checkpoints_from_dir(root_dir):
     """
@@ -89,13 +90,16 @@ def evaluate_model(ckpt_info, data_folder):
         print(f"❌ Error loading checkpoint: {e}")
         return None
     
-    # 加载数据
+    # 加载数据 [修改 2] 使用 EvoPointDataset
     try:
-        dataset = SimpleFolderDataset(data_folder)
-        loader = DataLoader(dataset, batch_size=1, shuffle=False)
+        dataset = EvoPointDataset(root=data_folder, split="test")
+        print(f"   ✅ Loaded EvoPointDataset (split='test', n={len(dataset)})")
     except Exception as e:
-        print(f"❌ Error loading dataset: {e}")
-        return None
+        print(f"   ⚠️ 'test' split failed, trying 'train' split ({e})")
+        dataset = EvoPointDataset(root=data_folder, split="train")
+        print(f"   ✅ Loaded EvoPointDataset (split='train', n={len(dataset)})")
+
+    loader = DataLoader(dataset, batch_size=1, shuffle=False)
     
     all_labels = []
     all_probs = []
@@ -112,17 +116,14 @@ def evaluate_model(ckpt_info, data_folder):
             logits = model.seg_head(feats)
             probs = torch.softmax(logits, dim=1)[:, 1]
             
-            # [修改] 注释掉 Confidence Gating (硬截断) 逻辑
-            # if hasattr(model, '_normalize_plddt'):
+            # [注意] 此处保持逻辑一致，不开启硬阈值过滤 (Raw Probabilities)
+            # 如果需要开启，请取消注释以下代码：
+            # if hasattr(model, '_normalize_plddt') and getattr(model.hparams, 'use_plddt_weight', False):
             #     p = model._normalize_plddt(batch.plddt).squeeze()
-            # else:
-            #     p = batch.plddt.squeeze() / 100.0 # Fallback
-                
-            # is_reliable = (p > 0.65).float()
-            # probs_gated = probs * is_reliable
+            #     is_reliable = (p > 0.65).float()
+            #     probs = probs * is_reliable
             
             all_labels.append(batch.y.cpu().numpy())
-            # [修改] 直接使用原始 probs，而不是 probs_gated
             all_probs.append(probs.cpu().numpy())
 
     # 计算指标
