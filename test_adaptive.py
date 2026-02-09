@@ -156,15 +156,6 @@ def main(cfg: DictConfig):
             logits = model.seg_head(feats)
             probs = torch.softmax(logits, dim=1)[:, 1]
             
-            # 这里的 probs 是原始概率，我们先不根据 pLDDT 过滤
-            # 因为我们要搜索最佳阈值，或者我们可以在搜索时加上 pLDDT 权重逻辑？
-            # 原版 test_adaptive.py 确实应用了 "is_reliable" 乘法
-            # 我们保持原版 adaptive 逻辑：先应用置信度过滤，再搜索阈值
-            
-            if hasattr(model.hparams, 'use_plddt_weight') and model.hparams.use_plddt_weight:
-                p = model._normalize_plddt(batch.plddt).squeeze()
-                is_reliable = (p > 0.65).float() # 硬过滤，这是 adaptive.py 的逻辑
-                probs = probs * is_reliable
             
             all_labels.append(batch.y.cpu().numpy())
             all_probs.append(probs.cpu().numpy())
