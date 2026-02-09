@@ -102,10 +102,11 @@ def evaluate_standard_iou(ckpt_info, data_folder):
             else:
                 p = batch.plddt.squeeze() / 100.0
             
+            # [修改] 注释掉硬截断逻辑，保留原始概率
             # 如果模型使用了 plddt 权重，则应用过滤逻辑
-            if model.hparams.use_plddt_weight:
-                is_reliable = (p > 0.65).float()
-                probs = probs * is_reliable
+            # if model.hparams.use_plddt_weight:
+            #     is_reliable = (p > 0.65).float()
+            #     probs = probs * is_reliable
             
             all_labels.append(batch.y.cpu().numpy())
             all_probs.append(probs.cpu().numpy())

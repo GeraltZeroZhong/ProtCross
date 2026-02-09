@@ -112,17 +112,18 @@ def evaluate_model(ckpt_info, data_folder):
             logits = model.seg_head(feats)
             probs = torch.softmax(logits, dim=1)[:, 1]
             
-            # Confidence Gating
-            if hasattr(model, '_normalize_plddt'):
-                p = model._normalize_plddt(batch.plddt).squeeze()
-            else:
-                p = batch.plddt.squeeze() / 100.0 # Fallback
+            # [修改] 注释掉 Confidence Gating (硬截断) 逻辑
+            # if hasattr(model, '_normalize_plddt'):
+            #     p = model._normalize_plddt(batch.plddt).squeeze()
+            # else:
+            #     p = batch.plddt.squeeze() / 100.0 # Fallback
                 
-            is_reliable = (p > 0.65).float()
-            probs_gated = probs * is_reliable
+            # is_reliable = (p > 0.65).float()
+            # probs_gated = probs * is_reliable
             
             all_labels.append(batch.y.cpu().numpy())
-            all_probs.append(probs_gated.cpu().numpy())
+            # [修改] 直接使用原始 probs，而不是 probs_gated
+            all_probs.append(probs.cpu().numpy())
 
     # 计算指标
     y_true = np.concatenate(all_labels)
