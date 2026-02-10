@@ -6,8 +6,8 @@ import pandas as pd
 from collections import defaultdict
 import glob
 
-#SEEDS = [42, 2025, 1]
-SEEDS = [1]
+SEEDS = [42, 2025]
+
 MAX_EPOCHS = 70
 
 EXPERIMENTS = [
