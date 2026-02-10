@@ -6,28 +6,41 @@ channels:
   - defaults
 dependencies:
   - python=3.10
+
+  # Core DL stack
   - pytorch=2.3.0
   - torchvision
   - torchaudio
   - pytorch-cuda=12.1
 
+  # Utilities / scientific stack
   - numpy
   - pandas
+  - scipy
   - scikit-learn
   - biopython
   - tqdm
+  - matplotlib
+  - seaborn
+  - requests
 
+  # Training / config
   - pytorch-lightning
+  - torchmetrics
   - hydra-core
+  - omegaconf
   - wandb
 
   - pip
   - pip:
+      # Torch Geometric wheels aligned with torch==2.3.0 + cu121
       - --find-links https://data.pyg.org/whl/torch-2.3.0+cu121.html
-      
+
+      # ESM-C
       - esm>=3.1.0
       - huggingface-hub
-      
+
+      # PyG companion packages
       - torch-geometric>=2.5.0
       - pyg_lib
       - torch_scatter
