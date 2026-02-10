@@ -6,7 +6,7 @@ import pandas as pd
 from collections import defaultdict
 import glob
 
-SEEDS = [42, 2025]
+SEEDS = [42, 2025, 1]
 
 MAX_EPOCHS = 70
 
@@ -171,3 +171,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
