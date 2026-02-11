@@ -391,3 +391,39 @@ def get_external_baselines(loader, pesto_dir, p2rank_dir, af2_dir):
     p2_cat = np.concatenate(p2rank_scores) if p2rank_scores else None
 
     return y_cat, p_cat, p2_cat
+
+def get_grouped_checkpoints_abcd(root_dir, exps=("A", "B", "C", "D")):
+    """
+    新增：扫描 saved_weights，按前缀 A_/B_/C_/D_ 分组。
+    不影响旧的 get_grouped_checkpoints()。
+    """
+    if not os.path.exists(root_dir):
+        print(f"❌ Error: {root_dir} not found.")
+        return {k: [] for k in exps}
+
+    groups = {k: [] for k in exps}
+    subdirs = sorted(
+        [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))]
+    )
+
+    print(f"📂 Scanning {len(subdirs)} folders in '{root_dir}' (ABCD mode).")
+
+    for folder_name in subdirs:
+        folder_path = os.path.join(root_dir, folder_name)
+
+        target_ckpt = os.path.join(folder_path, "last.ckpt")
+        if not os.path.exists(target_ckpt):
+            cands = glob.glob(os.path.join(folder_path, "*.ckpt"))
+            if not cands:
+                continue
+            target_ckpt = cands[0]
+
+        for k in exps:
+            if folder_name.startswith(f"{k}_"):
+                groups[k].append(target_ckpt)
+                break
+
+    for k in exps:
+        print(f" Found {len(groups[k])} checkpoints for Experiment {k}")
+    return groups
+

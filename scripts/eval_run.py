@@ -1,7 +1,7 @@
 import os
 import sys
 import warnings
-
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -25,6 +25,44 @@ def _add_src_to_path():
     # 添加项目根目录到 sys.path，保证 `import src...` 可用
     this_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.append(os.path.join(this_dir, ".."))
+
+def _find_ckpt_in_folder(folder_path):
+    target_ckpt = os.path.join(folder_path, "last.ckpt")
+    if os.path.exists(target_ckpt):
+        return target_ckpt
+    cands = sorted([p for p in glob.glob(os.path.join(folder_path, "*.ckpt"))])
+    return cands[0] if cands else None
+
+
+def _scan_checkpoints_by_prefix(root_dir, prefixes):
+    """
+    仅供新增 ABCD-only 输出使用：按文件夹前缀扫描 ckpt。
+    约定：saved_weights 子目录形如 'B_xxx' / 'C_xxx' 等。
+    """
+    groups = {p: [] for p in prefixes}
+    if not os.path.exists(root_dir):
+        return groups
+
+    subdirs = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
+    for folder_name in subdirs:
+        for p in prefixes:
+            if folder_name.startswith(f"{p}_"):
+                ckpt = _find_ckpt_in_folder(os.path.join(root_dir, folder_name))
+                if ckpt is not None:
+                    groups[p].append(ckpt)
+                break
+    return groups
+
+
+def _serialize_meanstd_dict(d):
+    # d: {'best_f1': (mean,std), ...} 或 None
+    if d is None:
+        return None
+    out = {}
+    for k, (m, s) in d.items():
+        out[k] = {"mean": float(m), "std": float(s)}
+    return out
+
 
 
 def main():
@@ -226,6 +264,141 @@ def main():
             f"{row.get('TNR','-'):<18} | {row.get('BalAcc','-'):<18}"
         )
     print("=" * 120 + "\n")
+
+        # =========================================================
+    # 7) EXTRA OUTPUT: ABCD-only (no PeSTo/P2Rank), new files
+    # =========================================================
+    # 扫描 B/C（A/D 复用原来的 groups）
+    bc = _scan_checkpoints_by_prefix(WEIGHTS_DIR, prefixes=("B", "C"))
+    groups_abcd = {"A": groups.get("A", []), "B": bc.get("B", []), "C": bc.get("C", []), "D": groups.get("D", [])}
+
+    # 复用已算好的 A/D；只额外算 B/C
+    stats_abcd = {}
+    labels_abcd = {"A": "Baseline (Pure Geom)", "B": "+ ESM Embeddings", "C": "+ Standard DA (w/o pLDDT)", "D": "ProtCross"}
+
+    for k in ["A", "B", "C", "D"]:
+        if not groups_abcd[k]:
+            continue
+
+        if k in stats:  # A/D 已在旧流程算过
+            stats_abcd[k] = stats[k]
+            continue
+
+        print(f"\n📈 [ABCD-only] Processing {labels_abcd[k]} ({len(groups_abcd[k])} runs).")
+        fpr, tpr, tpr_std, auc_m, auc_s = aggregate_roc_results(groups_abcd[k], loader, device)
+        rec, prec, prec_std, ap_m, ap_s = aggregate_pr_results(groups_abcd[k], loader, device)
+        bf1 = aggregate_bestf1_metrics(groups_abcd[k], loader, device)
+
+        stats_abcd[k] = {
+            "roc": (fpr, tpr, tpr_std, auc_m, auc_s),
+            "pr": (rec, prec, prec_std, ap_m, ap_s),
+            "bf1": bf1,
+        }
+
+        # --- 构造 ABCD-only 的打印表（同旧格式）---
+    print_table_rows_abcd = []
+    for k in ["A", "B", "C", "D"]:
+        if k not in stats_abcd:
+            continue
+
+        fpr, tpr, tpr_std, auc_m, auc_s = stats_abcd[k]["roc"]
+        rec, prec, prec_std, ap_m, ap_s = stats_abcd[k]["pr"]
+        bf1 = stats_abcd[k]["bf1"]
+
+        row = {
+            "Model": labels_abcd[k],
+            "AUC": f"{auc_m:.4f} ± {auc_s:.4f}",
+            "AP": f"{ap_m:.4f} ± {ap_s:.4f}",
+            "MaxF1": f"{bf1['best_f1'][0]:.4f} ± {bf1['best_f1'][1]:.4f}" if bf1 else "-",
+            "Thr@F1": f"{bf1['best_thr'][0]:.4f} ± {bf1['best_thr'][1]:.4f}" if bf1 else "-",
+            "Prec@F1": f"{bf1['prec'][0]:.4f} ± {bf1['prec'][1]:.4f}" if bf1 else "-",
+            "Rec@F1": f"{bf1['rec'][0]:.4f} ± {bf1['rec'][1]:.4f}" if bf1 else "-",
+            "TNR": f"{bf1['tnr'][0]:.4f} ± {bf1['tnr'][1]:.4f}" if bf1 else "-",
+            "BalAcc": f"{bf1['bal_acc'][0]:.4f} ± {bf1['bal_acc'][1]:.4f}" if bf1 else "-",
+        }
+        print_table_rows_abcd.append(row)
+
+    # --- 打印：ABCD-only AUC/AP 表 ---
+    print("\n" + "=" * 70)
+    print("[ABCD-only] Summary (AUC / AP)")
+    print(f"{'Model':<15} | {'AUC':<18} | {'AP':<18}")
+    print("-" * 70)
+    for row in print_table_rows_abcd:
+        print(f"{row['Model']:<15} | {row['AUC']:<18} | {row['AP']:<18}")
+    print("=" * 70)
+
+    # --- 打印：ABCD-only MaxF1/Threshold/Precision/Recall/TNR/BalAcc 表 ---
+    print("\n" + "=" * 120)
+    print("[ABCD-only] Best-F1 Metrics")
+    print(
+        f"{'Model':<15} | {'MaxF1':<18} | {'Thr@F1':<18} | {'Prec@F1':<18} | "
+        f"{'Rec@F1':<18} | {'TNR':<18} | {'BalAcc':<18}"
+    )
+    print("-" * 120)
+    for row in print_table_rows_abcd:
+        print(
+            f"{row['Model']:<15} | {row['MaxF1']:<18} | {row['Thr@F1']:<18} | "
+            f"{row['Prec@F1']:<18} | {row['Rec@F1']:<18} | {row['TNR']:<18} | {row['BalAcc']:<18}"
+        )
+    print("=" * 120 + "\n")
+
+    
+    # --- 保存 ABCD-only stats（JSON）---
+    payload_abcd = {"models": {}}
+    for k, v in stats_abcd.items():
+        fpr, tpr, tpr_std, auc_m, auc_s = v["roc"]
+        rec, prec, prec_std, ap_m, ap_s = v["pr"]
+        payload_abcd["models"][labels_abcd[k]] = {
+            "roc": {"fpr": fpr.tolist(), "tpr": tpr.tolist(), "tpr_std": tpr_std.tolist(),
+                    "auc_mean": float(auc_m), "auc_std": float(auc_s)},
+            "pr": {"recall": rec.tolist(), "precision": prec.tolist(), "prec_std": prec_std.tolist(),
+                   "ap_mean": float(ap_m), "ap_std": float(ap_s)},
+            "bf1": _serialize_meanstd_dict(v["bf1"]),
+        }
+
+    out_stat_abcd = "aggregated_metrics_stats_abcd.json"
+    with open(out_stat_abcd, "w", encoding="utf-8") as f:
+        json.dump(payload_abcd, f, indent=2)
+
+    # --- 画 ABCD-only 新图 ---
+    fig2, (bx1, bx2) = plt.subplots(1, 2, figsize=(16, 7), dpi=300)
+    colors = {"A": "#7f8c8d", "B": "#8e44ad", "C": "#16a085", "D": "#d35400"}
+
+    bx1.plot([0, 1], [0, 1], "k:", alpha=0.5)
+    for k in ["A", "B", "C", "D"]:
+        if k not in stats_abcd:
+            continue
+        fpr, tpr, std, auc_m, auc_s = stats_abcd[k]["roc"]
+        bx1.plot(fpr, tpr, color=colors[k], lw=3 if k == "D" else 2,
+                 label=f"{labels_abcd[k]} (AUC={auc_m:.2f}±{auc_s:.2f})")
+        bx1.fill_between(fpr, np.maximum(tpr - std, 0), np.minimum(tpr + std, 1), color=colors[k], alpha=0.2)
+    bx1.set_xlabel("False Positive Rate")
+    bx1.set_ylabel("True Positive Rate")
+    bx1.set_title("ROC Curve")
+    bx1.legend(loc="lower right", frameon=True, fontsize=10)
+    bx1.grid(True, linestyle="--", alpha=0.3)
+
+    for k in ["A", "B", "C", "D"]:
+        if k not in stats_abcd:
+            continue
+        rec, prec, std, ap_m, ap_s = stats_abcd[k]["pr"]
+        bx2.plot(rec, prec, color=colors[k], lw=3 if k == "D" else 2,
+                 label=f"{labels_abcd[k]} (AP={ap_m:.2f}±{ap_s:.2f})")
+        bx2.fill_between(rec, np.maximum(prec - std, 0), np.minimum(prec + std, 1), color=colors[k], alpha=0.2)
+    bx2.set_xlabel("Recall")
+    bx2.set_ylabel("Precision")
+    bx2.set_title("Precision-Recall Curve")
+    bx2.legend(loc="lower left", frameon=True, fontsize=10)
+    bx2.grid(True, linestyle="--", alpha=0.3)
+
+    plt.tight_layout()
+    out_fig_abcd = "aggregated_metrics_plot_abcd.png"
+    plt.savefig(out_fig_abcd)
+    plt.close(fig2)
+
+    print(f"\n✅ [ABCD-only] Plot saved to {out_fig_abcd}")
+    print(f"✅ [ABCD-only] Stats saved to {out_stat_abcd}")
+
 
 
 if __name__ == "__main__":
