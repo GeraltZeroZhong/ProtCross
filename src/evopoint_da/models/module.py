@@ -40,7 +40,8 @@ class EvoPointDALitModule(pl.LightningModule):
                  weight_decay: float = 1e-4,
                  da_weight: float = 0.2,      
                  feature_dim: int = 128,
-                 pos_noise: float = 0.08,    
+                 pos_noise: float = 0.08,
+                 weight_strategy: str = "pLDDT^4",
                  # --- Experimental Flags ---
                  use_esm: bool = True,        
                  use_da: bool = True,         
@@ -80,10 +81,6 @@ class EvoPointDALitModule(pl.LightningModule):
         return plddt_tensor
 
     def focal_loss(self, logits, targets, alpha=0.5, gamma=2.0):
-        """
-        [Run 10] Standard Focal Loss.
-        Safe choice to keep Baseline B performance high (~21%).
-        """
         ce_loss = F.cross_entropy(logits, targets, reduction='none')
         pt = torch.exp(-ce_loss)
         focal_loss = alpha * (1 - pt)**gamma * ce_loss
@@ -121,9 +118,43 @@ class EvoPointDALitModule(pl.LightningModule):
             d_t = self.domain_disc(self.grl(tgt_feats))
             
             if self.hparams.use_plddt_weight:
-                # Power-Law Weighting (k=4) - Essential for noise suppression
                 p_norm = self._normalize_plddt(tgt.plddt)
-                weights = (p_norm ** 4.0).view(-1, 1)
+                ws = self.hparams.weight_strategy  # 获取策略名称
+
+                if ws == 'sine':
+                    # Sine: sin(pi/2 * p)
+                    weights = torch.sin(torch.tensor(np.pi/2, device=self.device) * p_norm)
+                elif ws == 'cosine':
+                    # Cosine: 1 - cos(pi/2 * p)
+                    weights = 1.0 - torch.cos(torch.tensor(np.pi/2, device=self.device) * p_norm)
+                elif ws.startswith('pLDDT'):
+                    # 多项式(pLDDT^4)
+                    try: k = float(ws.split('^')[1]) if '^' in ws else 4.0
+                    except: k = 4.0
+                    weights = p_norm ** k
+                elif ws.startswith('threshold'):
+                    # 硬阈值策略 (例如 threshold_0.6)
+                    try: tau = float(ws.split('_')[1])
+                    except: tau = 0.6
+                    weights = (p_norm > tau).float()
+                elif ws.startswith('exponential'):
+                    # 指数策略 (例如 exponential_4)
+                    try: beta = float(ws.split('_')[1])
+                    except: beta = 4.0
+                    weights = torch.exp(beta * (p_norm - 1.0))
+                elif ws.startswith('sigmoid'):
+                    # 格式: sigmoid_0.7_30 (中心_斜率)
+                    try: 
+                        parts = ws.split('_')
+                        tau, k = float(parts[1]), float(parts[2])
+                    except: tau, k = 0.7, 20.0
+                    # 公式: 1 / (1 + exp(-k * (p - tau)))
+                    weights = torch.sigmoid(k * (p_norm - tau))
+                else:
+                    # 默认回退
+                    weights = p_norm ** 4.0
+                
+                weights = weights.view(-1, 1)
                 
                 raw_bce = F.binary_cross_entropy_with_logits(d_t, torch.zeros_like(d_t), reduction='none')
                 loss_d_t = (raw_bce * weights).sum() / (weights.sum() + 1e-6)
@@ -146,7 +177,7 @@ class EvoPointDALitModule(pl.LightningModule):
         feats, _ = self.backbone(src_x, batch.pos, batch.batch)
         logits = self.seg_head(feats)
         
-        # 2. 计算分割损失 === 🛠️ 修复点在这里 ===
+        # 2. 计算分割损失
         # 强制将 y 转为 long 类型，防止 float 报错
         loss = torch.nn.functional.cross_entropy(logits, batch.y.long())
         
