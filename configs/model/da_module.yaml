@@ -7,3 +7,4 @@ pos_noise: 0.08
 use_esm: true
 use_da: true
 use_plddt_weight: true
+weight_strategy: "sigmoid_0.7_30"
