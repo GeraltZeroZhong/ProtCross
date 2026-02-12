@@ -220,7 +220,7 @@ python train.py \
 python test_adaptive.py
 ```
 
-Additional analysis scripts are available (e.g., `run_mechanism.py`, `run_get-iou.py`, `scripts/eval_run.py`) for task-specific reporting.
+Additional analysis scripts are available (e.g., `scripts/eval_run.py`) for task-specific reporting.
 
 ### 5.6 Run Multi-seed Benchmark
 
