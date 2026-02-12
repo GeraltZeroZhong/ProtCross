@@ -117,7 +117,7 @@ def main():
             exp_id = exp['id']
             print(f"[{current_run}/{total_runs}] Running Experiment {exp_id} (Seed {seed})...")
             
-            # 1. 清理临时权重目录 (准备开始新训练)
+            # 1. 清理临时权重目录
             clean_checkpoints()
             
             log_train = f"logs/benchmark/train_{exp_id}_seed_{seed}.txt"
@@ -130,7 +130,8 @@ def main():
                 f"+seed_everything={seed}",
                 f"trainer.max_epochs={MAX_EPOCHS}",
                 f"+trainer.default_root_dir=logs/benchmark/{exp_id}_{seed}",
-                "trainer.accelerator=gpu" # 如果有GPU请改为 gpu
+                "trainer.accelerator=gpu", # 如果有GPU请改为 gpu
+                "data.batch_size=16"
             ])
             run_command(train_cmd, log_train)
             
@@ -139,7 +140,7 @@ def main():
             test_cmd = "python test_adaptive.py" 
             test_output = run_command(test_cmd, log_test)
             
-            # 4. [修改点] 备份权重！
+            # 4. 备份权重
             # 必须在 clean_checkpoints 之前 (即下一次循环开始前) 执行
             backup_checkpoints(exp_id, seed)
 
@@ -171,3 +172,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
