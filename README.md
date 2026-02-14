@@ -236,7 +236,7 @@ Use the prediction helper to run inference on one PDB structure and optionally w
 
 ```bash
 python run_Predict_ProtCross.py \
-  --pdb_file examples/AF-P00734-F1-model_v6-example.pdb \
+  --pdb_file examples/example.pdb \
   --ckpt_path saved_weights/D_1/last.ckpt \
   --esm_weights esmc_weights/esmc_600m_2024_12_v0.pth \
   --pca_path data/pca_esmc_128.pkl \
