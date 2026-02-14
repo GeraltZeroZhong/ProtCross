@@ -27,6 +27,7 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
   - [5.4 Train](#54-train)
   - [5.5 Evaluate / Test](#55-evaluate--test)
   - [5.6 Run Multi-seed Benchmark](#56-run-multi-seed-benchmark)
+  - [5.7 Single-structure Prediction](#57-single-structure-prediction)
 - [6. Configuration Guide (Hydra)](#6-configuration-guide-hydra)
 - [7. Troubleshooting](#7-troubleshooting)
 - [8. License](#8-license)
@@ -75,6 +76,7 @@ ProtCross/
 ├── train.py
 ├── test_adaptive.py
 ├── run_multiseed_benchmark.py
+├── run_Predict_ProtCross.py
 └── environment.yml
 ```
 
@@ -226,6 +228,20 @@ Additional analysis scripts are available (e.g., `scripts/eval_run.py`) for task
 
 ```bash
 python run_multiseed_benchmark.py
+```
+
+### 5.7 Single-structure Prediction
+
+Use the prediction helper to run inference on one PDB structure and optionally write per-residue probabilities to the B-factor column of a new PDB file:
+
+```bash
+python run_Predict_ProtCross.py \
+  --pdb_file examples/AF-P00734-F1-model_v6-example.pdb \
+  --ckpt_path saved_weights/D_1/last.ckpt \
+  --esm_weights esmc_weights/esmc_600m_2024_12_v0.pth \
+  --pca_path data/pca_esmc_128.pkl \
+  --output_pdb examples/prediction_result.pdb \
+  --threshold 0.5
 ```
 
 ---
