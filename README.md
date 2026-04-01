@@ -1,6 +1,8 @@
 # ProtCross
 
-ProtCross is a domain-adaptive protein point-cloud learning framework for binding-site prediction across experimentally solved **PDB** structures and predicted **AlphaFold2 (AF2)** structures.
+ProtCross is a domain-adaptive protein point-cloud learning framework for binding-site prediction across experimentally solved **PDB** structures and predicted **AlphaFold2 (AF2)** structures. The model accepts structures from AlphaFold and can write per-residue binding probabilities to the **B-factor column** of a new PDB output file. For quick starts, jump directly to [Single-structure Prediction](#51-single-structure-prediction) or [Batch Prediction (Multiple Structures)](#52-batch-prediction-multiple-structures).
+
+📄 **Published paper (JCIM):** Zhong, S., & Jiang, Y. (2026). *ProtCross: Bridging the PDB-AlphaFold Gap for Binding Site Prediction with Protein Point Clouds*. *Journal of Chemical Information and Modeling*. Advance online publication. https://doi.org/10.1021/acs.jcim.5c03224
 
 The codebase combines:
 - residue-level structural geometry (Cα coordinates),
@@ -21,13 +23,14 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
   - [3.4 Verify Installation](#34-verify-installation)
 - [4. Data Preparation](#4-data-preparation)
 - [5. Usage](#5-usage)
-  - [5.1 Preprocess Source (PDB) with PCA Fit](#51-preprocess-source-pdb-with-pca-fit)
-  - [5.2 Preprocess Target (AF2) with Shared PCA](#52-preprocess-target-af2-with-shared-pca)
-  - [5.3 Map Labels from PDB to AF2](#53-map-labels-from-pdb-to-af2)
-  - [5.4 Train](#54-train)
-  - [5.5 Evaluate / Test](#55-evaluate--test)
-  - [5.6 Run Multi-seed Benchmark](#56-run-multi-seed-benchmark)
-  - [5.7 Single-structure Prediction](#57-single-structure-prediction)
+  - [5.1 Single-structure Prediction](#51-single-structure-prediction)
+  - [5.2 Batch Prediction (Multiple Structures)](#52-batch-prediction-multiple-structures)
+  - [5.3 Preprocess Source (PDB) with PCA Fit](#53-preprocess-source-pdb-with-pca-fit)
+  - [5.4 Preprocess Target (AF2) with Shared PCA](#54-preprocess-target-af2-with-shared-pca)
+  - [5.5 Map Labels from PDB to AF2](#55-map-labels-from-pdb-to-af2)
+  - [5.6 Train](#56-train)
+  - [5.7 Evaluate / Test](#57-evaluate--test)
+  - [5.8 Run Multi-seed Benchmark](#58-run-multi-seed-benchmark)
 - [6. Configuration Guide (Hydra)](#6-configuration-guide-hydra)
 - [7. Troubleshooting](#7-troubleshooting)
 - [8. License](#8-license)
@@ -161,7 +164,41 @@ python scripts/get_af2.py
 
 ## 5. Usage
 
-### 5.1 Preprocess Source (PDB) with PCA Fit
+### 5.1 Single-structure Prediction
+
+You can directly run inference on one PDB structure and optionally write per-residue probabilities to the B-factor column of a new PDB file.
+
+> A pretrained checkpoint is provided in this repository at `checkpoint/best-epoch=59.ckpt`.
+
+```bash
+python run_Predict_ProtCross.py \
+  --pdb_file examples/example.pdb \
+  --ckpt_path checkpoint/best-epoch=59.ckpt \
+  --esm_weights /absolute/path/to/esmc_600m_weights.pth \
+  --pca_path data/pca_esmc_128.pkl \
+  --output_pdb examples/prediction_result.pdb \
+  --threshold 0.5
+```
+
+### 5.2 Batch Prediction (Multiple Structures)
+
+`run_Predict_ProtCross.py` predicts one structure each run. For batch inference, iterate over PDB files in a shell loop:
+
+```bash
+mkdir -p batch_outputs
+for pdb in /path/to/pdb_dir/*.pdb; do
+  base="$(basename "${pdb}" .pdb)"
+  python run_Predict_ProtCross.py \
+    --pdb_file "${pdb}" \
+    --ckpt_path checkpoint/best-epoch=59.ckpt \
+    --esm_weights /absolute/path/to/esmc_600m_weights.pth \
+    --pca_path data/pca_esmc_128.pkl \
+    --output_pdb "batch_outputs/${base}_pred.pdb" \
+    --threshold 0.5
+done
+```
+
+### 5.3 Preprocess Source (PDB) with PCA Fit
 
 ```bash
 python scripts/preprocess_esm.py \
@@ -173,7 +210,7 @@ python scripts/preprocess_esm.py \
   --pca_dim 128
 ```
 
-### 5.2 Preprocess Target (AF2) with Shared PCA
+### 5.4 Preprocess Target (AF2) with Shared PCA
 
 ```bash
 python scripts/preprocess_esm.py \
@@ -184,13 +221,13 @@ python scripts/preprocess_esm.py \
   --is_af2
 ```
 
-### 5.3 Map Labels from PDB to AF2
+### 5.5 Map Labels from PDB to AF2
 
 ```bash
 python scripts/map_labels.py
 ```
 
-### 5.4 Train
+### 5.6 Train
 
 Default training:
 
@@ -216,7 +253,7 @@ python train.py \
   data.data_dir_af2=/abs/path/to/processed_af2
 ```
 
-### 5.5 Evaluate / Test
+### 5.7 Evaluate / Test
 
 ```bash
 python test_adaptive.py
@@ -224,24 +261,10 @@ python test_adaptive.py
 
 Additional analysis scripts are available (e.g., `scripts/eval_run.py`) for task-specific reporting.
 
-### 5.6 Run Multi-seed Benchmark
+### 5.8 Run Multi-seed Benchmark
 
 ```bash
 python run_multiseed_benchmark.py
-```
-
-### 5.7 Single-structure Prediction
-
-Use the prediction helper to run inference on one PDB structure and optionally write per-residue probabilities to the B-factor column of a new PDB file:
-
-```bash
-python run_Predict_ProtCross.py \
-  --pdb_file examples/example.pdb \
-  --ckpt_path saved_weights/D_1/last.ckpt \
-  --esm_weights esmc_weights/esmc_600m_2024_12_v0.pth \
-  --pca_path data/pca_esmc_128.pkl \
-  --output_pdb examples/prediction_result.pdb \
-  --threshold 0.5
 ```
 
 ---
