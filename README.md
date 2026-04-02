@@ -115,7 +115,7 @@ python -c "import torch; import torch_geometric; import pytorch_lightning; impor
 
 ## 3. Usage
 
-This section is intentionally split into two workflows:
+This section is split into two workflows:
 - **Apply ProtCross**: use the released checkpoint for inference.
 - **Reproduce ProtCross**: rebuild datasets/features and retrain/evaluate the model.
 
@@ -303,8 +303,6 @@ ProtCross/
   - Verify that your torch version and wheel index URL match the environment (torch 2.3.0 + cu121).
 - **OOM during preprocessing/training**
   - Reduce batch size, use shorter runs, or switch to a smaller subset first.
-- **No files processed**
-  - Confirm input extensions are `.pdb`/`.cif` and paths are correct.
 
 ---
 
