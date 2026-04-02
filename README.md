@@ -91,13 +91,12 @@ If you do not have a CUDA-capable GPU:
 ProtCross currently expects a **local ESM-C checkpoint path** for `--model_name` in preprocessing.
 
 #### What is ESM-C?
-**ESM-C** is EvolutionaryScale's protein language model family for extracting residue-level sequence representations.  
-In ProtCross, ESM-C embeddings are used as per-residue features and then reduced with PCA before training/inference.
+**ESM-C** is EvolutionaryScale's protein language model family for extracting residue-level sequence representations.  In ProtCross, ESM-C embeddings are used as per-residue features.
 
 Recommended checkpoint for this project:
 - **ESM-C 600M (2024-12)**: https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
 
-#### Download guide (English)
+#### Download guide
 
 You can download the model weights from Hugging Face in either of the following ways.
 
