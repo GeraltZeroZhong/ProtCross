@@ -103,7 +103,6 @@ python scripts/preprocess_esm.py \
 Important details:
 - `--model_name` is treated as a local file path in current code.
 - The script truncates sequences to length 1022 for ESM-C context compatibility.
-- Fit PCA once on source (PDB), then reuse the same PCA file for AF2.
 
 ### 2.4 Verify Installation
 
