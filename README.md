@@ -90,6 +90,38 @@ If you do not have a CUDA-capable GPU:
 
 ProtCross currently expects a **local ESM-C checkpoint path** for `--model_name` in preprocessing.
 
+#### What is ESM-C?
+**ESM-C** is EvolutionaryScale's protein language model family for extracting residue-level sequence representations.  
+In ProtCross, ESM-C embeddings are used as per-residue features and then reduced with PCA before training/inference.
+
+Recommended checkpoint for this project:
+- **ESM-C 600M (2024-12)**: https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
+
+#### Download guide (English)
+
+You can download the model weights from Hugging Face in either of the following ways.
+
+**Option A — Git LFS clone**
+```bash
+# 1) Install Git LFS once (if needed)
+git lfs install
+
+# 2) Clone the model repository
+git clone https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
+```
+
+**Option B — Hugging Face CLI**
+```bash
+# 1) Install CLI
+pip install -U "huggingface_hub[cli]"
+
+# 2) Download repository files to a local directory
+huggingface-cli download EvolutionaryScale/esmc-600m-2024-12 \
+  --local-dir ./esmc-600m-2024-12
+```
+
+After downloading, locate the checkpoint file (`.pth` / `.pt` depending on repository contents) and pass its absolute path to `--model_name` / `--esm_weights`.
+
 Example:
 ```bash
 python scripts/preprocess_esm.py \
