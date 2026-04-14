@@ -2,7 +2,7 @@
 
 ProtCross is a domain-adaptive protein point-cloud learning framework for binding-site prediction across experimentally solved **PDB** structures and predicted **AlphaFold2 (AF2)** structures. The model accepts structures from AlphaFold and can write per-residue binding probabilities to the **B-factor column** of a new PDB output file. For quick starts, jump directly to [Single-structure Prediction](#311-single-structure-prediction) or [Batch Prediction (Multiple Structures)](#312-batch-prediction-multiple-structures).
 
-📄 **Published paper (JCIM):** Zhong, S., & Jiang, Y. (2026). *ProtCross: Bridging the PDB-AlphaFold Gap for Binding Site Prediction with Protein Point Clouds*. *Journal of Chemical Information and Modeling*. Advance online publication. https://doi.org/10.1021/acs.jcim.5c03224
+📄 **Published paper (JCIM):** Zhong, S., & Jiang, Y. (2026). ProtCross: Bridging the PDB-AlphaFold Gap for Binding Site Prediction with Protein Point Clouds. Journal of chemical information and modeling, 66(7), 3688–3701. https://doi.org/10.1021/acs.jcim.5c03224
 
 The codebase combines:
 - residue-level structural geometry (Cα coordinates),
