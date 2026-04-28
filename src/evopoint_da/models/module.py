@@ -9,11 +9,9 @@ from torchmetrics import SumMetric
 import numpy as np
 
 from .backbones.pointnet2 import PointNet2Backbone
+from .domain_weights import confidence_weights, normalize_plddt
 from .heads.classifier import SegmentationHead, DomainDiscriminator
 
-# ==========================================
-# 1. Gradient Reversal Layer (GRL)
-# ==========================================
 class GradientReversalFn(Function):
     @staticmethod
     def forward(ctx, x, alpha):
@@ -31,9 +29,6 @@ class GradientReversal(nn.Module):
     def forward(self, x):
         return GradientReversalFn.apply(x, self.alpha)
 
-# ==========================================
-# 2. EvoPointDA Lightning Module
-# ==========================================
 class EvoPointDALitModule(pl.LightningModule):
     def __init__(self, 
                  lr: float = 3e-4, 
@@ -50,19 +45,15 @@ class EvoPointDALitModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         
-        # Determine backbone input channels
         backbone_in_channels = feature_dim if use_esm else 0
-        
-        # Architecture
+
         self.backbone = PointNet2Backbone(in_channels=backbone_in_channels, out_channels=128)
         self.seg_head = SegmentationHead(in_channels=128, out_channels=2)
-        
-        # Domain Adaptation Components
+
         if use_da:
             self.domain_disc = DomainDiscriminator(in_channels=128)
             self.grl = GradientReversal(alpha=1.0)
-        
-        # --- Metrics Setup ---
+
         self.test_iou = MulticlassJaccardIndex(num_classes=2, average='none')
         self.test_iou_high = MulticlassJaccardIndex(num_classes=2, average='none')
         self.test_iou_med = MulticlassJaccardIndex(num_classes=2, average='none')
@@ -76,9 +67,7 @@ class EvoPointDALitModule(pl.LightningModule):
         self.count_pred_low   = SumMetric()
 
     def _normalize_plddt(self, plddt_tensor):
-        if plddt_tensor.max() > 1.0:
-            return plddt_tensor / 100.0
-        return plddt_tensor
+        return normalize_plddt(plddt_tensor)
 
     def focal_loss(self, logits, targets, alpha=0.5, gamma=2.0):
         ce_loss = F.cross_entropy(logits, targets, reduction='none')
@@ -92,10 +81,7 @@ class EvoPointDALitModule(pl.LightningModule):
         else:
             src, tgt = batch, None
         
-        # === 1. Source Flow ===
         src_x = src.x if self.hparams.use_esm else None
-        
-        # Augmentation
         src_pos = src.pos + torch.randn_like(src.pos) * self.hparams.pos_noise
         src_pos = self._random_rotate(src_pos) 
         
@@ -103,7 +89,6 @@ class EvoPointDALitModule(pl.LightningModule):
         seg_logits = self.seg_head(src_feats)
         loss_seg = self.focal_loss(seg_logits, src.y.long())
         
-        # === 2. DA Flow ===
         loss_da = torch.tensor(0.0, device=self.device)
         
         if self.hparams.use_da and tgt is not None:
@@ -118,43 +103,7 @@ class EvoPointDALitModule(pl.LightningModule):
             d_t = self.domain_disc(self.grl(tgt_feats))
             
             if self.hparams.use_plddt_weight:
-                p_norm = self._normalize_plddt(tgt.plddt)
-                ws = self.hparams.weight_strategy  # 获取策略名称
-
-                if ws == 'sine':
-                    # Sine: sin(pi/2 * p)
-                    weights = torch.sin(torch.tensor(np.pi/2, device=self.device) * p_norm)
-                elif ws == 'cosine':
-                    # Cosine: 1 - cos(pi/2 * p)
-                    weights = 1.0 - torch.cos(torch.tensor(np.pi/2, device=self.device) * p_norm)
-                elif ws.startswith('pLDDT'):
-                    # 多项式(pLDDT^4)
-                    try: k = float(ws.split('^')[1]) if '^' in ws else 4.0
-                    except: k = 4.0
-                    weights = p_norm ** k
-                elif ws.startswith('threshold'):
-                    # 硬阈值策略 (例如 threshold_0.6)
-                    try: tau = float(ws.split('_')[1])
-                    except: tau = 0.6
-                    weights = (p_norm > tau).float()
-                elif ws.startswith('exponential'):
-                    # 指数策略 (例如 exponential_4)
-                    try: beta = float(ws.split('_')[1])
-                    except: beta = 4.0
-                    weights = torch.exp(beta * (p_norm - 1.0))
-                elif ws.startswith('sigmoid'):
-                    # 格式: sigmoid_0.7_30 (中心_斜率)
-                    try: 
-                        parts = ws.split('_')
-                        tau, k = float(parts[1]), float(parts[2])
-                    except: tau, k = 0.7, 20.0
-                    # 公式: 1 / (1 + exp(-k * (p - tau)))
-                    weights = torch.sigmoid(k * (p_norm - tau))
-                else:
-                    # 默认回退
-                    weights = p_norm ** 4.0
-                
-                weights = weights.view(-1, 1)
+                weights = confidence_weights(tgt.plddt, self.hparams.weight_strategy).view(-1, 1)
                 
                 raw_bce = F.binary_cross_entropy_with_logits(d_t, torch.zeros_like(d_t), reduction='none')
                 loss_d_t = (raw_bce * weights).sum() / (weights.sum() + 1e-6)
@@ -171,17 +120,12 @@ class EvoPointDALitModule(pl.LightningModule):
         
         return total_loss
     def validation_step(self, batch, batch_idx):
-        """计算验证集损失和指标"""
-        # 1. 前向传播
+        """Compute validation loss."""
         src_x = batch.x if self.hparams.use_esm else None
         feats, _ = self.backbone(src_x, batch.pos, batch.batch)
         logits = self.seg_head(feats)
-        
-        # 2. 计算分割损失
-        # 强制将 y 转为 long 类型，防止 float 报错
+
         loss = torch.nn.functional.cross_entropy(logits, batch.y.long())
-        
-        # 3. 记录日志
         self.log('val/loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         
         return loss
@@ -196,11 +140,9 @@ class EvoPointDALitModule(pl.LightningModule):
         p = self._normalize_plddt(batch.plddt).squeeze() 
         preds = (probs > 0.35).long() 
         
-        # Metrics
         self.test_iou(preds, batch.y)
         self.log("test/iou_overall", self.test_iou.compute()[1])
 
-        # Analysis
         masks = {
             "high": p >= 0.9,
             "med":  (p >= 0.7) & (p < 0.9),

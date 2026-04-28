@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+outputs/
+logs/
+checkpoints/
+saved_weights/
+multiseed_raw_results.csv
+multiseed_summary_report.csv
+
+*.egg-info/
+build/
+dist/

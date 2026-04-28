@@ -2,6 +2,7 @@ import os
 import sys
 import warnings
 import json
+import glob
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -22,9 +23,8 @@ warnings.filterwarnings("ignore")
 
 
 def _add_src_to_path():
-    # 添加项目根目录到 sys.path，保证 `import src...` 可用
     this_dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.append(os.path.join(this_dir, ".."))
+    sys.path.append(os.path.join(this_dir, "..", "src"))
 
 def _find_ckpt_in_folder(folder_path):
     target_ckpt = os.path.join(folder_path, "last.ckpt")
@@ -35,10 +35,7 @@ def _find_ckpt_in_folder(folder_path):
 
 
 def _scan_checkpoints_by_prefix(root_dir, prefixes):
-    """
-    仅供新增 ABCD-only 输出使用：按文件夹前缀扫描 ckpt。
-    约定：saved_weights 子目录形如 'B_xxx' / 'C_xxx' 等。
-    """
+    """Scan checkpoint folders by experiment prefix."""
     groups = {p: [] for p in prefixes}
     if not os.path.exists(root_dir):
         return groups
@@ -55,7 +52,6 @@ def _scan_checkpoints_by_prefix(root_dir, prefixes):
 
 
 def _serialize_meanstd_dict(d):
-    # d: {'best_f1': (mean,std), ...} 或 None
     if d is None:
         return None
     out = {}
@@ -77,13 +73,13 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 1) Load Dataset
-    print(f"📦 Loading Dataset from {AF2_DATA}...")
+    print(f"Loading dataset from {AF2_DATA}...")
     try:
         ds = EvalDataset(root=AF2_DATA, split="test")
         if len(ds) == 0:
             raise ValueError("Empty split")
     except Exception:
-        print("   ⚠️ Test split empty or failed, trying ALL files.")
+        print("   Test split is empty or unavailable; trying all files.")
         ds = EvalDataset(root=AF2_DATA, split="all")
 
     loader = DataLoader(ds, batch_size=1, shuffle=False)
@@ -91,7 +87,7 @@ def main():
     # 2) Group Checkpoints
     groups = get_grouped_checkpoints(WEIGHTS_DIR)
     if not groups["A"] and not groups["D"]:
-        print("❌ No checkpoints found.")
+        print("No checkpoints found.")
         return
 
     # 3) Calculate Stats
@@ -102,7 +98,7 @@ def main():
         if not groups[name]:
             continue
 
-        print(f"\n📈 Processing {label} ({len(groups[name])} runs)...")
+        print(f"\nProcessing {label} ({len(groups[name])} runs).")
 
         # ROC Stats
         fpr, tpr, tpr_std, auc_m, auc_s = aggregate_roc_results(groups[name], loader, device)
@@ -122,14 +118,14 @@ def main():
         print_table_rows.append(
             {
                 "Model": label,
-                "AUC": f"{auc_m:.4f} ± {auc_s:.4f}",
-                "AP": f"{ap_m:.4f} ± {ap_s:.4f}",
-                "MaxF1": f"{bf1['best_f1'][0]:.4f} ± {bf1['best_f1'][1]:.4f}",
-                "Thr@F1": f"{bf1['best_thr'][0]:.4f} ± {bf1['best_thr'][1]:.4f}",
-                "Prec@F1": f"{bf1['prec'][0]:.4f} ± {bf1['prec'][1]:.4f}",
-                "Rec@F1": f"{bf1['rec'][0]:.4f} ± {bf1['rec'][1]:.4f}",
-                "TNR": f"{bf1['tnr'][0]:.4f} ± {bf1['tnr'][1]:.4f}",
-                "BalAcc": f"{bf1['bal_acc'][0]:.4f} ± {bf1['bal_acc'][1]:.4f}",
+                "AUC": f"{auc_m:.4f} +/- {auc_s:.4f}",
+                "AP": f"{ap_m:.4f} +/- {ap_s:.4f}",
+                "MaxF1": f"{bf1['best_f1'][0]:.4f} +/- {bf1['best_f1'][1]:.4f}",
+                "Thr@F1": f"{bf1['best_thr'][0]:.4f} +/- {bf1['best_thr'][1]:.4f}",
+                "Prec@F1": f"{bf1['prec'][0]:.4f} +/- {bf1['prec'][1]:.4f}",
+                "Rec@F1": f"{bf1['rec'][0]:.4f} +/- {bf1['rec'][1]:.4f}",
+                "TNR": f"{bf1['tnr'][0]:.4f} +/- {bf1['tnr'][1]:.4f}",
+                "BalAcc": f"{bf1['bal_acc'][0]:.4f} +/- {bf1['bal_acc'][1]:.4f}",
             }
         )
 
@@ -180,7 +176,7 @@ def main():
     plt.rcParams.update({"font.size": 14, "axes.linewidth": 1.5, "font.family": "sans-serif"})
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7), dpi=300)
 
-    # Colors (保持原始配色)
+    # Colors match the original paper figure palette.
     c_A = "#7f8c8d"  # Grey (Baseline)
     c_D = "#d35400"  # Orange (ProtCross)
     c_P = "#27ae60"  # Green (PeSTo)
@@ -191,12 +187,12 @@ def main():
 
     if "A" in stats:
         fpr, tpr, std, auc_m, auc_s = stats["A"]["roc"]
-        ax1.plot(fpr, tpr, color=c_A, lw=2, label=f"Baseline (AUC={auc_m:.2f}±{auc_s:.2f})")
+        ax1.plot(fpr, tpr, color=c_A, lw=2, label=f"Baseline (AUC={auc_m:.2f}+/-{auc_s:.2f})")
         ax1.fill_between(fpr, np.maximum(tpr - std, 0), np.minimum(tpr + std, 1), color=c_A, alpha=0.2)
 
     if "D" in stats:
         fpr, tpr, std, auc_m, auc_s = stats["D"]["roc"]
-        ax1.plot(fpr, tpr, color=c_D, lw=3, label=f"ProtCross (AUC={auc_m:.2f}±{auc_s:.2f})")
+        ax1.plot(fpr, tpr, color=c_D, lw=3, label=f"ProtCross (AUC={auc_m:.2f}+/-{auc_s:.2f})")
         ax1.fill_between(fpr, np.maximum(tpr - std, 0), np.minimum(tpr + std, 1), color=c_D, alpha=0.2)
 
     if p_ext is not None:
@@ -216,12 +212,12 @@ def main():
     # --- Plot PR (ax2) ---
     if "A" in stats:
         rec, prec, std, ap_m, ap_s = stats["A"]["pr"]
-        ax2.plot(rec, prec, color=c_A, lw=2, label=f"Baseline (AP={ap_m:.2f}±{ap_s:.2f})")
+        ax2.plot(rec, prec, color=c_A, lw=2, label=f"Baseline (AP={ap_m:.2f}+/-{ap_s:.2f})")
         ax2.fill_between(rec, np.maximum(prec - std, 0), np.minimum(prec + std, 1), color=c_A, alpha=0.2)
 
     if "D" in stats:
         rec, prec, std, ap_m, ap_s = stats["D"]["pr"]
-        ax2.plot(rec, prec, color=c_D, lw=3, label=f"ProtCross (AP={ap_m:.2f}±{ap_s:.2f})")
+        ax2.plot(rec, prec, color=c_D, lw=3, label=f"ProtCross (AP={ap_m:.2f}+/-{ap_s:.2f})")
         ax2.fill_between(rec, np.maximum(prec - std, 0), np.minimum(prec + std, 1), color=c_D, alpha=0.2)
 
     if p_ext is not None:
@@ -241,7 +237,7 @@ def main():
     plt.tight_layout()
     out_file = "aggregated_metrics_plot.png"
     plt.savefig(out_file)
-    print(f"\n✅ Plot saved to {out_file}")
+    print(f"\nPlot saved to {out_file}")
 
     # 6) Print Summary Tables
     print("\n" + "=" * 70)
@@ -265,14 +261,10 @@ def main():
         )
     print("=" * 120 + "\n")
 
-        # =========================================================
     # 7) EXTRA OUTPUT: ABCD-only (no PeSTo/P2Rank), new files
-    # =========================================================
-    # 扫描 B/C（A/D 复用原来的 groups）
     bc = _scan_checkpoints_by_prefix(WEIGHTS_DIR, prefixes=("B", "C"))
     groups_abcd = {"A": groups.get("A", []), "B": bc.get("B", []), "C": bc.get("C", []), "D": groups.get("D", [])}
 
-    # 复用已算好的 A/D；只额外算 B/C
     stats_abcd = {}
     labels_abcd = {"A": "Baseline (Pure Geom)", "B": "+ ESM Embeddings", "C": "+ Standard DA (w/o pLDDT)", "D": "ProtCross"}
 
@@ -280,11 +272,11 @@ def main():
         if not groups_abcd[k]:
             continue
 
-        if k in stats:  # A/D 已在旧流程算过
+        if k in stats:
             stats_abcd[k] = stats[k]
             continue
 
-        print(f"\n📈 [ABCD-only] Processing {labels_abcd[k]} ({len(groups_abcd[k])} runs).")
+        print(f"\n[ABCD-only] Processing {labels_abcd[k]} ({len(groups_abcd[k])} runs).")
         fpr, tpr, tpr_std, auc_m, auc_s = aggregate_roc_results(groups_abcd[k], loader, device)
         rec, prec, prec_std, ap_m, ap_s = aggregate_pr_results(groups_abcd[k], loader, device)
         bf1 = aggregate_bestf1_metrics(groups_abcd[k], loader, device)
@@ -295,7 +287,6 @@ def main():
             "bf1": bf1,
         }
 
-        # --- 构造 ABCD-only 的打印表（同旧格式）---
     print_table_rows_abcd = []
     for k in ["A", "B", "C", "D"]:
         if k not in stats_abcd:
@@ -307,18 +298,17 @@ def main():
 
         row = {
             "Model": labels_abcd[k],
-            "AUC": f"{auc_m:.4f} ± {auc_s:.4f}",
-            "AP": f"{ap_m:.4f} ± {ap_s:.4f}",
-            "MaxF1": f"{bf1['best_f1'][0]:.4f} ± {bf1['best_f1'][1]:.4f}" if bf1 else "-",
-            "Thr@F1": f"{bf1['best_thr'][0]:.4f} ± {bf1['best_thr'][1]:.4f}" if bf1 else "-",
-            "Prec@F1": f"{bf1['prec'][0]:.4f} ± {bf1['prec'][1]:.4f}" if bf1 else "-",
-            "Rec@F1": f"{bf1['rec'][0]:.4f} ± {bf1['rec'][1]:.4f}" if bf1 else "-",
-            "TNR": f"{bf1['tnr'][0]:.4f} ± {bf1['tnr'][1]:.4f}" if bf1 else "-",
-            "BalAcc": f"{bf1['bal_acc'][0]:.4f} ± {bf1['bal_acc'][1]:.4f}" if bf1 else "-",
+            "AUC": f"{auc_m:.4f} +/- {auc_s:.4f}",
+            "AP": f"{ap_m:.4f} +/- {ap_s:.4f}",
+            "MaxF1": f"{bf1['best_f1'][0]:.4f} +/- {bf1['best_f1'][1]:.4f}" if bf1 else "-",
+            "Thr@F1": f"{bf1['best_thr'][0]:.4f} +/- {bf1['best_thr'][1]:.4f}" if bf1 else "-",
+            "Prec@F1": f"{bf1['prec'][0]:.4f} +/- {bf1['prec'][1]:.4f}" if bf1 else "-",
+            "Rec@F1": f"{bf1['rec'][0]:.4f} +/- {bf1['rec'][1]:.4f}" if bf1 else "-",
+            "TNR": f"{bf1['tnr'][0]:.4f} +/- {bf1['tnr'][1]:.4f}" if bf1 else "-",
+            "BalAcc": f"{bf1['bal_acc'][0]:.4f} +/- {bf1['bal_acc'][1]:.4f}" if bf1 else "-",
         }
         print_table_rows_abcd.append(row)
 
-    # --- 打印：ABCD-only AUC/AP 表 ---
     print("\n" + "=" * 70)
     print("[ABCD-only] Summary (AUC / AP)")
     print(f"{'Model':<15} | {'AUC':<18} | {'AP':<18}")
@@ -327,7 +317,6 @@ def main():
         print(f"{row['Model']:<15} | {row['AUC']:<18} | {row['AP']:<18}")
     print("=" * 70)
 
-    # --- 打印：ABCD-only MaxF1/Threshold/Precision/Recall/TNR/BalAcc 表 ---
     print("\n" + "=" * 120)
     print("[ABCD-only] Best-F1 Metrics")
     print(
@@ -343,7 +332,6 @@ def main():
     print("=" * 120 + "\n")
 
     
-    # --- 保存 ABCD-only stats（JSON）---
     payload_abcd = {"models": {}}
     for k, v in stats_abcd.items():
         fpr, tpr, tpr_std, auc_m, auc_s = v["roc"]
@@ -360,7 +348,6 @@ def main():
     with open(out_stat_abcd, "w", encoding="utf-8") as f:
         json.dump(payload_abcd, f, indent=2)
 
-    # --- 画 ABCD-only 新图 ---
     fig2, (bx1, bx2) = plt.subplots(1, 2, figsize=(16, 7), dpi=300)
     colors = {"A": "#7f8c8d", "B": "#8e44ad", "C": "#16a085", "D": "#d35400"}
 
@@ -370,7 +357,7 @@ def main():
             continue
         fpr, tpr, std, auc_m, auc_s = stats_abcd[k]["roc"]
         bx1.plot(fpr, tpr, color=colors[k], lw=3 if k == "D" else 2,
-                 label=f"{labels_abcd[k]} (AUC={auc_m:.2f}±{auc_s:.2f})")
+                 label=f"{labels_abcd[k]} (AUC={auc_m:.2f}+/-{auc_s:.2f})")
         bx1.fill_between(fpr, np.maximum(tpr - std, 0), np.minimum(tpr + std, 1), color=colors[k], alpha=0.2)
     bx1.set_xlabel("False Positive Rate")
     bx1.set_ylabel("True Positive Rate")
@@ -383,7 +370,7 @@ def main():
             continue
         rec, prec, std, ap_m, ap_s = stats_abcd[k]["pr"]
         bx2.plot(rec, prec, color=colors[k], lw=3 if k == "D" else 2,
-                 label=f"{labels_abcd[k]} (AP={ap_m:.2f}±{ap_s:.2f})")
+                 label=f"{labels_abcd[k]} (AP={ap_m:.2f}+/-{ap_s:.2f})")
         bx2.fill_between(rec, np.maximum(prec - std, 0), np.minimum(prec + std, 1), color=colors[k], alpha=0.2)
     bx2.set_xlabel("Recall")
     bx2.set_ylabel("Precision")
@@ -396,8 +383,8 @@ def main():
     plt.savefig(out_fig_abcd)
     plt.close(fig2)
 
-    print(f"\n✅ [ABCD-only] Plot saved to {out_fig_abcd}")
-    print(f"✅ [ABCD-only] Stats saved to {out_stat_abcd}")
+    print(f"\n[ABCD-only] Plot saved to {out_fig_abcd}")
+    print(f"[ABCD-only] Stats saved to {out_stat_abcd}")
 
 
 
