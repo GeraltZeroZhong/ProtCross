@@ -4,3 +4,6 @@ data_dir_af2: ${paths.data_dir}/processed_af2
 batch_size: 8
 num_workers: 2
 use_target_domain: true
+train_split: train
+target_split: train
+val_split: val

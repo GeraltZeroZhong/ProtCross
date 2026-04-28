@@ -33,11 +33,24 @@ class PredictorAssets:
 
     @classmethod
     def from_dir(cls, assets_dir: str | Path) -> "PredictorAssets":
+        from evopoint_da.assets import (
+            DEFAULT_CHECKPOINT_FILENAME,
+            DEFAULT_PCA_FILENAME,
+            LEGACY_CHECKPOINT_FILENAME,
+            LEGACY_PCA_FILENAME,
+        )
+
         assets_dir = Path(assets_dir)
+        checkpoint = assets_dir / DEFAULT_CHECKPOINT_FILENAME
+        if not checkpoint.exists() and (assets_dir / LEGACY_CHECKPOINT_FILENAME).exists():
+            checkpoint = assets_dir / LEGACY_CHECKPOINT_FILENAME
+        pca = assets_dir / DEFAULT_PCA_FILENAME
+        if not pca.exists() and (assets_dir / LEGACY_PCA_FILENAME).exists():
+            pca = assets_dir / LEGACY_PCA_FILENAME
         return cls(
-            checkpoint=assets_dir / "best-epoch=59.ckpt",
+            checkpoint=checkpoint,
             esm_weights=assets_dir / "esmc_600m_2024_12_v0.pth",
-            pca=assets_dir / "pca_esmc_128.pkl",
+            pca=pca,
         )
 
     @classmethod

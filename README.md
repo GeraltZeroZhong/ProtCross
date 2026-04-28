@@ -23,23 +23,25 @@ protcross setup-assets
 protcross predict input.pdb --output input.protcross.pdb
 ```
 
-`protcross setup-assets` installs runtime assets into `~/.cache/protcross/assets/v0.1.1` by default:
+`protcross setup-assets` installs runtime assets into `~/.cache/protcross/assets/v0.1.2` by default:
 
 ```text
-best-epoch=59.ckpt          # ProtCross checkpoint from the GitHub release
-pca_esmc_128.pkl            # PCA reducer from the GitHub release
-esmc_600m_2024_12_v0.pth    # ESM-C weights from Hugging Face
+protcross-0.1.2-binding-moad-final.ckpt    # recommended release checkpoint
+pca_esmc_128_binding_moad_0.1.2.pkl        # matching PCA reducer
+esmc_600m_2024_12_v0.pth                   # ESM-C weights from Hugging Face
 ```
 
-PyPI packages ship code only. The checkpoint and PCA file must be attached to the `v0.1.1` GitHub release with the exact filenames above, or supplied with custom URLs:
+PyPI packages ship code only. The checkpoint and PCA file must be attached to the `v0.1.2` GitHub release with the exact filenames above, or supplied with custom URLs:
 
 ```bash
 protcross setup-assets \
-  --checkpoint-url https://example.org/best-epoch=59.ckpt \
-  --pca-url https://example.org/pca_esmc_128.pkl
+  --checkpoint-url https://example.org/protcross-0.1.2-binding-moad-final.ckpt \
+  --pca-url https://example.org/pca_esmc_128_binding_moad_0.1.2.pkl
 ```
 
-GitHub release assets normalize `=` in filenames, so the default checkpoint URL points to `best-epoch.59.ckpt` and saves it locally as `best-epoch=59.ckpt`.
+Use the `0.1.2` release checkpoint for practical binding-site prediction and when reporting ProtCross as a benchmark method. If ProtCross is used as a benchmark, report the probability threshold used for the final predictions.
+
+To reproduce the original ProtCross paper results, use the `0.1.1` checkpoint `best-epoch=59.ckpt` and its matching `pca_esmc_128.pkl`. The original paper experiments were based on the PDBbind v2020 refined set.
 
 If your system already has ESM-C weights, skip that large download and pass the path at prediction time:
 
@@ -147,10 +149,10 @@ protcross setup-assets
 
 By default this downloads:
 - ESM-C 600M weights from https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
-- `best-epoch.59.ckpt` from the ProtCross `v0.1.1` GitHub release, saved locally as `best-epoch=59.ckpt`
-- `pca_esmc_128.pkl` from the ProtCross `v0.1.1` GitHub release
+- `protcross-0.1.2-binding-moad-final.ckpt` from the ProtCross `v0.1.2` GitHub release
+- `pca_esmc_128_binding_moad_0.1.2.pkl` from the ProtCross `v0.1.2` GitHub release
 
-The default install location is `~/.cache/protcross/assets/v0.1.1`. You can override it with `PROTCROSS_ASSETS_DIR` or `--output-dir`:
+The default install location is `~/.cache/protcross/assets/v0.1.2`. You can override it with `PROTCROSS_ASSETS_DIR` or `--output-dir`:
 
 ```bash
 PROTCROSS_ASSETS_DIR=/data/protcross-assets protcross setup-assets
@@ -167,9 +169,9 @@ For source checkouts or custom releases, explicit paths are still supported:
 
 ```bash
 protcross predict input.pdb \
-  --checkpoint checkpoint/best-epoch=59.ckpt \
+  --checkpoint checkpoints/protcross-0.1.2-binding-moad-final.ckpt \
   --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
-  --pca data/pca_esmc_128.pkl \
+  --pca data/pca_esmc_128_binding_moad_0.1.2.pkl \
   --output input.protcross.pdb
 ```
 
@@ -235,13 +237,17 @@ This section is split into two workflows:
 - **Apply ProtCross**: use the released checkpoint for inference.
 - **Reproduce ProtCross**: rebuild datasets/features and retrain/evaluate the model.
 
+For most users, the `0.1.2` release checkpoint is the recommended model. It was trained as a release model for external generalization evaluation using Binding MOAD-derived source structures and matched AF2 target structures. If you use ProtCross as a benchmark, use the release checkpoint and report the threshold used for evaluation.
+
+For reproducing the original ProtCross paper, use the `0.1.1` checkpoint `best-epoch=59.ckpt` and matching `pca_esmc_128.pkl`; those assets correspond to the original PDBbind v2020 refined-set experiments.
+
 ### 3.1 Apply ProtCross (Inference with Existing Model)
 
 ### 3.1.1 Single-structure Prediction
 
 You can directly run inference on one PDB structure and write per-residue probabilities to the B-factor column of a new PDB file.
 
-The recommended 0.1.1 path for PyPI users is:
+The recommended 0.1.2 path for PyPI users is:
 
 ```bash
 protcross setup-assets
@@ -265,7 +271,7 @@ protcross predict examples/6fhu.pdb \
   --output examples/6fhu.pred.pdb
 ```
 
-The asset directory should contain `best-epoch=59.ckpt`, `esmc_600m_2024_12_v0.pth`, and `pca_esmc_128.pkl`. Alternatively, set `PROTCROSS_CHECKPOINT`, `PROTCROSS_ESM_WEIGHTS`, and `PROTCROSS_PCA`.
+The asset directory should contain `protcross-0.1.2-binding-moad-final.ckpt`, `esmc_600m_2024_12_v0.pth`, and `pca_esmc_128_binding_moad_0.1.2.pkl`. Older `v0.1.1` asset directories with `best-epoch=59.ckpt` and `pca_esmc_128.pkl` are still accepted for paper reproduction. Alternatively, set `PROTCROSS_CHECKPOINT`, `PROTCROSS_ESM_WEIGHTS`, and `PROTCROSS_PCA`.
 
 The standalone entry point is equivalent:
 
@@ -278,9 +284,9 @@ The legacy 0.1.0 command is still supported:
 ```bash
 python run_Predict_ProtCross.py \
   --pdb_file examples/6fhu.pdb \
-  --ckpt_path checkpoint/best-epoch=59.ckpt \
+  --ckpt_path checkpoints/protcross-0.1.2-binding-moad-final.ckpt \
   --esm_weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
-  --pca_path data/pca_esmc_128.pkl \
+  --pca_path data/pca_esmc_128_binding_moad_0.1.2.pkl \
   --output_pdb examples/6fhu.pred.pdb
 ```
 
@@ -297,9 +303,9 @@ result = predictor.predict("examples/6fhu.pdb", output_pdb="examples/6fhu.pred.p
 
 result = predict_pdb(
     "examples/6fhu.pdb",
-    ckpt_path="checkpoint/best-epoch=59.ckpt",
+    ckpt_path="checkpoints/protcross-0.1.2-binding-moad-final.ckpt",
     esm_weights="/absolute/path/to/esmc_600m_2024_12_v0.pth",
-    pca_path="data/pca_esmc_128.pkl",
+    pca_path="data/pca_esmc_128_binding_moad_0.1.2.pkl",
     output_pdb="examples/6fhu.pred.pdb",
 )
 print(result.format_summary())
@@ -350,7 +356,7 @@ protcross-preprocess \
   --data_dir data/raw_pdb \
   --output_dir data/processed_pdb \
   --fit_pca \
-  --model_name ~/.cache/protcross/assets/v0.1.1/esmc_600m_2024_12_v0.pth \
+  --model_name ~/.cache/protcross/assets/v0.1.2/esmc_600m_2024_12_v0.pth \
   --pca_model_path pca_esmc_128.pkl \
   --pca_dim 128
 ```
@@ -361,7 +367,7 @@ protcross-preprocess \
 protcross-preprocess \
   --data_dir data/raw_af2 \
   --output_dir data/processed_af2 \
-  --model_name ~/.cache/protcross/assets/v0.1.1/esmc_600m_2024_12_v0.pth \
+  --model_name ~/.cache/protcross/assets/v0.1.2/esmc_600m_2024_12_v0.pth \
   --pca_model_path pca_esmc_128.pkl \
   --is_af2
 ```
@@ -412,7 +418,7 @@ python train.py \
 ### 3.2.6 Evaluate / Test
 
 ```bash
-python test_adaptive.py ckpt_path=checkpoint/best-epoch=59.ckpt
+python test_adaptive.py ckpt_path=checkpoints/protcross-0.1.2-binding-moad-final.ckpt
 ```
 
 Additional analysis scripts are available (e.g., `scripts/eval_run.py`) for task-specific reporting.
@@ -483,7 +489,7 @@ ProtCross/
 - **`FileNotFoundError` for ESM-C weights**
   - Run `protcross setup-assets`, or ensure `--esm-weights` / `--model_name` points to an existing local `.pth` checkpoint file.
 - **`protcross setup-assets` cannot find GitHub release assets**
-  - Attach `best-epoch.59.ckpt` and `pca_esmc_128.pkl` to the `v0.1.1` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
+  - Attach `protcross-0.1.2-binding-moad-final.ckpt` and `pca_esmc_128_binding_moad_0.1.2.pkl` to the `v0.1.2` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
 - **Torch Geometric install issues**
   - Verify that your torch version and wheel index URL match the environment (torch 2.3.0 + cu121).
 - **OOM during preprocessing/training**
@@ -492,6 +498,13 @@ ProtCross/
 ---
 
 ## 7. Changelog
+
+### 0.1.2
+
+Release checkpoint update for external prediction and benchmark use.
+
+- Adds the `0.1.2` Binding MOAD-trained release checkpoint and matching PCA reducer as the default runtime assets. This release checkpoint was trained on Binding MOAD-derived labels from 41,409 PDB source structures spanning 20,387 unique ligand IDs, with 8,953 matched AF2 target structures. 
+- Filters common crystallization additives, salts, ions, and caps from default ligand-adjacent residue labeling.
 
 ### 0.1.1
 

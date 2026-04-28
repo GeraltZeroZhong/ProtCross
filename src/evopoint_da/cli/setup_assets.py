@@ -21,7 +21,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--output-dir",
         help=(
             "Directory where assets will be installed. Defaults to PROTCROSS_ASSETS_DIR "
-            "or ~/.cache/protcross/assets/v0.1.1."
+            "or ~/.cache/protcross/assets/v0.1.2."
         ),
     )
     parser.add_argument("--esm-url", default=DEFAULT_ESM_URL)

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from evopoint_da.assets import DEFAULT_CHECKPOINT_URL, sha256_file, write_env_file
+from evopoint_da.assets import DEFAULT_CHECKPOINT_FILENAME, DEFAULT_CHECKPOINT_URL, sha256_file, write_env_file
 from evopoint_da.inference import PredictorAssets
 
 
@@ -20,14 +20,14 @@ def test_asset_sha256_and_env_file(tmp_path):
 
 
 def test_default_checkpoint_url_matches_github_release_asset_name():
-    assert DEFAULT_CHECKPOINT_URL.endswith("/best-epoch.59.ckpt")
+    assert DEFAULT_CHECKPOINT_URL.endswith(f"/{DEFAULT_CHECKPOINT_FILENAME}")
 
 
 def test_predictor_assets_completion(tmp_path):
     assets = PredictorAssets.from_dir(tmp_path)
 
     assert not assets.is_complete()
-    assert Path(tmp_path / "best-epoch=59.ckpt") in assets.missing_files()
+    assert Path(tmp_path / DEFAULT_CHECKPOINT_FILENAME) in assets.missing_files()
 
     assets.checkpoint.write_bytes(b"checkpoint")
     assets.esm_weights.write_bytes(b"esm")
