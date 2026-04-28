@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from evopoint_da.assets import sha256_file, write_env_file
+from evopoint_da.assets import DEFAULT_CHECKPOINT_URL, sha256_file, write_env_file
 from evopoint_da.inference import PredictorAssets
 
 
@@ -17,6 +17,10 @@ def test_asset_sha256_and_env_file(tmp_path):
     assert "PROTCROSS_CHECKPOINT" in env_text
     assert "PROTCROSS_ESM_WEIGHTS" in env_text
     assert "PROTCROSS_PCA" in env_text
+
+
+def test_default_checkpoint_url_matches_github_release_asset_name():
+    assert DEFAULT_CHECKPOINT_URL.endswith("/best-epoch.59.ckpt")
 
 
 def test_predictor_assets_completion(tmp_path):

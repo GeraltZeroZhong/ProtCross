@@ -13,14 +13,14 @@ from tqdm import tqdm
 
 
 RELEASE_TAG = "v0.1.1"
-GITHUB_RELEASE_BASE = f"https://github.com/GeraltZeroZhong/protcross/releases/download/{RELEASE_TAG}"
+GITHUB_RELEASE_BASE = f"https://github.com/GeraltZeroZhong/ProtCross/releases/download/{RELEASE_TAG}"
 DEFAULT_ASSETS_DIR = Path.home() / ".cache" / "protcross" / "assets" / RELEASE_TAG
 
 DEFAULT_ESM_URL = (
     "https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12/"
     "resolve/main/data/weights/esmc_600m_2024_12_v0.pth"
 )
-DEFAULT_CHECKPOINT_URL = f"{GITHUB_RELEASE_BASE}/best-epoch=59.ckpt"
+DEFAULT_CHECKPOINT_URL = f"{GITHUB_RELEASE_BASE}/best-epoch.59.ckpt"
 DEFAULT_PCA_URL = f"{GITHUB_RELEASE_BASE}/pca_esmc_128.pkl"
 
 

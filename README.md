@@ -39,6 +39,8 @@ protcross setup-assets \
   --pca-url https://example.org/pca_esmc_128.pkl
 ```
 
+GitHub release assets normalize `=` in filenames, so the default checkpoint URL points to `best-epoch.59.ckpt` and saves it locally as `best-epoch=59.ckpt`.
+
 If your system already has ESM-C weights, skip that large download and pass the path at prediction time:
 
 ```bash
@@ -145,7 +147,7 @@ protcross setup-assets
 
 By default this downloads:
 - ESM-C 600M weights from https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
-- `best-epoch=59.ckpt` from the ProtCross `v0.1.1` GitHub release
+- `best-epoch.59.ckpt` from the ProtCross `v0.1.1` GitHub release, saved locally as `best-epoch=59.ckpt`
 - `pca_esmc_128.pkl` from the ProtCross `v0.1.1` GitHub release
 
 The default install location is `~/.cache/protcross/assets/v0.1.1`. You can override it with `PROTCROSS_ASSETS_DIR` or `--output-dir`:
@@ -481,7 +483,7 @@ ProtCross/
 - **`FileNotFoundError` for ESM-C weights**
   - Run `protcross setup-assets`, or ensure `--esm-weights` / `--model_name` points to an existing local `.pth` checkpoint file.
 - **`protcross setup-assets` cannot find GitHub release assets**
-  - Attach `best-epoch=59.ckpt` and `pca_esmc_128.pkl` to the `v0.1.1` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
+  - Attach `best-epoch.59.ckpt` and `pca_esmc_128.pkl` to the `v0.1.1` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
 - **Torch Geometric install issues**
   - Verify that your torch version and wheel index URL match the environment (torch 2.3.0 + cu121).
 - **OOM during preprocessing/training**
