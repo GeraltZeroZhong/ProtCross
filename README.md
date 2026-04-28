@@ -35,7 +35,8 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
 - [4. Configuration Guide (Hydra)](#4-configuration-guide-hydra)
 - [5. Repository Layout](#5-repository-layout)
 - [6. Troubleshooting](#6-troubleshooting)
-- [7. License](#7-license)
+- [7. Changelog](#7-changelog)
+- [8. License](#8-license)
 
 ---
 
@@ -336,6 +337,18 @@ ProtCross/
 
 ---
 
-## 7. License
+## 7. Changelog
+
+### 0.1.0
+
+Initial public release of ProtCross.
+
+- Provides the core ProtCross framework for domain-adaptive binding-site prediction across PDB and AlphaFold2 protein structures.
+- Includes PointNet++-based protein point-cloud segmentation, ESM-C residue embeddings, PCA feature reduction, pLDDT-aware target weighting, and DANN-style domain adaptation.
+- Documents the full training and evaluation workflow, including preprocessing, label mapping, Hydra configuration, testing, and multi-seed benchmarking.
+
+---
+
+## 8. License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
