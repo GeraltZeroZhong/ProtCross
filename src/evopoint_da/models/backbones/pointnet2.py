@@ -8,14 +8,13 @@ try:
     from torch_cluster import radius as cluster_radius
     from torch_cluster import knn as cluster_knn
     HAS_CLUSTER = True
-except (ImportError, OSError) as e:
+except (ImportError, OSError):
     HAS_CLUSTER = False
-    print(f"[PointNet2] Warning: 'torch-cluster' load failed ({e}). Using pure PyTorch fallback.")
 
 
 
 def manual_fps(x, batch, ratio=0.5):
-    """最远点采样 (Farthest Point Sampling) 的纯 PyTorch 实现"""
+    """Pure PyTorch farthest point sampling fallback."""
     new_indices = []
 
     batch_size = batch.max().item() + 1
@@ -30,7 +29,8 @@ def manual_fps(x, batch, ratio=0.5):
             num_samples = 1
 
         dists = torch.ones(num_points, device=x.device) * 1e10
-        farthest = torch.randint(0, num_points, (), dtype=torch.long, device=x.device)
+        centered = pos_b - pos_b.mean(dim=0, keepdim=True)
+        farthest = torch.sum(centered * centered, dim=-1).argmax()
 
         sample_indices = []
         for _ in range(num_samples):
@@ -48,9 +48,7 @@ def manual_fps(x, batch, ratio=0.5):
     return torch.cat(new_indices)
 
 def manual_radius(x, y, r, batch_x, batch_y, max_num_neighbors=64):
-    """半径搜索 - 返回 (row=Target, col=Source)"""
-    # x: Source points (Neighbors)
-    # y: Target points (Centers)
+    """Radius search fallback returning (row=target, col=source)."""
     row_list, col_list = [], []
     batch_size = batch_x.max().item() + 1
 
@@ -116,10 +114,9 @@ def manual_knn(x, y, k, batch_x, batch_y):
     col = torch.cat(col_list)
     return row, col
 
-# Wrapper functions
 def safe_fps(x, batch, ratio):
     if HAS_CLUSTER:
-        return cluster_fps(x, batch, ratio=ratio)
+        return cluster_fps(x, batch, ratio=ratio, random_start=False)
     return manual_fps(x, batch, ratio)
 
 def safe_radius(x, y, r, batch_x, batch_y, max_num_neighbors):
@@ -154,10 +151,6 @@ def safe_knn_interpolate(x, pos_x, pos_y, batch_x, batch_y, k):
 
     return out / (count + 1e-8)
 
-# ==========================================
-# Modules
-# ==========================================
-
 class SAModule(nn.Module):
     def __init__(self, ratio, r, nn):
         super().__init__()
@@ -168,11 +161,8 @@ class SAModule(nn.Module):
     def forward(self, x, pos, batch):
         idx = safe_fps(pos, batch, ratio=self.ratio)
 
-        # radius 返回: row (Target), col (Source)
         row, col = safe_radius(pos, pos[idx], self.r, batch, batch[idx], max_num_neighbors=64)
 
-        # FIX: PointNetConv 需要 edge_index 为 [source, target]
-        # col 是 Source indices (0..N), row 是 Target indices (0..M)
         edge_index = torch.stack([col, row], dim=0)
 
         x_dst = None if x is None else x[idx]
@@ -196,23 +186,17 @@ class FPModule(nn.Module):
 class PointNet2Backbone(nn.Module):
     def __init__(self, in_channels=128, hidden_dim=64, out_channels=128):
         super().__init__()
-        # SA1
         self.sa1_mlp = MLP([3 + in_channels, hidden_dim, hidden_dim, hidden_dim*2])
         self.sa1 = SAModule(0.5, 10.0, self.sa1_mlp)
-        # SA2
         self.sa2_mlp = MLP([3 + hidden_dim*2, hidden_dim*2, hidden_dim*2, hidden_dim*4])
         self.sa2 = SAModule(0.25, 20.0, self.sa2_mlp)
-        # SA3
         self.sa3_mlp = MLP([3 + hidden_dim*4, hidden_dim*4, hidden_dim*8, hidden_dim*8])
         self.sa3 = SAModule(0.1, 40.0, self.sa3_mlp)
 
-        # FP3
         self.fp3_mlp = MLP([hidden_dim*8 + hidden_dim*4, hidden_dim*4, hidden_dim*4])
         self.fp3 = FPModule(3, self.fp3_mlp)
-        # FP2
         self.fp2_mlp = MLP([hidden_dim*4 + hidden_dim*2, hidden_dim*4, hidden_dim*2])
         self.fp2 = FPModule(3, self.fp2_mlp)
-        # FP1
         self.fp1_mlp = MLP([hidden_dim*2 + in_channels, hidden_dim*2, out_channels])
         self.fp1 = FPModule(3, self.fp1_mlp)
 

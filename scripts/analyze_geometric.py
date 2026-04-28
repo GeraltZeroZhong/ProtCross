@@ -16,9 +16,7 @@ warnings.filterwarnings("ignore")
 sys.path.append(os.path.join(os.path.dirname(__file__), "../src"))
 from evopoint_da.data.components import StructureParser
 
-# ==========================================
-# 复用核心组件 (保持与 map_labels.py 一致)
-# ==========================================
+# Helpers mirrored from the label mapping workflow.
 def create_atoms(coords):
     atoms = []
     for i, coord in enumerate(coords):
@@ -68,20 +66,14 @@ def find_best_matching_chain_memory(full_pdb_data, af2_seq):
         if pdb_len > af2_len * 1.5: continue
         try:
             score = aligner.score(af2_seq, pdb_seq)
-            norm_score = score / (2 * pdb_len) # 覆盖率优先策略
+            norm_score = score / (2 * pdb_len)
             if norm_score > best_score:
                 best_score = norm_score; best_chain = data; best_seq = pdb_seq
         except: continue
     return best_chain, best_seq, best_score
 
-# ==========================================
-# 🎯 核心逻辑：纯净环境下的几何测试
-# ==========================================
 def evaluate_geometric_fidelity(af2_data, pdb_data, af2_seq, pdb_seq, thresholds=[4.0, 8.0, 12.0]):
-    """
-    在已知链匹配正确的前提下，计算不同距离阈值下的召回率。
-    """
-    # 1. 对齐与叠加
+    """Compute geometric recall at distance thresholds after chain matching."""
     aligner = PairwiseAligner(); aligner.mode = 'global'
     aligner.match_score = 2; aligner.mismatch_score = -1
     aligner.open_gap_score = -10.0; aligner.extend_gap_score = -0.5
@@ -100,34 +92,26 @@ def evaluate_geometric_fidelity(af2_data, pdb_data, af2_seq, pdb_seq, thresholds
                 
     if len(af2_idxs) < 10: return None
     
-    # 2. 计算刚体变换 (Superposition)
     fixed_coords = af2_data['pos'][af2_idxs]
-    pdb_coords_vec = pdb_data['coords'][pdb_idxs] # PDB data from memory dict
+    pdb_coords_vec = pdb_data['coords'][pdb_idxs]
     
     sup = Superimposer()
     sup.set_atoms(create_atoms(fixed_coords), create_atoms(pdb_coords_vec))
     rot, tran = sup.rotran
     rot = torch.from_numpy(rot).float(); tran = torch.from_numpy(tran).float()
     
-    # 3. 准备 PDB 真实位点
     pdb_y = pdb_data['labels']
     pdb_pos_indices = np.where(pdb_y > 0.5)[0]
     n_pdb_pos = len(pdb_pos_indices)
     
-    if n_pdb_pos == 0: return None # 无阳性位点
+    if n_pdb_pos == 0: return None
     
-    # 4. 将 PDB 阳性位点变换到 AF2 空间
     p_coords = torch.from_numpy(pdb_data['coords'][pdb_pos_indices])
     p_trans = torch.matmul(p_coords, rot.T) + tran
     
-    # 5. 计算距离矩阵 (AF2 所有原子 vs PDB 阳性原子)
-    # Shape: [N_AF2, N_PDB_Pos]
     dists = torch.cdist(af2_data['pos'], p_trans)
     
-    # 6. 对每个阈值计算 Recall
-    # 这里的 Recall 定义为：有多少个 PDB 真实位点，在 AF2 中找到了 < Threshold 的邻居？
-    # 这就是 "Geometric Coverage"
-    min_dists_per_pdb, _ = dists.min(dim=0) # [N_PDB_Pos]
+    min_dists_per_pdb, _ = dists.min(dim=0)
     
     results = {}
     for th in thresholds:
@@ -145,7 +129,6 @@ def main():
     raw_af2_dir = "./data/raw_af2" 
     mapping_file = "./pdb_uniprot_mapping.json"
     
-    # 定义测试阈值
     THRESHOLDS = [4.0, 6.0, 8.0, 12.0, 16.0, 20.0]
     
     parser = StructureParser()
@@ -154,8 +137,8 @@ def main():
         uniprot_to_pdb = {v.lower(): k.lower() for k, v in json.load(f).items()}
 
     af2_files = glob.glob(os.path.join(processed_af2_dir, "*.pt"))
-    print(f"🚀 Starting Geometric Fidelity Analysis (Clean Chain Mode)...")
-    print(f"   Testing Thresholds: {THRESHOLDS} Å")
+    print("Starting geometric fidelity analysis (chain-corrected mode)...")
+    print(f"   Testing Thresholds: {THRESHOLDS} A")
     
     stats = {
         "valid_proteins": 0,
@@ -184,7 +167,6 @@ def main():
         if not (raw_af2_c and raw_pdb_c): continue
         
         try:
-            # 1. 基础数据准备
             af2_data = torch.load(af2_pt_path, weights_only=False)
             try:
                 parsed_af2 = parser.parse_file_with_labels(raw_af2_c[0])
@@ -194,12 +176,10 @@ def main():
             full_pdb_data = parser.parse_file_with_labels(raw_pdb_c[0], chain_id=None)
             if not full_pdb_data: continue
 
-            # 2. 核心步骤：找到正确的链 (排除干扰)
             best_chain_data, best_pdb_seq, score = find_best_matching_chain_memory(full_pdb_data, af2_seq)
             
-            if not best_chain_data or score < 0.15: continue # 没找到对应链，跳过
+            if not best_chain_data or score < 0.15: continue
 
-            # 3. 核心测试：计算几何一致性
             res = evaluate_geometric_fidelity(af2_data, best_chain_data, af2_seq, best_pdb_seq, thresholds=THRESHOLDS)
             
             if res:
@@ -212,13 +192,12 @@ def main():
                 
         except Exception: continue
 
-    # === 生成报告 ===
     print("\n" + "="*60)
-    print("🔬 GEOMETRIC FIDELITY REPORT (Chain-Corrected)")
+    print("GEOMETRIC FIDELITY REPORT (Chain-Corrected)")
     print("="*60)
     print(f"Proteins Analyzed : {stats['valid_proteins']}")
     print(f"Total Binding Sites: {stats['total_pdb_sites']}")
-    print(f"Avg Structural RMSD: {np.mean(stats['rmsds']):.2f} Å (Global Align)")
+    print(f"Avg Structural RMSD: {np.mean(stats['rmsds']):.2f} A (Global Align)")
     print("-" * 60)
     
     df_rows = []
@@ -226,7 +205,7 @@ def main():
         for th in THRESHOLDS:
             recall = stats["covered_sites"][th] / stats["total_pdb_sites"]
             loss = 1.0 - recall
-            print(f"Threshold {th:4.1f} Å : Geometric Recall = {recall:.2%} | Loss = {loss:.2%}")
+            print(f"Threshold {th:4.1f} A : Geometric Recall = {recall:.2%} | Loss = {loss:.2%}")
             df_rows.append({"Threshold_Angstrom": th, "Geometric_Recall": recall, "Geometric_Loss": loss})
     else:
         print("No valid sites found.")
@@ -237,7 +216,7 @@ def main():
     print("    and not caused by wrong chain selection.")
     
     pd.DataFrame(df_rows).to_csv("geometric_fidelity_test.csv", index=False)
-    print("📁 Saved to geometric_fidelity_test.csv")
+    print("Saved to geometric_fidelity_test.csv")
 
 if __name__ == "__main__":
     main()

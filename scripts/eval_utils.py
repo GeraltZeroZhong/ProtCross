@@ -80,11 +80,9 @@ def load_p2rank_scores(csv_path, target_len, residue_ids_map):
 # Checkpoint Scanner
 # ==========================================
 def get_grouped_checkpoints(root_dir):
-    """
-    扫描 saved_weights，将实验分为 'A' (Baseline) 和 'D' (ProtCross) 两组
-    """
+    """Scan saved_weights and group A/Baseline and D/ProtCross checkpoints."""
     if not os.path.exists(root_dir):
-        print(f"❌ Error: {root_dir} not found.")
+        print(f"Error: {root_dir} not found.")
         return {"A": [], "D": []}
 
     groups = {"A": [], "D": []}
@@ -92,12 +90,11 @@ def get_grouped_checkpoints(root_dir):
         [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))]
     )
 
-    print(f"📂 Scanning {len(subdirs)} folders in '{root_dir}'...")
+    print(f"Scanning {len(subdirs)} folders in '{root_dir}'...")
 
     for folder_name in subdirs:
         folder_path = os.path.join(root_dir, folder_name)
 
-        # 找 ckpt
         target_ckpt = os.path.join(folder_path, "last.ckpt")
         if not os.path.exists(target_ckpt):
             cands = glob.glob(os.path.join(folder_path, "*.ckpt"))
@@ -106,14 +103,13 @@ def get_grouped_checkpoints(root_dir):
             else:
                 continue
 
-        # 分组
         if folder_name.startswith("A_"):
             groups["A"].append(target_ckpt)
         elif folder_name.startswith("D_"):
             groups["D"].append(target_ckpt)
 
-    print(f"   ✅ Found {len(groups['A'])} checkpoints for Baseline (A)")
-    print(f"   ✅ Found {len(groups['D'])} checkpoints for ProtCross (D)")
+    print(f"   Found {len(groups['A'])} checkpoints for Baseline (A)")
+    print(f"   Found {len(groups['D'])} checkpoints for ProtCross (D)")
     return groups
 
 
@@ -121,18 +117,17 @@ def get_grouped_checkpoints(root_dir):
 # Inference Engine
 # ==========================================
 def run_inference(ckpt_path, loader, device="cuda"):
-    """运行单个模型的推理"""
+    """Run inference for one checkpoint."""
     try:
         logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
 
-        # 延迟导入，确保 sys.path 已在主脚本中设置好
-        from src.evopoint_da.models.module import EvoPointDALitModule
+        from evopoint_da.models import EvoPointDALitModule
 
         model = EvoPointDALitModule.load_from_checkpoint(ckpt_path)
         model.eval()
         model.to(device)
     except Exception as e:
-        print(f"❌ Error loading {os.path.basename(ckpt_path)}: {e}")
+        print(f"Error loading {os.path.basename(ckpt_path)}: {e}")
         return None, None
 
     all_y = []
@@ -142,7 +137,6 @@ def run_inference(ckpt_path, loader, device="cuda"):
         for batch in loader:
             batch = batch.to(device)
 
-            # 兼容处理：只有 use_esm 才用 batch.x
             src_x = batch.x if (hasattr(model.hparams, "use_esm") and model.hparams.use_esm) else None
 
             feats, _ = model.backbone(src_x, batch.pos, batch.batch)
@@ -159,7 +153,7 @@ def run_inference(ckpt_path, loader, device="cuda"):
 # Statistical Aggregator (ROC / PR)
 # ==========================================
 def aggregate_roc_results(ckpt_list, loader, device):
-    """收集多个模型的 ROC 数据并计算 Mean ± Std"""
+    """Aggregate ROC curves across checkpoints."""
     tprs = []
     aucs = []
     mean_fpr = np.linspace(0, 1, 100)
@@ -174,7 +168,6 @@ def aggregate_roc_results(ckpt_list, loader, device):
         roc_auc = auc(fpr, tpr)
         aucs.append(roc_auc)
 
-        # 去重 FPR 以避免插值错误
         _, unique_indices = np.unique(fpr, return_index=True)
         fpr_unique = fpr[unique_indices]
         tpr_unique = tpr[unique_indices]
@@ -193,7 +186,7 @@ def aggregate_roc_results(ckpt_list, loader, device):
 
 
 def aggregate_pr_results(ckpt_list, loader, device):
-    """收集多个模型的 PR 数据并计算 Mean ± Std（修复起点）"""
+    """Aggregate precision-recall curves across checkpoints."""
     precs = []
     aps = []
     mean_recall = np.linspace(0, 1, 100)
@@ -208,16 +201,13 @@ def aggregate_pr_results(ckpt_list, loader, device):
         ap = average_precision_score(y_true, y_score)
         aps.append(ap)
 
-        # 1) 翻转为升序 recall
         recall_rev = recall[::-1]
         precision_rev = precision[::-1]
 
-        # 2) 去重
         _, unique_indices = np.unique(recall_rev, return_index=True)
         recall_unique = recall_rev[unique_indices]
         precision_unique = precision_rev[unique_indices]
 
-        # 3) 强制起点 (Recall=0 -> Precision=1)
         if len(recall_unique) > 0 and recall_unique[0] == 0:
             precision_unique[0] = 1.0
 
@@ -237,19 +227,14 @@ def aggregate_pr_results(ckpt_list, loader, device):
 # ==========================================
 def compute_bestf1_metrics(y_true, y_score, eps=1e-12):
     """
-    返回 dict：
-      best_f1, best_thr,
-      prec (Precision@bestF1),
-      rec  (Recall/TPR@bestF1),
-      tnr  (Specificity),
-      bal_acc (Balanced Accuracy = (TPR+TNR)/2)
+    Return best-F1 threshold metrics:
+    best_f1, best_thr, precision, recall/TPR, specificity, balanced accuracy.
     """
     y_true = np.asarray(y_true).astype(int)
     y_score = np.asarray(y_score).astype(float)
 
     precision, recall, thresholds = precision_recall_curve(y_true, y_score)
 
-    # thresholds 长度 = len(precision)-1
     if thresholds is None or len(thresholds) == 0:
         thr = 0.5
         y_pred = (y_score >= thr).astype(int)
@@ -306,7 +291,7 @@ def compute_bestf1_metrics(y_true, y_score, eps=1e-12):
 
 
 def aggregate_bestf1_metrics(ckpt_list, loader, device):
-    """多 ckpt：对 best-F1 指标做 mean±std"""
+    """Aggregate best-F1 metrics across checkpoints."""
     rows = []
     pbar = tqdm(ckpt_list, desc="Aggregating best-F1", leave=False)
     for ckpt in pbar:
@@ -332,13 +317,13 @@ def aggregate_bestf1_metrics(ckpt_list, loader, device):
 # External Baselines
 # ==========================================
 def get_external_baselines(loader, pesto_dir, p2rank_dir, af2_dir):
-    """收集 PeSTo 和 P2Rank 的结果"""
+    """Collect PeSTo and P2Rank baseline scores."""
     if len(loader.dataset) == 0:
         return None, None, None
 
     sample = loader.dataset[0]
     if not hasattr(sample, "pdb_id"):
-        print("⚠️ Warning: No 'pdb_id' in dataset. Skipping external baselines.")
+        print("Warning: no 'pdb_id' in dataset. Skipping external baselines.")
         return None, None, None
 
     y_true_all = []
@@ -393,12 +378,9 @@ def get_external_baselines(loader, pesto_dir, p2rank_dir, af2_dir):
     return y_cat, p_cat, p2_cat
 
 def get_grouped_checkpoints_abcd(root_dir, exps=("A", "B", "C", "D")):
-    """
-    新增：扫描 saved_weights，按前缀 A_/B_/C_/D_ 分组。
-    不影响旧的 get_grouped_checkpoints()。
-    """
+    """Scan saved_weights and group checkpoints by A/B/C/D prefixes."""
     if not os.path.exists(root_dir):
-        print(f"❌ Error: {root_dir} not found.")
+        print(f"Error: {root_dir} not found.")
         return {k: [] for k in exps}
 
     groups = {k: [] for k in exps}
@@ -406,7 +388,7 @@ def get_grouped_checkpoints_abcd(root_dir, exps=("A", "B", "C", "D")):
         [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))]
     )
 
-    print(f"📂 Scanning {len(subdirs)} folders in '{root_dir}' (ABCD mode).")
+    print(f"Scanning {len(subdirs)} folders in '{root_dir}' (ABCD mode).")
 
     for folder_name in subdirs:
         folder_path = os.path.join(root_dir, folder_name)

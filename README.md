@@ -1,11 +1,11 @@
 # ProtCross
 
-ProtCross is a domain-adaptive protein point-cloud learning framework for binding-site prediction across experimentally solved **PDB** structures and predicted **AlphaFold2 (AF2)** structures. The model accepts structures from AlphaFold and can write per-residue binding probabilities to the **B-factor column** of a new PDB output file. For quick starts, jump directly to [Single-structure Prediction](#311-single-structure-prediction) or [Batch Prediction (Multiple Structures)](#312-batch-prediction-multiple-structures).
+ProtCross is a domain-adaptive protein point-cloud learning framework for binding-site prediction across experimentally solved **PDB** structures and predicted **AlphaFold2 (AF2)** structures. The model accepts structures from AlphaFold and can write per-residue binding probabilities to the **B-factor column** of a new PDB output file.
 
-📄 **Published paper (JCIM):** Zhong, S., & Jiang, Y. (2026). ProtCross: Bridging the PDB-AlphaFold Gap for Binding Site Prediction with Protein Point Clouds. Journal of chemical information and modeling, 66(7), 3688–3701. https://doi.org/10.1021/acs.jcim.5c03224
+**Published paper (JCIM):** Zhong, S., & Jiang, Y. (2026). ProtCross: Bridging the PDB-AlphaFold Gap for Binding Site Prediction with Protein Point Clouds. Journal of chemical information and modeling, 66(7), 3688-3701. https://doi.org/10.1021/acs.jcim.5c03224
 
 The codebase combines:
-- residue-level structural geometry (Cα coordinates),
+- residue-level structural geometry (C-alpha coordinates),
 - language-model residue embeddings (ESM-C), and
 - confidence-aware domain adaptation (pLDDT-weighted DANN)
 
@@ -13,12 +13,48 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
 
 ---
 
+## Quick Start
+
+Use this path when you only want to predict binding sites for one structure.
+
+```bash
+pip install "protcross[predict]"
+protcross setup-assets
+protcross predict input.pdb --output input.protcross.pdb
+```
+
+`protcross setup-assets` installs runtime assets into `~/.cache/protcross/assets/v0.1.1` by default:
+
+```text
+best-epoch=59.ckpt          # ProtCross checkpoint from the GitHub release
+pca_esmc_128.pkl            # PCA reducer from the GitHub release
+esmc_600m_2024_12_v0.pth    # ESM-C weights from Hugging Face
+```
+
+PyPI packages ship code only. The checkpoint and PCA file must be attached to the `v0.1.1` GitHub release with the exact filenames above, or supplied with custom URLs:
+
+```bash
+protcross setup-assets \
+  --checkpoint-url https://example.org/best-epoch=59.ckpt \
+  --pca-url https://example.org/pca_esmc_128.pkl
+```
+
+If your system already has ESM-C weights, skip that large download and pass the path at prediction time:
+
+```bash
+protcross setup-assets --skip-esm
+protcross predict input.pdb \
+  --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
+  --output input.protcross.pdb
+```
+
 ## Table of Contents
+- [Quick Start](#quick-start)
 - [1. Project Overview](#1-project-overview)
 - [2. Installation](#2-installation)
   - [2.1 System Requirements](#21-system-requirements)
   - [2.2 Create Environment](#22-create-environment)
-  - [2.3 ESM-C Model Weights (Required)](#23-esm-c-model-weights-required)
+  - [2.3 Runtime Assets](#23-runtime-assets)
   - [2.4 Verify Installation](#24-verify-installation)
 - [3. Usage](#3-usage)
   - [3.1 Apply ProtCross (Inference with Existing Model)](#31-apply-protcross-inference-with-existing-model)
@@ -70,9 +106,19 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
 
 ### 2.2 Create Environment
 
+For development or full paper reproduction:
+
 ```bash
 conda env create -f environment.yml
 conda activate evopoint_da
+pip install -e ".[test,esm]"
+```
+
+For the lightweight prediction interface from PyPI:
+
+```bash
+pip install "protcross[predict]"
+protcross setup-assets
 ```
 
 The provided environment includes:
@@ -87,21 +133,57 @@ If you do not have a CUDA-capable GPU:
 2. Install CPU-compatible PyTorch/Torch Geometric wheels.
 3. Run preprocessing/training with `--device cpu` or CPU trainer settings.
 
-### 2.3 ESM-C Model Weights (Required)
+### 2.3 Runtime Assets
 
-ProtCross currently expects a **local ESM-C checkpoint path** for `--model_name` in preprocessing.
+ProtCross separates code and large runtime assets. PyPI distributions include the Python package and command-line tools, while the pretrained checkpoint, PCA reducer, and ESM-C weights are downloaded after installation.
+
+Recommended setup:
+
+```bash
+protcross setup-assets
+```
+
+By default this downloads:
+- ESM-C 600M weights from https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
+- `best-epoch=59.ckpt` from the ProtCross `v0.1.1` GitHub release
+- `pca_esmc_128.pkl` from the ProtCross `v0.1.1` GitHub release
+
+The default install location is `~/.cache/protcross/assets/v0.1.1`. You can override it with `PROTCROSS_ASSETS_DIR` or `--output-dir`:
+
+```bash
+PROTCROSS_ASSETS_DIR=/data/protcross-assets protcross setup-assets
+protcross setup-assets --output-dir /data/protcross-assets
+```
+
+After setup, prediction can discover assets automatically:
+
+```bash
+protcross predict input.pdb --output input.protcross.pdb
+```
+
+For source checkouts or custom releases, explicit paths are still supported:
+
+```bash
+protcross predict input.pdb \
+  --checkpoint checkpoint/best-epoch=59.ckpt \
+  --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
+  --pca data/pca_esmc_128.pkl \
+  --output input.protcross.pdb
+```
 
 #### What is ESM-C?
-**ESM-C** is EvolutionaryScale's protein language model family for extracting residue-level sequence representations.  In ProtCross, ESM-C embeddings are used as per-residue features.
+**ESM-C** is EvolutionaryScale's protein language model family for extracting residue-level sequence representations. In ProtCross, ESM-C embeddings are used as per-residue features.
 
 Recommended checkpoint for this project:
 - **ESM-C 600M (2024-12)**: https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
 
-#### Download guide
+The ESM-C model repository uses a custom non-commercial license. Review the model terms before downloading or redistributing derived assets.
 
-You can download the model weights from Hugging Face in either of the following ways.
+#### Manual ESM-C download fallback
 
-**Option A — Git LFS clone**
+If the automatic downloader is unavailable in your environment, you can download the model weights from Hugging Face in either of the following ways.
+
+**Option A - Git LFS clone**
 ```bash
 # 1) Install Git LFS once (if needed)
 git lfs install
@@ -110,7 +192,7 @@ git lfs install
 git clone https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
 ```
 
-**Option B — Hugging Face CLI**
+**Option B - Hugging Face CLI**
 ```bash
 # 1) Install CLI
 pip install -U "huggingface_hub[cli]"
@@ -120,7 +202,7 @@ huggingface-cli download EvolutionaryScale/esmc-600m-2024-12 \
   --local-dir ./esmc-600m-2024-12
 ```
 
-After downloading, locate the checkpoint file (`.pth` / `.pt` depending on repository contents) and pass its absolute path to `--model_name` / `--esm_weights`.
+After downloading, locate `data/weights/esmc_600m_2024_12_v0.pth` and pass its absolute path to `--model_name` / `--esm_weights`.
 
 Example:
 ```bash
@@ -128,7 +210,7 @@ python scripts/preprocess_esm.py \
   --data_dir data/raw_pdb \
   --output_dir data/processed_pdb \
   --fit_pca \
-  --model_name /absolute/path/to/esmc_600m_weights.pth \
+  --model_name /absolute/path/to/esmc_600m_2024_12_v0.pth \
   --pca_model_path pca_esmc_128.pkl
 ```
 
@@ -140,6 +222,7 @@ Important details:
 
 ```bash
 python -c "import torch; import torch_geometric; import pytorch_lightning; import hydra; import esm; print('OK')"
+pytest -q
 ```
 
 ---
@@ -154,34 +237,83 @@ This section is split into two workflows:
 
 ### 3.1.1 Single-structure Prediction
 
-You can directly run inference on one PDB structure and optionally write per-residue probabilities to the B-factor column of a new PDB file.
+You can directly run inference on one PDB structure and write per-residue probabilities to the B-factor column of a new PDB file.
 
-> A pretrained checkpoint is provided in this repository at `checkpoint/best-epoch=59.ckpt`.
+The recommended 0.1.1 path for PyPI users is:
+
+```bash
+protcross setup-assets
+protcross predict examples/6fhu.pdb --output examples/6fhu.pred.pdb
+```
+
+Add a score table or a custom threshold when needed:
+
+```bash
+protcross predict examples/6fhu.pdb \
+  --output examples/6fhu.pred.pdb \
+  --scores-tsv examples/6fhu.scores.tsv \
+  --threshold 0.5
+```
+
+You can also keep model assets in an explicit directory:
+
+```bash
+protcross predict examples/6fhu.pdb \
+  --assets-dir /path/to/protcross-assets \
+  --output examples/6fhu.pred.pdb
+```
+
+The asset directory should contain `best-epoch=59.ckpt`, `esmc_600m_2024_12_v0.pth`, and `pca_esmc_128.pkl`. Alternatively, set `PROTCROSS_CHECKPOINT`, `PROTCROSS_ESM_WEIGHTS`, and `PROTCROSS_PCA`.
+
+The standalone entry point is equivalent:
+
+```bash
+protcross-predict examples/6fhu.pdb --output examples/6fhu.pred.pdb
+```
+
+The legacy 0.1.0 command is still supported:
 
 ```bash
 python run_Predict_ProtCross.py \
-  --pdb_file examples/example.pdb \
+  --pdb_file examples/6fhu.pdb \
   --ckpt_path checkpoint/best-epoch=59.ckpt \
-  --esm_weights /absolute/path/to/esmc_600m_weights.pth \
+  --esm_weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
   --pca_path data/pca_esmc_128.pkl \
-  --output_pdb examples/prediction_result.pdb \
-  --threshold 0.5
+  --output_pdb examples/6fhu.pred.pdb
+```
+
+Python API:
+
+```python
+from evopoint_da.inference import ProtCrossPredictor, predict_pdb
+
+result = predict_pdb("examples/6fhu.pdb", output_pdb="examples/6fhu.pred.pdb")
+print(result.format_summary())
+
+predictor = ProtCrossPredictor.from_default_assets()
+result = predictor.predict("examples/6fhu.pdb", output_pdb="examples/6fhu.pred.pdb")
+
+result = predict_pdb(
+    "examples/6fhu.pdb",
+    ckpt_path="checkpoint/best-epoch=59.ckpt",
+    esm_weights="/absolute/path/to/esmc_600m_2024_12_v0.pth",
+    pca_path="data/pca_esmc_128.pkl",
+    output_pdb="examples/6fhu.pred.pdb",
+)
+print(result.format_summary())
 ```
 
 ### 3.1.2 Batch Prediction (Multiple Structures)
 
-`run_Predict_ProtCross.py` predicts one structure each run. For batch inference, iterate over PDB files in a shell loop:
+`protcross-predict` predicts one structure each run. For batch inference, iterate over PDB files in a shell loop:
 
 ```bash
+protcross setup-assets
 mkdir -p batch_outputs
 for pdb in /path/to/pdb_dir/*.pdb; do
   base="$(basename "${pdb}" .pdb)"
-  python run_Predict_ProtCross.py \
-    --pdb_file "${pdb}" \
-    --ckpt_path checkpoint/best-epoch=59.ckpt \
-    --esm_weights /absolute/path/to/esmc_600m_weights.pth \
-    --pca_path data/pca_esmc_128.pkl \
-    --output_pdb "batch_outputs/${base}_pred.pdb" \
+  protcross-predict "${pdb}" \
+    --output "batch_outputs/${base}_pred.pdb" \
     --threshold 0.5
 done
 ```
@@ -194,26 +326,29 @@ Expected layout:
 
 ```text
 data/
-├── raw_pdb/          # input PDB/CIF structures (source)
-├── raw_af2/          # input AF2 PDB structures (target)
-├── processed_pdb/    # generated .pt files for source
-└── processed_af2/    # generated .pt files for target
+|--- raw_pdb/          # input PDB/CIF structures (source)
+|--- raw_af2/          # input AF2 PDB structures (target)
+|--- processed_pdb/    # generated .pt files for source
+`--- processed_af2/    # generated .pt files for target
 ```
 
 Optional AF2 retrieval helper:
 
 ```bash
-python scripts/get_af2.py
+protcross-download-af2 \
+  --raw-pdb-dir data/raw_pdb \
+  --output-dir data/raw_af2 \
+  --mapping-file pdb_uniprot_mapping.json
 ```
 
 ### 3.2.2 Preprocess Source (PDB) with PCA Fit
 
 ```bash
-python scripts/preprocess_esm.py \
+protcross-preprocess \
   --data_dir data/raw_pdb \
   --output_dir data/processed_pdb \
   --fit_pca \
-  --model_name /absolute/path/to/esmc_600m_weights.pth \
+  --model_name ~/.cache/protcross/assets/v0.1.1/esmc_600m_2024_12_v0.pth \
   --pca_model_path pca_esmc_128.pkl \
   --pca_dim 128
 ```
@@ -221,10 +356,10 @@ python scripts/preprocess_esm.py \
 ### 3.2.3 Preprocess Target (AF2) with Shared PCA
 
 ```bash
-python scripts/preprocess_esm.py \
+protcross-preprocess \
   --data_dir data/raw_af2 \
   --output_dir data/processed_af2 \
-  --model_name /absolute/path/to/esmc_600m_weights.pth \
+  --model_name ~/.cache/protcross/assets/v0.1.1/esmc_600m_2024_12_v0.pth \
   --pca_model_path pca_esmc_128.pkl \
   --is_af2
 ```
@@ -232,7 +367,12 @@ python scripts/preprocess_esm.py \
 ### 3.2.4 Map Labels from PDB to AF2
 
 ```bash
-python scripts/map_labels.py
+protcross-map-labels \
+  --processed-pdb-dir data/processed_pdb \
+  --processed-af2-dir data/processed_af2 \
+  --raw-pdb-dir data/raw_pdb \
+  --raw-af2-dir data/raw_af2 \
+  --mapping-file pdb_uniprot_mapping.json
 ```
 
 ### 3.2.5 Train
@@ -241,6 +381,12 @@ Default training:
 
 ```bash
 python train.py
+```
+
+Equivalent installed CLI:
+
+```bash
+protcross-train
 ```
 
 Common Hydra overrides:
@@ -264,7 +410,7 @@ python train.py \
 ### 3.2.6 Evaluate / Test
 
 ```bash
-python test_adaptive.py
+python test_adaptive.py ckpt_path=checkpoint/best-epoch=59.ckpt
 ```
 
 Additional analysis scripts are available (e.g., `scripts/eval_run.py`) for task-specific reporting.
@@ -299,29 +445,33 @@ Tip: keep all experiment commands in shell scripts to ensure reproducibility.
 
 ```text
 ProtCross/
-├── configs/
-│   ├── data/protein_seg.yaml
-│   ├── model/da_module.yaml
-│   ├── trainer/default.yaml
-│   └── train.yaml
-├── data/
-│   ├── raw_pdb/
-│   ├── raw_af2/
-│   ├── processed_pdb/
-│   └── processed_af2/
-├── scripts/
-│   ├── preprocess_esm.py
-│   ├── get_af2.py
-│   ├── map_labels.py
-│   └── ...
-├── src/evopoint_da/
-│   ├── data/
-│   └── models/
-├── train.py
-├── test_adaptive.py
-├── run_multiseed_benchmark.py
-├── run_Predict_ProtCross.py
-└── environment.yml
+|--- configs/
+|   |--- data/protein_seg.yaml
+|   |--- model/da_module.yaml
+|   |--- trainer/default.yaml
+|   `--- train.yaml
+|--- data/
+|   |--- raw_pdb/
+|   |--- raw_af2/
+|   |--- processed_pdb/
+|   `--- processed_af2/
+|--- scripts/
+|   |--- preprocess_esm.py      # compatibility wrapper
+|   |--- get_af2.py             # compatibility wrapper
+|   |--- map_labels.py          # compatibility wrapper
+|   `--- ...                    # one-off analysis and plotting utilities
+|--- src/evopoint_da/
+|   |--- cli/                   # installed command entry points
+|   |--- data/
+|   |--- experiments/           # reproduction benchmark workflows
+|   |--- evaluation/
+|   |--- inference/             # lightweight predictor API
+|   `--- models/
+|--- train.py
+|--- test_adaptive.py
+|--- run_multiseed_benchmark.py
+|--- run_Predict_ProtCross.py
+`--- environment.yml
 ```
 
 ---
@@ -329,7 +479,9 @@ ProtCross/
 ## 6. Troubleshooting
 
 - **`FileNotFoundError` for ESM-C weights**
-  - Ensure `--model_name` points to an existing local `.pth` checkpoint file.
+  - Run `protcross setup-assets`, or ensure `--esm-weights` / `--model_name` points to an existing local `.pth` checkpoint file.
+- **`protcross setup-assets` cannot find GitHub release assets**
+  - Attach `best-epoch=59.ckpt` and `pca_esmc_128.pkl` to the `v0.1.1` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
 - **Torch Geometric install issues**
   - Verify that your torch version and wheel index URL match the environment (torch 2.3.0 + cu121).
 - **OOM during preprocessing/training**
@@ -338,6 +490,19 @@ ProtCross/
 ---
 
 ## 7. Changelog
+
+### 0.1.1
+
+Engineering-focused reproducibility release.
+
+- Adds installable package metadata and console commands: `protcross-predict`, `protcross-preprocess`, and `protcross-train`.
+- Adds a unified `protcross` CLI plus `protcross-setup-assets`, `protcross-download-af2`, and `protcross-map-labels`.
+- Adds one-command runtime asset setup for the ESM-C weights, released checkpoint, and PCA reducer.
+- Splits prediction into a lightweight API (`evopoint_da.inference`) that accepts one PDB/mmCIF and writes binding probabilities to the B-factor column.
+- Keeps 0.1.0 entry points (`run_Predict_ProtCross.py`, `train.py`, `scripts/preprocess_esm.py`, `scripts/get_af2.py`, `scripts/map_labels.py`) as compatibility wrappers.
+- Splits shared structure parsing, ESM-C feature extraction, PCA reduction, AF2 downloads, label mapping, metrics, experiments, and domain weighting into reusable modules.
+- Fixes the standard training DataModule so target-domain AF2 batches can be supplied to domain adaptation without requiring positive labels.
+- Adds pytest smoke/unit tests, including checkpoint CPU forward on a published processed sample.
 
 ### 0.1.0
 

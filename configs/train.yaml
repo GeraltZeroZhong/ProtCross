@@ -11,3 +11,4 @@ paths:
   output_dir: ${hydra:runtime.cwd}/outputs
 
 seed: 42
+ckpt_path: null

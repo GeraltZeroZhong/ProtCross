@@ -1,136 +1,143 @@
-# File: src/evopoint_da/data/dataset.py
+"""PyG datasets for preprocessed ProtCross point-cloud files."""
 
-import os
+from __future__ import annotations
+
 import glob
-import torch
-import numpy as np
+import os
 import random
-from torch_geometric.data import InMemoryDataset, Data
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
+
 class EvoPointDataset(InMemoryDataset):
-    def __init__(self, root, split="train", augment=False):
+    def __init__(
+        self,
+        root: str | os.PathLike,
+        split: str = "train",
+        augment: bool = False,
+        *,
+        require_labels: bool = True,
+        require_positive_labels: bool = True,
+        split_seed: int = 42,
+    ) -> None:
         self.split = split
         self.augment = augment
-        super().__init__(root)
-        
-        # 自动加载处理好的缓存文件
-        # 注意：如果修改了 process 逻辑，必须先手动删除 processed/ 目录下的 .pt 文件
+        self.require_labels = require_labels
+        self.require_positive_labels = require_positive_labels
+        self.split_seed = split_seed
+        super().__init__(str(root))
+
         if not os.path.exists(self.processed_paths[0]):
             self.process()
-            
+
         self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
-    def processed_file_names(self): 
-        return [f'data_cache_{self.split}.pt']
+    def processed_file_names(self):
+        suffix = "" if self.require_labels and self.require_positive_labels else "_all"
+        return [f"data_cache_{self.split}{suffix}.pt"]
 
-    def _augment(self, pos):
-        """
-        训练时对点云进行随机旋转，增强模型对旋转的不变性/鲁棒性
-        """
+    def _augment(self, pos: torch.Tensor) -> torch.Tensor:
         theta = np.random.uniform(0, 2 * np.pi)
-        # 构建旋转矩阵 (z轴旋转示例，也可改为随机 SO3 旋转)
-        rot = torch.tensor([
-            [np.cos(theta), -np.sin(theta), 0], 
-            [np.sin(theta), np.cos(theta), 0], 
-            [0, 0, 1]
-        ], dtype=pos.dtype)
-        
-        # 应用旋转并添加微小抖动噪声
+        rot = torch.tensor(
+            [
+                [np.cos(theta), -np.sin(theta), 0],
+                [np.sin(theta), np.cos(theta), 0],
+                [0, 0, 1],
+            ],
+            dtype=pos.dtype,
+            device=pos.device,
+        )
         return pos @ rot + torch.randn_like(pos) * 0.01
 
     def get(self, idx):
         data = super().get(idx)
-        # 仅在训练集的训练阶段应用增强
         if self.augment and self.split == "train":
             data.pos = self._augment(data.pos)
         return data
 
-    def process(self):
-        data_list = []
-        
-        # 1. 获取所有 .pt 文件
-        # 使用 sorted 保证初始顺序一致
-        raw_files = sorted(glob.glob(os.path.join(self.root, "*.pt")))
-        
-        # === 核心：固定随机种子并打乱 ===
-        # 这确保了 Train/Val/Test 的划分在任何机器上都是一致的
-        # 同时也消除了文件名排序带来的潜在分布偏差
-        random.seed(42) 
-        random.shuffle(raw_files)
-        # =================================
-
-        # 2. 按比例划分数据集
-        # Train: 0% - 80%
-        # Val:   80% - 90%
-        # Test:  90% - 100%
-        num = len(raw_files)
-        if self.split == "train": 
-            files = raw_files[:int(num*0.8)]
-        elif self.split == "val": 
-            files = raw_files[int(num*0.8):int(num*0.9)]
-        else: 
-            files = raw_files[int(num*0.9):] # Test Set
-
+    def process(self) -> None:
+        raw_files = self._split_files()
         print(f"[Dataset] Processing split: '{self.split}'")
         print(f"   - Source Directory: {self.root}")
-        print(f"   - Candidate Files: {len(files)}")
+        print(f"   - Candidate Files: {len(raw_files)}")
 
-        valid_count = 0
-        for f in tqdm(files, desc=f"Loading {self.split}"):
-            try:
-                # 加载数据
-                d = torch.load(f, weights_only=False)
-                
-                # === 数据清洗与过滤 ===
-                
-                # 1. 检查是否存在标签键
-                if d.get('y') is None:
-                    continue
-                
-                # 2. 统一转换为 Tensor 以便检查
-                y_temp = d['y'] if isinstance(d['y'], torch.Tensor) else torch.tensor(d['y'])
-                
-                # 3. 严格过滤：丢弃标签全为 0 的样本
-                # 这通常意味着对齐失败、Pocket Collapse 导致标签丢失，或该链确实无结合位点
-                # 包含这些数据会引入 False Negatives，干扰训练
-                if y_temp.sum() == 0:
-                    continue
-                
-                # === 数据类型标准化 (防止 Double/Float 不匹配报错) ===
-                def to_tensor(x):
-                    if isinstance(x, np.ndarray): return torch.from_numpy(x).float()
-                    if isinstance(x, torch.Tensor): return x.float()
-                    return torch.tensor(x).float()
-
-                # 构建 PyG Data 对象
-                data = Data(
-                    x=to_tensor(d['x']), 
-                    pos=to_tensor(d['pos']), 
-                    plddt=to_tensor(d['plddt']), 
-                    y=to_tensor(d['y'])
-                )
+        data_list = []
+        for file_path in tqdm(raw_files, desc=f"Loading {self.split}"):
+            data = self._load_data_file(file_path)
+            if data is not None:
                 data_list.append(data)
-                valid_count += 1
-                
-            except Exception as e:
-                print(f"⚠️ Error loading {f}: {e}")
-        
-        print(f"   - Final Valid Samples: {valid_count} / {len(files)}")
-        
-        # === 空数据保护 ===
-        if not data_list:
-            print(f"⚠️ WARNING: No valid data found for split '{self.split}'!")
-            print(f"   This might crash the DataLoader. Creating a dummy sample.")
-            # 创建一个空的 dummy 数据，防止程序直接崩溃
-            dummy_x = torch.zeros((1, 1024), dtype=torch.float)
-            dummy_pos = torch.zeros((1, 3), dtype=torch.float)
-            dummy_y = torch.zeros((1,), dtype=torch.float)
-            dummy_plddt = torch.zeros((1,), dtype=torch.float)
-            data_list = [Data(x=dummy_x, pos=dummy_pos, y=dummy_y, plddt=dummy_plddt)]
 
-        # 保存处理后的数据到缓存文件
+        if not data_list:
+            raise RuntimeError(
+                f"No valid data found for split '{self.split}' in {self.root}. "
+                "Check preprocessing output and dataset filtering settings."
+            )
+
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
+        print(f"   - Final Valid Samples: {len(data_list)} / {len(raw_files)}")
         print(f"   - Cache saved to: {self.processed_paths[0]}")
+
+    def _split_files(self) -> list[str]:
+        raw_files = sorted(glob.glob(os.path.join(self.root, "*.pt")))
+        rng = random.Random(self.split_seed)
+        rng.shuffle(raw_files)
+
+        num_files = len(raw_files)
+        if num_files < 10:
+            return raw_files
+
+        train_end = int(num_files * 0.8)
+        val_end = int(num_files * 0.9)
+
+        if self.split == "train":
+            return raw_files[:train_end]
+        if self.split == "val":
+            return raw_files[train_end:val_end]
+        if self.split == "test":
+            return raw_files[val_end:]
+        raise ValueError(f"Unknown split: {self.split}")
+
+    def _load_data_file(self, file_path: str) -> Data | None:
+        try:
+            raw = torch.load(file_path, weights_only=False)
+            if "x" not in raw or "pos" not in raw:
+                return None
+
+            y = raw.get("y")
+            if y is None:
+                if self.require_labels:
+                    return None
+                y = torch.zeros(len(raw["pos"]), dtype=torch.float)
+
+            y_tensor = self._to_tensor(y)
+            if self.require_positive_labels and y_tensor.sum() == 0:
+                return None
+
+            plddt = raw.get("plddt")
+            if plddt is None:
+                plddt = torch.ones(len(raw["pos"]), dtype=torch.float)
+
+            return Data(
+                x=self._to_tensor(raw["x"]),
+                pos=self._to_tensor(raw["pos"]),
+                plddt=self._to_tensor(plddt),
+                y=y_tensor,
+                protein_id=Path(file_path).stem,
+            )
+        except Exception as exc:
+            print(f"Warning: error loading {file_path}: {exc}")
+            return None
+
+    @staticmethod
+    def _to_tensor(value) -> torch.Tensor:
+        if isinstance(value, np.ndarray):
+            return torch.from_numpy(value).float()
+        if isinstance(value, torch.Tensor):
+            return value.float()
+        return torch.tensor(value).float()

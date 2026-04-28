@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "protcross"
+version = "0.1.1"
+description = "Domain-adaptive protein point-cloud binding-site prediction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Sheng Zhong" },
+  { name = "Yun Jiang" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+  "biopython",
+  "hydra-core",
+  "numpy",
+  "pandas",
+  "pytorch-lightning",
+  "requests",
+  "scikit-learn",
+  "torch",
+  "torch-geometric",
+  "torchmetrics",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+esm = ["esm>=3.1.0", "httpx"]
+predict = ["esm>=3.1.0", "httpx"]
+test = ["pytest"]
+dev = ["pytest", "build", "twine"]
+
+[project.urls]
+Publication = "https://doi.org/10.1021/acs.jcim.5c03224"
+
+[project.scripts]
+protcross-predict = "evopoint_da.cli.predict:main"
+protcross-setup-assets = "evopoint_da.cli.setup_assets:main"
+protcross-preprocess = "evopoint_da.cli.preprocess:main"
+protcross-train = "evopoint_da.cli.train:main"
+protcross = "evopoint_da.cli.main:main"
+protcross-download-af2 = "evopoint_da.cli.download_af2:main"
+protcross-map-labels = "evopoint_da.cli.map_labels:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+  "slow: integration tests that require large model weights or substantial runtime",
+]
