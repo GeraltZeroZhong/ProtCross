@@ -12,7 +12,7 @@ import requests
 from tqdm import tqdm
 
 
-RELEASE_TAG = "v0.1.1"
+RELEASE_TAG = "v0.1.2"
 GITHUB_RELEASE_BASE = f"https://github.com/GeraltZeroZhong/ProtCross/releases/download/{RELEASE_TAG}"
 DEFAULT_ASSETS_DIR = Path.home() / ".cache" / "protcross" / "assets" / RELEASE_TAG
 
@@ -20,8 +20,12 @@ DEFAULT_ESM_URL = (
     "https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12/"
     "resolve/main/data/weights/esmc_600m_2024_12_v0.pth"
 )
-DEFAULT_CHECKPOINT_URL = f"{GITHUB_RELEASE_BASE}/best-epoch.59.ckpt"
-DEFAULT_PCA_URL = f"{GITHUB_RELEASE_BASE}/pca_esmc_128.pkl"
+DEFAULT_CHECKPOINT_FILENAME = "protcross-0.1.2-binding-moad-final.ckpt"
+DEFAULT_PCA_FILENAME = "pca_esmc_128_binding_moad_0.1.2.pkl"
+LEGACY_CHECKPOINT_FILENAME = "best-epoch=59.ckpt"
+LEGACY_PCA_FILENAME = "pca_esmc_128.pkl"
+DEFAULT_CHECKPOINT_URL = f"{GITHUB_RELEASE_BASE}/{DEFAULT_CHECKPOINT_FILENAME}"
+DEFAULT_PCA_URL = f"{GITHUB_RELEASE_BASE}/{DEFAULT_PCA_FILENAME}"
 
 
 @dataclass(frozen=True)
@@ -41,15 +45,15 @@ DEFAULT_ASSETS = (
     ),
     AssetSpec(
         name="ProtCross checkpoint",
-        filename="best-epoch=59.ckpt",
+        filename=DEFAULT_CHECKPOINT_FILENAME,
         url=DEFAULT_CHECKPOINT_URL,
-        sha256="3eb6d8c9ef94541efc0444508e15d630c156a98e164a6caa08f2ae7a20371e45",
+        sha256="ccb56884b21402a027bfae9d4779f38c8f534513d980a96d7cd78c9931748b65",
     ),
     AssetSpec(
         name="ProtCross PCA reducer",
-        filename="pca_esmc_128.pkl",
+        filename=DEFAULT_PCA_FILENAME,
         url=DEFAULT_PCA_URL,
-        sha256="c4317684fb94c1337a44b844381d7e84472a6958b34a604b0f982984b629098b",
+        sha256="0f4e11806a622642c07dad539cec4216030220c1b5f3fc44c7926a2f6bca4d62",
     ),
 )
 
@@ -161,13 +165,13 @@ def write_env_file(output_dir: Path, *, include_esm: bool = True) -> None:
     env_path = output_dir / "protcross.env"
     lines = [
         _export_line("PROTCROSS_ASSETS_DIR", output_dir),
-        _export_line("PROTCROSS_CHECKPOINT", output_dir / "best-epoch=59.ckpt"),
+        _export_line("PROTCROSS_CHECKPOINT", output_dir / DEFAULT_CHECKPOINT_FILENAME),
     ]
     if include_esm:
         lines.append(_export_line("PROTCROSS_ESM_WEIGHTS", output_dir / "esmc_600m_2024_12_v0.pth"))
     lines.extend(
         [
-            _export_line("PROTCROSS_PCA", output_dir / "pca_esmc_128.pkl"),
+            _export_line("PROTCROSS_PCA", output_dir / DEFAULT_PCA_FILENAME),
             "",
         ]
     )

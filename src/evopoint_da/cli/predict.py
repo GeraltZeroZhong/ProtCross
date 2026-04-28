@@ -8,8 +8,14 @@ import sys
 from pathlib import Path
 
 
-LOCAL_CHECKPOINT = Path("checkpoint/best-epoch=59.ckpt")
-LOCAL_PCA = Path("data/pca_esmc_128.pkl")
+LOCAL_CHECKPOINTS = (
+    Path("checkpoints/protcross-0.1.2-binding-moad-final.ckpt"),
+    Path("checkpoint/best-epoch=59.ckpt"),
+)
+LOCAL_PCAS = (
+    Path("data/pca_esmc_128_binding_moad_0.1.2.pkl"),
+    Path("data/pca_esmc_128.pkl"),
+)
 
 
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
@@ -22,8 +28,8 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--assets-dir",
         help=(
-            "Directory containing best-epoch=59.ckpt, esmc_600m_2024_12_v0.pth, "
-            "and pca_esmc_128.pkl. Explicit file arguments override this."
+            "Directory containing a ProtCross checkpoint, esmc_600m_2024_12_v0.pth, "
+            "and a matching PCA reducer. Explicit file arguments override this."
         ),
     )
     parser.add_argument(
@@ -34,7 +40,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         default=os.environ.get("PROTCROSS_CHECKPOINT"),
         help=(
             "ProtCross Lightning checkpoint. Defaults to PROTCROSS_CHECKPOINT, "
-            "installed assets, or checkpoint/best-epoch=59.ckpt when present."
+            "installed assets, or a known local checkpoint when present."
         ),
     )
     parser.add_argument(
@@ -52,7 +58,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         default=os.environ.get("PROTCROSS_PCA"),
         help=(
             "Fitted PCA pickle for ESM-C embeddings. Defaults to PROTCROSS_PCA, "
-            "installed assets, or data/pca_esmc_128.pkl when present."
+            "installed assets, or a known local PCA reducer when present."
         ),
     )
     parser.add_argument(
@@ -88,10 +94,10 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
         args.esm_weights = args.esm_weights or str(assets.esm_weights)
         args.pca_path = args.pca_path or str(assets.pca)
 
-    if not args.ckpt_path and LOCAL_CHECKPOINT.exists():
-        args.ckpt_path = str(LOCAL_CHECKPOINT)
-    if not args.pca_path and LOCAL_PCA.exists():
-        args.pca_path = str(LOCAL_PCA)
+    if not args.ckpt_path:
+        args.ckpt_path = next((str(path) for path in LOCAL_CHECKPOINTS if path.exists()), None)
+    if not args.pca_path:
+        args.pca_path = next((str(path) for path in LOCAL_PCAS if path.exists()), None)
 
     if not args.esm_weights:
         parser.error(

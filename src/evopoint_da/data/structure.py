@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -34,6 +35,54 @@ STANDARD_AA = {
     "TYR",
 }
 
+WATER_RESNAMES = frozenset({"HOH", "WAT", "H2O", "DOD"})
+
+DEFAULT_IGNORED_HETATM_RESNAMES = frozenset(
+    {
+        # Common crystallization additives, buffers, and solvents.
+        "GOL",
+        "EDO",
+        "PEG",
+        "PE4",
+        "PG4",
+        "PGE",
+        "DMS",
+        "ACT",
+        "ACY",
+        "FMT",
+        "MES",
+        "TRS",
+        # Common salts and phosphate/sulfate-like crystallization species.
+        "SO4",
+        "PO4",
+        "NO3",
+        # Monatomic ions that should not define small-molecule binding labels by default.
+        "NA",
+        "CL",
+        "K",
+        "MG",
+        "CA",
+        "ZN",
+        "MN",
+        "FE",
+        "CU",
+        "CO",
+        "NI",
+        "CD",
+        "HG",
+        "CS",
+        "RB",
+        "LI",
+        "F",
+        "BR",
+        "I",
+        # Protein-like crystallographic artifacts or terminal caps.
+        "MSE",
+        "ACE",
+        "NME",
+    }
+)
+
 
 def truncate_parsed_structure(parsed: Dict, max_len: int = MAX_ESM_RESIDUES) -> Dict:
     """Return a shallow copy truncated to the ESM-C residue context limit."""
@@ -53,9 +102,19 @@ def truncate_parsed_structure(parsed: Dict, max_len: int = MAX_ESM_RESIDUES) -> 
 class StructureParser:
     """Parse PDB/mmCIF files into residue-level point-cloud inputs."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        ignored_hetatm_resnames: Iterable[str] | None = None,
+        ligand_neighbor_cutoff: float = 6.0,
+    ) -> None:
         self.pdb_parser = PDBParser(QUIET=True)
         self.cif_parser = MMCIFParser(QUIET=True)
+        ignored = DEFAULT_IGNORED_HETATM_RESNAMES if ignored_hetatm_resnames is None else ignored_hetatm_resnames
+        self.ignored_hetatm_resnames = WATER_RESNAMES | frozenset(
+            resname.strip().upper() for resname in ignored if resname and resname.strip()
+        )
+        self.ligand_neighbor_cutoff = float(ligand_neighbor_cutoff)
 
     def parse_file_with_labels(self, file_path: str | Path, chain_id: Optional[str] = None) -> Optional[Dict]:
         """Parse a structure and infer residue labels from nearby ligand atoms.
@@ -75,7 +134,7 @@ class StructureParser:
         all_atoms = [
             atom
             for atom in Selection.unfold_entities(model, "A")
-            if atom.get_parent().get_resname().strip().upper() not in {"HOH", "WAT", "H2O"}
+            if not self._is_ignored_hetatm_residue(atom.get_parent())
         ]
         if not all_atoms:
             return None
@@ -122,11 +181,15 @@ class StructureParser:
             "original_length": len(seq_chars),
         }
 
-    @staticmethod
-    def _has_ligand_neighbor(neighbor_search: NeighborSearch, ca_atom, residue) -> float:
-        for neighbor_atom in neighbor_search.search(ca_atom.get_coord(), 6.0):
+    def _is_ignored_hetatm_residue(self, residue) -> bool:
+        return residue.get_resname().strip().upper() in self.ignored_hetatm_resnames
+
+    def _has_ligand_neighbor(self, neighbor_search: NeighborSearch, ca_atom, residue) -> float:
+        for neighbor_atom in neighbor_search.search(ca_atom.get_coord(), self.ligand_neighbor_cutoff):
             neighbor_residue = neighbor_atom.get_parent()
             if neighbor_residue == residue:
+                continue
+            if self._is_ignored_hetatm_residue(neighbor_residue):
                 continue
 
             neighbor_name = neighbor_residue.get_resname().strip().upper()
@@ -135,4 +198,3 @@ class StructureParser:
                 return 1.0
 
         return 0.0
-

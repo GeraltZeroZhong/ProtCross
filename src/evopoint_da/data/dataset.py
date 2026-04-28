@@ -85,6 +85,9 @@ class EvoPointDataset(InMemoryDataset):
 
     def _split_files(self) -> list[str]:
         raw_files = sorted(glob.glob(os.path.join(self.root, "*.pt")))
+        if self.split == "all":
+            return raw_files
+
         rng = random.Random(self.split_seed)
         rng.shuffle(raw_files)
 
