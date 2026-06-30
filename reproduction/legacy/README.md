@@ -8,21 +8,24 @@ For normal prediction, training, and data preparation, prefer the installed
 ProtCross CLI where a maintained equivalent exists:
 
 ```bash
-protcross predict input.pdb
+protcross predict input.pdb --accept-esm-license
 protcross train
 protcross preprocess
 protcross download-af2
 protcross map-labels
 ```
 
-Legacy entry points are still runnable from the repository root, for example:
+Legacy entry points are still runnable from the repository root when the full
+training/reproduction environment and required data assets are present. They may
+write logs, outputs, checkpoints, or reports, so treat them as workflow scripts
+rather than harmless help/smoke commands:
 
 ```bash
 python reproduction/legacy/run_Predict_ProtCross.py --pdb_file examples/6fhu.pdb
 python reproduction/legacy/train.py
-python reproduction/legacy/preprocess_esm.py --help
-python reproduction/legacy/get_af2.py --help
-python reproduction/legacy/map_labels.py --help
+python reproduction/legacy/preprocess_esm.py
+python reproduction/legacy/get_af2.py
+python reproduction/legacy/map_labels.py
 ```
 
 These scripts are a mix of thin wrappers and task-specific analysis utilities.
@@ -36,7 +39,7 @@ practical prediction. For reproducing the original paper workflow, use the
 archived scripts here together with the paper asset bundle:
 
 ```bash
-protcross setup-assets --asset-version 0.1.1-paper
+protcross setup-assets --asset-version 0.1.1-paper --accept-esm-license
 ```
 
 That bundle resolves the 0.1.1 paper checkpoint and PCA reducer:
@@ -53,15 +56,19 @@ and the modern `protcross predict` workflow from the repository root README.
 ## Archived Analysis Helpers
 
 Evaluation and multi-seed benchmark helpers are intentionally documented here
-rather than in the main README:
+rather than in the main README. They are not maintained CLI entry points and
+should be run only in a reproduction workspace:
 
-```bash
-python reproduction/legacy/test_adaptive.py ckpt_path=checkpoints/protcross-0.1.2-binding-moad-final.ckpt
-python reproduction/legacy/run_multiseed_benchmark.py
-python reproduction/legacy/run_Strategy.py
-python reproduction/legacy/analyze_geometric.py --help
-python reproduction/legacy/sensitivity-cutoff.py --help
-```
+| Script | Purpose |
+| --- | --- |
+| `test_adaptive.py` | Legacy checkpoint evaluation helper. |
+| `run_multiseed_benchmark.py` | Legacy multi-seed training/evaluation workflow. |
+| `run_Strategy.py` | Archived strategy-search entry point. |
+| `analyze_geometric.py` | Archived geometric analysis utility. |
+| `sensitivity-cutoff.py` | Archived cutoff sensitivity analysis. |
+| `eval_run.py`, `eval_dataset.py`, `eval_utils.py` | Legacy evaluation support modules. |
+| `setup_assets.py` | Historical wrapper; prefer `protcross setup-assets`. |
+| `map_labels-o.py` | Older label-mapping variant retained for provenance. |
 
 The archived `pdb_uniprot_mapping.json` file is kept here for the legacy
 analysis scripts. Modern AF2 download and label-mapping workflows write their

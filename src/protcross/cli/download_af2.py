@@ -21,6 +21,18 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--max-workers", type=_positive_int, default=8)
     parser.add_argument("--uniprot-candidates", type=_positive_int, default=3)
     parser.add_argument("--timeout-seconds", type=_positive_int, default=30)
+    parser.add_argument("--allow-empty", action="store_true", help="Exit successfully when no PDB IDs are found.")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Exit successfully when some requested PDB IDs fail but at least one download succeeds.",
+    )
+    parser.add_argument(
+        "--allow-empty-downloads",
+        action="store_true",
+        help="Exit successfully when requested IDs produce no AlphaFold downloads.",
+    )
+    parser.add_argument("--refresh", action="store_true", help="Re-download AlphaFold files even when a verified cache exists.")
     return parser
 
 
@@ -37,6 +49,9 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
         max_workers=args.max_workers,
         uniprot_candidates=args.uniprot_candidates,
         timeout_seconds=args.timeout_seconds,
+        allow_empty=args.allow_empty or args.allow_empty_downloads,
+        allow_partial=args.allow_partial,
+        refresh=args.refresh,
     )
     try:
         download_af2_structures(config)

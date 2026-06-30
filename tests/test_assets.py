@@ -69,7 +69,7 @@ def test_setup_assets_writes_manifest_without_network(tmp_path, monkeypatch):
 
     monkeypatch.setattr("protcross.assets.download_asset", fake_download)
 
-    output_dir = setup_assets(tmp_path, force=True)
+    output_dir = setup_assets(tmp_path, force=True, accept_esm_license=True)
 
     manifest = json.loads((output_dir / ASSET_MANIFEST_FILENAME).read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "protcross-assets-v1"
@@ -122,7 +122,7 @@ def test_resolve_refresh_assets_refreshes_managed_esm(tmp_path, monkeypatch):
 
     resolve_prediction_assets(assets_dir=tmp_path, refresh_assets=True)
 
-    assert calls == [{"asset_version": "default", "force": True, "skip_esm": False}]
+    assert calls == [{"asset_version": "default", "force": True, "skip_esm": False, "accept_esm_license": False}]
 
 
 def test_resolve_refresh_assets_skips_explicit_external_esm(tmp_path, monkeypatch):
@@ -145,9 +145,14 @@ def test_resolve_refresh_assets_skips_explicit_external_esm(tmp_path, monkeypatc
     monkeypatch.setattr("protcross.assets.setup_assets", fake_setup_assets)
     monkeypatch.setattr("protcross.assets.sha256_file", lambda path: expected_by_name[Path(path).name])
 
-    resolved = resolve_prediction_assets(esm_weights=explicit_esm, assets_dir=tmp_path, refresh_assets=True)
+    resolved = resolve_prediction_assets(
+        esm_weights=explicit_esm,
+        assets_dir=tmp_path,
+        refresh_assets=True,
+        trust_unverified_assets=True,
+    )
 
-    assert calls == [{"asset_version": "default", "force": True, "skip_esm": True}]
+    assert calls == [{"asset_version": "default", "force": True, "skip_esm": True, "accept_esm_license": False}]
     assert resolved.esm_weights == explicit_esm
     assert resolved.asset_version == "custom"
 
@@ -160,6 +165,28 @@ def test_resolve_rejects_bad_managed_assets_without_auto_download(tmp_path, monk
         resolve_prediction_assets(assets_dir=tmp_path, auto_setup_assets=False, offline=True)
 
 
+def test_resolve_rejects_forged_verified_manifest_for_managed_assets(tmp_path):
+    files = {}
+    for spec in DEFAULT_ASSET_BUNDLE.assets:
+        path = tmp_path / spec.filename
+        path.write_text("manifest-verified-placeholder", encoding="utf-8")
+        files[spec.name] = {
+            "filename": spec.filename,
+            "expected_sha256": spec.sha256,
+            "actual_sha256": spec.sha256,
+            "size_bytes": path.stat().st_size,
+            "mtime_ns": path.stat().st_mtime_ns,
+            "verified": True,
+        }
+    (tmp_path / ASSET_MANIFEST_FILENAME).write_text(
+        json.dumps({"asset_version": "0.1.2", "files": files}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="SHA256"):
+        resolve_prediction_assets(assets_dir=tmp_path, auto_setup_assets=False)
+
+
 def test_resolve_labels_all_explicit_assets_as_custom(tmp_path):
     ckpt = tmp_path / "model.ckpt"
     esm = tmp_path / "esm.pth"
@@ -167,9 +194,38 @@ def test_resolve_labels_all_explicit_assets_as_custom(tmp_path):
     for path in (ckpt, esm, pca):
         path.write_bytes(b"asset")
 
-    resolved = resolve_prediction_assets(ckpt, esm, pca, auto_setup_assets=False)
+    with pytest.raises(RuntimeError, match="trust-unverified-assets"):
+        resolve_prediction_assets(ckpt, esm, pca, auto_setup_assets=False)
+
+    resolved = resolve_prediction_assets(
+        ckpt,
+        esm,
+        pca,
+        auto_setup_assets=False,
+        trust_unverified_assets=True,
+    )
 
     assert resolved.asset_version == "custom"
+
+
+def test_setup_assets_requires_esm_license_acceptance(tmp_path, monkeypatch):
+    def fail_download(*args, **kwargs):
+        raise AssertionError("download should not start before license acceptance")
+
+    monkeypatch.setattr("protcross.assets.download_asset", fail_download)
+
+    with pytest.raises(RuntimeError, match="accept-esm-license"):
+        setup_assets(tmp_path, force=True)
+
+
+def test_resolve_explicit_missing_asset_fails_before_auto_setup(tmp_path, monkeypatch):
+    def fail_setup_assets(*args, **kwargs):
+        raise AssertionError("setup_assets should not run for a missing explicit path")
+
+    monkeypatch.setattr("protcross.assets.setup_assets", fail_setup_assets)
+
+    with pytest.raises(FileNotFoundError, match="--checkpoint"):
+        resolve_prediction_assets(ckpt_path=tmp_path / "missing.ckpt", auto_setup_assets=True)
 
 
 def test_download_asset_sha_mismatch_removes_part_file(tmp_path, monkeypatch):

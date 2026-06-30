@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ProtCross Desktop",
+  "version": "0.2.0",
+  "identifier": "org.protcross.desktop",
+  "build": {
+    "beforeDevCommand": "cd ../frontend && npm run dev",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "cd ../frontend && npm run build",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ProtCross Desktop",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 980,
+        "minHeight": 760
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPLOCALDATA/**",
+          "$LOCALDATA/ProtCross/**",
+          "$HOME/Library/Application Support/ProtCross/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "app", "dmg"],
+    "publisher": "ProtCross",
+    "category": "Science",
+    "shortDescription": "Desktop binding-site prediction for protein structures.",
+    "longDescription": "ProtCross Desktop provides Windows and macOS prediction workflows and molecular visualization for ProtCross binding-site outputs.",
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": true,
+        "installerHooks": "../installer/esm-license-confirmation.nsh"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true,
+      "dmg": {
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 220
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 220
+        }
+      }
+    },
+    "resources": {
+      "../backend": "backend",
+      "../../src": "python-src",
+      "../runtime": "runtime",
+      "../installer": "installer",
+      "../bundled-assets": "bundled-assets"
+    }
+  }
+}

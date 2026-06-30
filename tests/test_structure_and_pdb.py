@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 from Bio.PDB import MMCIFParser, PDBParser
+from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 
 from protcross.data import StructureParser
 from protcross.inference.pdb import write_bfactor_pdb
@@ -108,10 +109,11 @@ def test_write_bfactor_pdb_sets_scores(tmp_path: Path):
 
     write_bfactor_pdb(input_pdb, output_pdb, ["A_1", "A_2"], np.array([0.25, 0.75]))
 
-    text = output_pdb.read_text()
-    assert "  0.25" in text
-    assert "  0.75" in text
-    assert " 10.00" in text
+    structure = PDBParser(QUIET=True).get_structure("out", str(output_pdb))
+    residues = list(structure.get_residues())
+    assert residues[0]["CA"].get_bfactor() == 0.25
+    assert residues[1]["CA"].get_bfactor() == 0.75
+    assert residues[2]["C1"].get_bfactor() == 0.0
 
 
 def test_write_bfactor_can_emit_mmcif(tmp_path: Path):
@@ -132,7 +134,7 @@ def test_write_bfactor_can_zero_unscored_atoms(tmp_path: Path):
     output_pdb = tmp_path / "output.pdb"
     input_pdb.write_text(MINIMAL_PDB)
 
-    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.25]), missing_value=0.0)
+    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.25]))
 
     text = output_pdb.read_text()
     assert "  0.25" in text
@@ -170,7 +172,7 @@ END
     structure = PDBParser(QUIET=True).get_structure("out", str(output_pdb))
     residues = list(structure.get_residues())
     assert residues[0]["CA"].get_bfactor() == 0.87
-    assert residues[1]["C1"].get_bfactor() == 10.0
+    assert residues[1]["C1"].get_bfactor() == 0.0
 
 
 def test_write_bfactor_legacy_fallback_does_not_score_hetatm_collision(tmp_path: Path):
@@ -188,7 +190,7 @@ END
         encoding="utf-8",
     )
 
-    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.87]), residue_metadata=None)
+    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.87]), residue_metadata=None, missing_value=None)
 
     structure = PDBParser(QUIET=True).get_structure("out", str(output_pdb))
     residues = list(structure.get_residues())
@@ -214,7 +216,7 @@ END
         encoding="utf-8",
     )
 
-    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.42]), residue_metadata=None)
+    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.42]), residue_metadata=None, missing_value=None)
 
     models = list(PDBParser(QUIET=True).get_structure("out", str(output_pdb)))
     assert next(models[0].get_residues())["CA"].get_bfactor() == 0.42
@@ -242,7 +244,7 @@ END
     assert text.count("  0.91") >= 3
 
 
-def test_write_bfactor_only_updates_scored_model_when_metadata_is_present(tmp_path: Path):
+def test_write_bfactor_preserves_unscored_model_when_metadata_is_present(tmp_path: Path):
     input_pdb = tmp_path / "models.pdb"
     output_pdb = tmp_path / "models.out.pdb"
     input_pdb.write_text(
@@ -326,6 +328,123 @@ ATOM 3 C C . ALA X 1 7 ? 2.000 0.000 0.000 1.00 13.00 ? 101 ALA A C 1
     assert metadata["label_asym_id"] == "X"
     assert metadata["auth_seq_id"] == 101
     assert metadata["label_seq_id"] == 7
+
+
+def test_write_bfactor_mmcif_preserves_auth_and_label_identity(tmp_path: Path):
+    input_cif = tmp_path / "input.cif"
+    output_cif = tmp_path / "output.cif"
+    input_cif.write_text(
+        """\
+data_test
+#
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1 N N . ALA X 1 7 ? 0.000 0.000 0.000 1.00 11.00 ? 101 ALA A N 1
+ATOM 2 C CA . ALA X 1 7 ? 1.000 0.000 0.000 1.00 12.00 ? 101 ALA A CA 1
+ATOM 3 C C . ALA X 1 7 ? 2.000 0.000 0.000 1.00 13.00 ? 101 ALA A C 1
+#
+""",
+        encoding="utf-8",
+    )
+    parsed = StructureParser().parse_file_with_labels(input_cif)
+
+    write_bfactor_pdb(
+        input_cif,
+        output_cif,
+        parsed["residue_ids"],
+        np.array([0.66]),
+        residue_metadata=parsed["residue_metadata"],
+    )
+
+    out = MMCIF2Dict(str(output_cif))
+    assert out["_atom_site.label_asym_id"] == ["X", "X", "X"]
+    assert out["_atom_site.label_seq_id"] == ["7", "7", "7"]
+    assert out["_atom_site.auth_asym_id"] == ["A", "A", "A"]
+    assert out["_atom_site.auth_seq_id"] == ["101", "101", "101"]
+    assert [float(value) for value in out["_atom_site.B_iso_or_equiv"]] == [0.66, 0.66, 0.66]
+
+
+def test_write_bfactor_mmcif_preserves_unscored_model_identity(tmp_path: Path):
+    input_cif = tmp_path / "models.cif"
+    output_cif = tmp_path / "models.out.cif"
+    input_cif.write_text(
+        """\
+data_test
+#
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1 N N . ALA X 1 7 ? 0.000 0.000 0.000 1.00 11.00 ? 101 ALA A N 1
+ATOM 2 C CA . ALA X 1 7 ? 1.000 0.000 0.000 1.00 12.00 ? 101 ALA A CA 1
+ATOM 3 C C . ALA X 1 7 ? 2.000 0.000 0.000 1.00 13.00 ? 101 ALA A C 1
+ATOM 4 N N . ALA X 1 7 ? 0.000 0.000 1.000 1.00 41.00 ? 101 ALA A N 2
+ATOM 5 C CA . ALA X 1 7 ? 1.000 0.000 1.000 1.00 42.00 ? 101 ALA A CA 2
+ATOM 6 C C . ALA X 1 7 ? 2.000 0.000 1.000 1.00 43.00 ? 101 ALA A C 2
+#
+""",
+        encoding="utf-8",
+    )
+    parsed = StructureParser().parse_file_with_labels(input_cif)
+
+    assert parsed is not None
+    assert parsed["residue_metadata"][0]["mmcif_model_num"] == "1"
+
+    write_bfactor_pdb(
+        input_cif,
+        output_cif,
+        parsed["residue_ids"],
+        np.array([0.66]),
+        residue_metadata=parsed["residue_metadata"],
+    )
+
+    out = MMCIF2Dict(str(output_cif))
+    assert [float(value) for value in out["_atom_site.B_iso_or_equiv"]] == [
+        0.66,
+        0.66,
+        0.66,
+        41.0,
+        42.0,
+        43.0,
+    ]
 
 
 def test_structure_parser_records_multimodel_warning(tmp_path: Path):

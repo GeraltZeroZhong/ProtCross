@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "protcross-desktop-backend"
+version = "0.2.0"
+description = "Local sidecar backend for ProtCross Desktop."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "protcross==0.1.3"
+]
+
+[project.scripts]
+protcross-desktop-backend = "protcross_desktop.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

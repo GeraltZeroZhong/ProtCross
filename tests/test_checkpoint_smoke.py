@@ -14,9 +14,8 @@ DEFAULT_RELEASE_CHECKPOINT = Path("checkpoints/protcross-0.1.2-binding-moad-fina
 
 
 def test_checkpoint_forward_cpu_on_publish_sample():
-    sample_path = require_file(PUBLISH_PDB_SAMPLE)
     checkpoint = _release_checkpoint()
-    raw = torch.load(sample_path, map_location="cpu", weights_only=False)
+    raw = _load_release_sample()
     batch = Batch.from_data_list(
         [
             Data(
@@ -35,6 +34,20 @@ def test_checkpoint_forward_cpu_on_publish_sample():
         logits = model.seg_head(feats)
 
     assert logits.shape == (batch.x.shape[0], 2)
+
+
+def _load_release_sample() -> dict[str, torch.Tensor]:
+    if os.environ.get("PROTCROSS_RELEASE_SYNTHETIC_SAMPLE") == "1":
+        generator = torch.Generator().manual_seed(13)
+        node_count = int(os.environ.get("PROTCROSS_RELEASE_SYNTHETIC_NODES", "128"))
+        return {
+            "x": torch.randn(node_count, 128, generator=generator),
+            "pos": torch.randn(node_count, 3, generator=generator) * 0.1,
+            "plddt": torch.full((node_count,), 90.0),
+            "y": torch.zeros(node_count, dtype=torch.long),
+        }
+    sample_path = require_file(PUBLISH_PDB_SAMPLE)
+    return torch.load(sample_path, map_location="cpu", weights_only=False)
 
 
 def _release_checkpoint() -> Path:

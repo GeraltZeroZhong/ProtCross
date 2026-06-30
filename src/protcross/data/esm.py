@@ -34,8 +34,10 @@ class ESMFeatureExtractor:
         except Exception as exc:
             raise RuntimeError("Failed to initialize the ESM-C 600M model structure.") from exc
 
-        self.model = self.model.to(self.device)
-        state_dict = torch.load(model_path, map_location=self.device)
+        try:
+            state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            state_dict = torch.load(model_path, map_location="cpu")
         if "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
         elif "model" in state_dict:
@@ -58,6 +60,7 @@ class ESMFeatureExtractor:
                 RuntimeWarning,
                 stacklevel=2,
             )
+        self.model = self.model.to(self.device)
         self.model.eval()
 
     @staticmethod

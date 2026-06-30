@@ -1,0 +1,31 @@
+{
+  "name": "protcross-desktop-frontend",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "cd ../src-tauri && tauri",
+    "tauri:dev": "cd ../src-tauri && tauri dev",
+    "tauri:preflight": "python ../installer/validate_bundled_assets.py --assets-dir ../bundled-assets && python ../installer/validate_runtime_bundle.py --runtime-dir ../runtime",
+    "tauri:build": "cd ../src-tauri && tauri build",
+    "tauri:release-build": "npm run tauri:preflight && cd ../src-tauri && tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.2.0",
+    "@tauri-apps/plugin-dialog": "2.2.0",
+    "molstar": "4.11.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "@tauri-apps/cli": "2.2.0",
+    "@vitejs/plugin-react": "4.3.4",
+    "typescript": "5.7.3",
+    "vite": "6.4.3"
+  }
+}

@@ -19,7 +19,7 @@ Use this path when you only want to predict binding sites for one structure.
 
 ```bash
 pip install "protcross[predict]"
-protcross predict input.pdb
+protcross predict input.pdb --accept-esm-license
 ```
 
 By default this writes a complete result package next to the input:
@@ -27,8 +27,10 @@ By default this writes a complete result package next to the input:
 `input.protcross.pockets.json`, and `input.protcross.summary.json`. For mmCIF
 input, the annotated structure output uses `.cif`.
 
-On the first prediction run, ProtCross automatically installs runtime assets into
-`~/.cache/protcross/assets/v0.1.2` by default:
+On the first prediction run, ProtCross can install runtime assets into
+`~/.cache/protcross/assets/v0.1.2` by default. Before downloading or using
+ESM-C weights, review the upstream ESM-C model license and pass
+`--accept-esm-license` once:
 
 ```text
 protcross-0.1.2-binding-moad-final.ckpt    # recommended release checkpoint
@@ -40,7 +42,7 @@ PyPI packages ship code only. Use `protcross setup-assets` when you want to
 pre-download assets, install a specific asset bundle, or provide custom URLs:
 
 ```bash
-protcross setup-assets \
+protcross setup-assets --accept-esm-license \
   --checkpoint-url https://example.org/protcross-0.1.2-binding-moad-final.ckpt \
   --pca-url https://example.org/pca_esmc_128_binding_moad_0.1.2.pkl
 ```
@@ -51,6 +53,15 @@ Training a new release-style model uses the modern `protcross train`,
 `protcross preprocess`, `protcross download-af2`, and `protcross map-labels`
 commands. Paper-reproduction notes are documented in
 `reproduction/legacy/README.md`.
+
+Desktop GUI work for Windows and macOS is tracked under `desktop/` as the
+0.2.0 desktop release line. The app is a Tauri/React/Mol* frontend for
+prediction, batch prediction, asset setup, and local diagnostics; the
+command-line interface remains the maintained core API.
+CLI assets and Desktop assets are configured separately: CLI commands use the
+ProtCross cache or explicit `--checkpoint/--esm-weights/--pca` paths, while
+Desktop stores its manifest and user-selected assets under the app data folder.
+Running `protcross setup-assets` does not by itself make the Desktop app ready.
 
 If your system already has ESM-C weights, skip that large download and pass the path at prediction time:
 
@@ -129,7 +140,7 @@ For the lightweight prediction interface from PyPI:
 
 ```bash
 pip install "protcross[predict]"
-protcross predict input.pdb --output input.protcross.pdb
+protcross predict input.pdb --accept-esm-license --output input.protcross.pdb
 ```
 
 The provided environment includes:
@@ -151,11 +162,13 @@ ProtCross separates code and large runtime assets. PyPI distributions include th
 Recommended setup:
 
 ```bash
-protcross setup-assets
+protcross setup-assets --accept-esm-license
 ```
 
 Manual setup is optional for standard prediction because `protcross predict`
-automatically downloads missing default assets. By default this downloads:
+can automatically download missing default assets. Downloading or using ESM-C weights
+requires `--accept-esm-license` or `PROTCROSS_ACCEPT_ESM_LICENSE=1`. By default
+asset setup downloads:
 - ESM-C 600M weights from https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
 - `protcross-0.1.2-binding-moad-final.ckpt` from the ProtCross `v0.1.2` GitHub release
 - `pca_esmc_128_binding_moad_0.1.2.pkl` from the ProtCross `v0.1.2` GitHub release
@@ -168,14 +181,14 @@ version is recorded in `protcross-assets.json`. The default install location is
 `PROTCROSS_ASSETS_DIR` or `--output-dir`:
 
 ```bash
-PROTCROSS_ASSETS_DIR=/data/protcross-assets protcross setup-assets
-protcross setup-assets --output-dir /data/protcross-assets
+PROTCROSS_ASSETS_DIR=/data/protcross-assets protcross setup-assets --accept-esm-license
+protcross setup-assets --accept-esm-license --output-dir /data/protcross-assets
 ```
 
 After setup, prediction can discover assets automatically:
 
 ```bash
-protcross predict input.pdb --out-dir protcross-results
+protcross predict input.pdb --accept-esm-license --out-dir protcross-results
 ```
 
 To disable automatic asset setup during prediction, pass `--no-auto-assets` or
@@ -188,8 +201,15 @@ protcross predict input.pdb \
   --checkpoint checkpoints/protcross-0.1.2-binding-moad-final.ckpt \
   --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
   --pca data/pca_esmc_128_binding_moad_0.1.2.pkl \
+  --accept-esm-license \
   --out-dir protcross-results
 ```
+
+Explicit local checkpoint, PCA, and ESM-C files are treated as trusted local
+inputs only when their SHA256 matches the selected release bundle. For custom
+or experimental assets, pass `--trust-unverified-assets` after verifying the
+files came from a source you trust; checkpoint, PCA pickle, and torch weight
+loading can execute code through their underlying serialization formats.
 
 #### What is ESM-C?
 **ESM-C** is EvolutionaryScale's protein language model family for extracting residue-level sequence representations. In ProtCross, ESM-C embeddings are used as per-residue features.
@@ -197,7 +217,9 @@ protcross predict input.pdb \
 Recommended checkpoint for this project:
 - **ESM-C 600M (2024-12)**: https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
 
-The ESM-C model repository uses a custom non-commercial license. Review the model terms before downloading or redistributing derived assets.
+The ESM-C model repository uses upstream model terms that are separate from
+ProtCross's MIT code license. Review the model terms before downloading,
+using, or redistributing ESM-C weights or derived assets.
 
 #### Manual ESM-C download fallback
 
@@ -267,7 +289,7 @@ prediction package.
 The recommended 0.1.2 path for PyPI users is:
 
 ```bash
-protcross predict examples/6fhu.pdb --out-dir examples/protcross-results
+protcross predict examples/6fhu.pdb --accept-esm-license --out-dir examples/protcross-results
 ```
 
 This writes:
@@ -281,6 +303,7 @@ creating default output files. Individual paths can still override the defaults:
 
 ```bash
 protcross predict examples/6fhu.pdb \
+  --accept-esm-license \
   --output examples/6fhu.protcross.pdb \
   --scores-tsv examples/6fhu.scores.tsv \
   --pocket-json examples/6fhu.pockets.json \
@@ -290,7 +313,7 @@ protcross predict examples/6fhu.pdb \
 
 Prediction output semantics:
 - `--threshold` uses a strict `probability > threshold` rule for binary calls, TSV `is_binding`, pocket selection, clustering, and summaries.
-- The annotated structure B-factor column always stores continuous ProtCross probabilities in the `0..1` range for scored protein residues. It is not an experimental B-factor. By default, unscored atoms keep their original B-factor; use `--unscored-bfactor-policy zero` when a viewer or downstream script should treat unscored atoms as zero.
+- The annotated structure B-factor column stores continuous ProtCross probabilities in the `0..1` range for scored protein residues. It is not an experimental B-factor. By default, unscored atoms in scored model(s) are written as `0.0` so downstream scripts do not mix ProtCross probabilities with original B-factors or pLDDT. Fully unscored models in multi-model structures keep their original values and are reported in warnings. Use `--unscored-bfactor-policy keep` only when you explicitly want to preserve original values for unscored atoms in scored model(s).
 - Pocket coordinates are in the input structure coordinate frame, in Angstrom, using C-alpha atoms.
 - `summary.top_pocket.center` and terminal `Pocket center` refer to the highest-ranked clustered pocket, not the aggregate of all selected residues. `aggregate_pocket.center` is reported separately for all selected residues.
 - Clustered pockets are connected components from selected residues using the default 8 Angstrom C-alpha cutoff.
@@ -333,6 +356,7 @@ from protcross.inference import ProtCrossPredictor, predict_pdb
 # auto_setup_assets=False is passed.
 result = predict_pdb(
     "examples/6fhu.pdb",
+    accept_esm_license=True,
     output_pdb="examples/6fhu.protcross.pdb",
     scores_tsv="examples/6fhu.protcross.scores.tsv",
     pocket_json="examples/6fhu.protcross.pockets.json",
@@ -340,7 +364,10 @@ result = predict_pdb(
 )
 print(result.format_summary())
 
-predictor = ProtCrossPredictor.from_default_assets(embedding_cache_dir=".protcross-feature-cache")
+predictor = ProtCrossPredictor.from_default_assets(
+    embedding_cache_dir=".protcross-feature-cache",
+    accept_esm_license=True,
+)
 result = predictor.predict("examples/6fhu.pdb", pocket_json="examples/6fhu.protcross.pockets.json")
 
 result = predict_pdb(
@@ -359,11 +386,12 @@ print(result.format_summary())
 a shell loop and optionally reuse a feature cache across invocations:
 
 ```bash
-protcross setup-assets
+protcross setup-assets --accept-esm-license
 mkdir -p batch_outputs
 for pdb in /path/to/pdb_dir/*.pdb; do
   base="$(basename "${pdb}" .pdb)"
   protcross predict "${pdb}" \
+    --accept-esm-license \
     --out-dir batch_outputs \
     --embedding-cache-dir .protcross-feature-cache \
     --threshold 0.5
@@ -380,6 +408,7 @@ from protcross.inference import ProtCrossPredictor
 predictor = ProtCrossPredictor.from_default_assets(
     device="auto",
     embedding_cache_dir=".protcross-feature-cache",
+    accept_esm_license=True,
 )
 results = predictor.predict_many(
     sorted(Path("/path/to/pdb_dir").glob("*.pdb")),
@@ -525,7 +554,11 @@ ProtCross/
 ## 6. Troubleshooting
 
 - **`FileNotFoundError` for ESM-C weights**
-  - Run `protcross setup-assets`, or ensure `--esm-weights` points to an existing local `.pth` checkpoint file.
+  - Run `protcross setup-assets --accept-esm-license`, or ensure `--esm-weights` points to an existing local `.pth` checkpoint file.
+- **ESM-C license confirmation is required**
+  - Review the upstream ESM-C terms, then pass `--accept-esm-license` or set `PROTCROSS_ACCEPT_ESM_LICENSE=1` before downloading or using ESM-C weights.
+- **Explicit custom assets are rejected**
+  - Use the managed 0.1.2 assets when possible. For experimental local assets, pass `--trust-unverified-assets` only after verifying the files are trusted.
 - **`protcross setup-assets` cannot find GitHub release assets**
   - Attach `protcross-0.1.2-binding-moad-final.ckpt` and `pca_esmc_128_binding_moad_0.1.2.pkl` to the `v0.1.2` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
 - **Torch Geometric install issues**
@@ -561,4 +594,6 @@ Earlier release notes and archived command references are maintained in
 
 ## 8. License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+ProtCross code is licensed under the MIT License. See [LICENSE](LICENSE) for
+details. ESM-C weights are not part of the ProtCross code license and remain
+governed by EvolutionaryScale's upstream model terms.

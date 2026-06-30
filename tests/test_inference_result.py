@@ -1,6 +1,9 @@
 from pathlib import Path
 import json
+import pickle
 import re
+import sys
+import types
 
 import numpy as np
 import pytest
@@ -77,6 +80,21 @@ def test_prediction_result_reports_weighted_pocket_center_and_clusters():
     assert summary["aggregate_pocket"]["residue_count"] == 3
     assert summary["top_pocket"]["residue_count"] == 2
     np.testing.assert_allclose(summary["top_pocket"]["center"], [0.8, 0.0, 0.0])
+
+
+def test_prediction_result_caches_records_pockets_and_summary():
+    result = PredictionResult(
+        input_pdb=Path("input.pdb"),
+        residue_ids=["A_1", "A_2", "A_3"],
+        probabilities=np.array([0.9, 0.6, 0.2]),
+        threshold=0.5,
+        ca_coords=np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [20.0, 0.0, 0.0]]),
+        cluster_cutoff=8.0,
+    )
+
+    assert result.to_records() is result.to_records()
+    assert result.to_pocket_dict() is result.to_pocket_dict()
+    assert result.to_summary_dict() is result.to_summary_dict()
 
 
 def test_prediction_result_empty_pocket_json_shape():
@@ -299,6 +317,7 @@ def test_predict_pdb_asset_resolution_uses_partial_assets_and_explicit_esm(tmp_p
         None,
         assets_dir=tmp_path,
         auto_setup_assets=True,
+        trust_unverified_assets=True,
     )
 
     assert ckpt == tmp_path / DEFAULT_CHECKPOINT_FILENAME
@@ -442,6 +461,64 @@ def test_predictor_rejects_invalid_pca_dim():
         )
 
 
+def test_predictor_from_files_requires_esm_license_acceptance(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROTCROSS_ACCEPT_ESM_LICENSE", raising=False)
+    ckpt = tmp_path / "model.ckpt"
+    esm = tmp_path / "esm.pth"
+    pca = tmp_path / "pca.pkl"
+    for path in (ckpt, esm, pca):
+        path.write_bytes(b"asset")
+
+    with pytest.raises(RuntimeError, match="accept-esm-license"):
+        ProtCrossPredictor.from_files(ckpt, esm, pca)
+
+
+def test_predictor_from_files_runs_offline_real_prediction_path(tmp_path, monkeypatch):
+    _install_fake_esm_modules(monkeypatch)
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    ckpt = tmp_path / "model.ckpt"
+    esm = tmp_path / "esmc_600m_2024_12_v0.pth"
+    pca = tmp_path / "pca.pkl"
+    output_pdb = tmp_path / "out.pdb"
+    scores_tsv = tmp_path / "scores.tsv"
+    pocket_json = tmp_path / "pockets.json"
+    summary_json = tmp_path / "summary.json"
+    ckpt.write_bytes(b"checkpoint")
+    torch.save({"state_dict": {}}, esm)
+    with pca.open("wb") as handle:
+        pickle.dump(_OfflineSmokePCA(), handle)
+
+    monkeypatch.setattr(
+        "protcross.inference.predictor.EvoPointDALitModule.load_from_checkpoint",
+        lambda *args, **kwargs: _VariableFakeModel(),
+    )
+
+    predictor = ProtCrossPredictor.from_files(
+        ckpt,
+        esm,
+        pca,
+        device="cpu",
+        pca_dim=2,
+        max_len=8,
+        accept_esm_license=True,
+    )
+    result = predictor.predict(
+        input_pdb,
+        threshold=0.5,
+        output_pdb=output_pdb,
+        scores_tsv=scores_tsv,
+        pocket_json=pocket_json,
+        summary_json=summary_json,
+    )
+
+    assert result.residue_ids == ["A_1", "A_2"]
+    assert output_pdb.exists()
+    assert scores_tsv.exists()
+    assert json.loads(pocket_json.read_text(encoding="utf-8"))["schema_version"] == "protcross-pocket-v1"
+    assert json.loads(summary_json.read_text(encoding="utf-8"))["schema_version"] == "protcross-summary-v1"
+
+
 def test_predictor_embedding_cache_reuses_reduced_features(tmp_path):
     input_pdb = tmp_path / "input.pdb"
     input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
@@ -523,6 +600,53 @@ def test_predictor_embedding_cache_key_includes_asset_identity(tmp_path):
     assert len(list(cache_dir.glob("*.pt"))) == 2
 
 
+def test_predictor_featurizes_multichain_inputs_per_chain(tmp_path):
+    input_pdb = tmp_path / "multi.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    (tmp_path / "esm.pth").write_bytes(b"esm")
+    (tmp_path / "pca.pkl").write_bytes(b"pca")
+    esm = _RecordingESM()
+    predictor = ProtCrossPredictor(
+        ckpt_path=None,
+        esm_weights=tmp_path / "esm.pth",
+        pca_path=tmp_path / "pca.pkl",
+        device="cpu",
+        max_len=2,
+        esm_extractor=esm,
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeMultiChainParser(),
+        model=_VariableFakeModel(),
+        asset_version="custom",
+    )
+
+    result = predictor.predict(input_pdb, threshold=0.5)
+
+    assert esm.sequences == ["AG", "K"]
+    assert result.residue_ids == ["A_1", "A_2", "B_1"]
+
+
+def test_predictor_truncates_each_chain_independently(tmp_path):
+    input_pdb = tmp_path / "multi.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    esm = _RecordingESM()
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=2,
+        esm_extractor=esm,
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeLongMultiChainParser(),
+        model=_VariableFakeModel(),
+        asset_version="custom",
+    )
+
+    result = predictor.predict(input_pdb, threshold=0.5, allow_truncation=True)
+
+    assert esm.sequences == ["AG", "KL"]
+    assert result.truncated is True
+    assert result.original_length == 6
+    assert result.residue_ids == ["A_1", "A_2", "B_1", "B_2"]
+
+
 class _FakeParser:
     def parse_file_with_labels(self, file_path, chain_id=None):
         return {
@@ -576,6 +700,15 @@ class _FakeESM:
         return torch.ones((len(sequence), 4), dtype=torch.float32)
 
 
+class _RecordingESM(_FakeESM):
+    def __init__(self):
+        self.sequences = []
+
+    def extract_residue_embeddings(self, sequence):
+        self.sequences.append(sequence)
+        return super().extract_residue_embeddings(sequence)
+
+
 class _FakePCA:
     def transform(self, embeddings):
         return embeddings[:, :2]
@@ -605,11 +738,154 @@ class _FakeModel:
     def eval(self):
         return self
 
+    def to(self, device):
+        return self
+
     def backbone(self, x, pos, batch):
         return x, None
 
     def seg_head(self, feats):
         return torch.tensor([[0.0, 2.0], [2.0, 0.0]], dtype=torch.float32)
+
+
+class _VariableFakeModel(_FakeModel):
+    def seg_head(self, feats):
+        logits = torch.zeros((feats.shape[0], 2), dtype=torch.float32)
+        logits[:, 1] = 2.0
+        return logits
+
+
+class _FakeMultiChainParser:
+    def parse_file_with_labels(self, file_path, chain_id=None):
+        return {
+            "coords": np.array([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [16.0, 0.0, 0.0]], dtype=np.float32),
+            "raw_coords": np.array([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [16.0, 0.0, 0.0]], dtype=np.float32),
+            "sequence": "AGK",
+            "plddts": np.array([20.0, 30.0, 40.0], dtype=np.float32),
+            "residue_ids": ["A_1", "A_2", "B_1"],
+            "residue_metadata": [
+                _fake_residue_metadata("A_1", "A", 1, "ALA", "A"),
+                _fake_residue_metadata("A_2", "A", 2, "GLY", "G"),
+                _fake_residue_metadata("B_1", "B", 1, "LYS", "K"),
+            ],
+            "labels": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            "truncated": False,
+            "original_length": 3,
+        }
+
+
+class _FakeLongMultiChainParser:
+    def parse_file_with_labels(self, file_path, chain_id=None):
+        return {
+            "coords": np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [11.0, 0.0, 0.0],
+                    [12.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+            "raw_coords": np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [11.0, 0.0, 0.0],
+                    [12.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
+            "sequence": "AGHKLM",
+            "plddts": np.array([20.0, 21.0, 22.0, 30.0, 31.0, 32.0], dtype=np.float32),
+            "residue_ids": ["A_1", "A_2", "A_3", "B_1", "B_2", "B_3"],
+            "residue_metadata": [
+                _fake_residue_metadata("A_1", "A", 1, "ALA", "A"),
+                _fake_residue_metadata("A_2", "A", 2, "GLY", "G"),
+                _fake_residue_metadata("A_3", "A", 3, "HIS", "H"),
+                _fake_residue_metadata("B_1", "B", 1, "LYS", "K"),
+                _fake_residue_metadata("B_2", "B", 2, "LEU", "L"),
+                _fake_residue_metadata("B_3", "B", 3, "MET", "M"),
+            ],
+            "labels": np.zeros(6, dtype=np.float32),
+            "truncated": False,
+            "original_length": 6,
+        }
+
+
+def _fake_residue_metadata(residue_id, chain_id, residue_number, resname, one_letter_code):
+    return {
+        "residue_id": residue_id,
+        "residue_key": f"model:0|chain:{chain_id}|het:ATOM|resseq:{residue_number}|icode:|resname:{resname}",
+        "residue_id_namespace": "pdb",
+        "model_id": "0",
+        "chain_id": chain_id,
+        "auth_asym_id": chain_id,
+        "label_asym_id": None,
+        "residue_number": residue_number,
+        "auth_seq_id": residue_number,
+        "label_seq_id": None,
+        "insertion_code": "",
+        "resname": resname,
+        "one_letter_code": one_letter_code,
+        "input_bfactor": 20.0,
+    }
+
+
+class _OfflineSmokePCA:
+    def transform(self, array):
+        return np.asarray(array, dtype=np.float32)[:, :2]
+
+
+def _install_fake_esm_modules(monkeypatch):
+    esm_module = types.ModuleType("esm")
+    models_module = types.ModuleType("esm.models")
+    esmc_module = types.ModuleType("esm.models.esmc")
+    sdk_module = types.ModuleType("esm.sdk")
+    api_module = types.ModuleType("esm.sdk.api")
+    tokenization_module = types.ModuleType("esm.tokenization")
+
+    class FakeTokenizer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class FakeProtein:
+        def __init__(self, sequence):
+            self.sequence = sequence
+
+    class FakeESMC:
+        def __init__(self, tokenizer=None, **kwargs):
+            self.tokenizer = tokenizer
+
+        def load_state_dict(self, state_dict, strict=False):
+            return types.SimpleNamespace(missing_keys=[], unexpected_keys=[])
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+        def encode(self, protein):
+            return types.SimpleNamespace(sequence=torch.arange(len(protein.sequence) + 2, dtype=torch.long))
+
+        def __call__(self, input_ids, attention_mask=None):
+            length = int(input_ids.shape[1])
+            values = torch.arange(length * 4, dtype=torch.float32).reshape(1, length, 4)
+            return types.SimpleNamespace(embeddings=values)
+
+    esmc_module.ESMC = FakeESMC
+    api_module.ESMProtein = FakeProtein
+    tokenization_module.EsmSequenceTokenizer = FakeTokenizer
+    monkeypatch.setitem(sys.modules, "esm", esm_module)
+    monkeypatch.setitem(sys.modules, "esm.models", models_module)
+    monkeypatch.setitem(sys.modules, "esm.models.esmc", esmc_module)
+    monkeypatch.setitem(sys.modules, "esm.sdk", sdk_module)
+    monkeypatch.setitem(sys.modules, "esm.sdk.api", api_module)
+    monkeypatch.setitem(sys.modules, "esm.tokenization", tokenization_module)
 
 
 def _trust_managed_asset_hashes(monkeypatch):

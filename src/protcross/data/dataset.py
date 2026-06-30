@@ -15,6 +15,9 @@ from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
 
 
+PREPROCESS_MANIFEST = "protcross-preprocess-manifest.json"
+
+
 class EvoPointDataset(InMemoryDataset):
     def __init__(
         self,
@@ -32,6 +35,7 @@ class EvoPointDataset(InMemoryDataset):
         self.require_positive_labels = require_positive_labels
         self.split_seed = split_seed
         super().__init__(str(root))
+        self._validate_preprocess_manifest()
 
         if not os.path.exists(self.processed_paths[0]):
             self.process()
@@ -121,6 +125,28 @@ class EvoPointDataset(InMemoryDataset):
         except Exception:
             return True
         return manifest.get("signature") != self._cache_signature(self._split_files())
+
+    def _validate_preprocess_manifest(self) -> None:
+        manifest_path = Path(self.root) / PREPROCESS_MANIFEST
+        if not manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Invalid preprocessing manifest: {manifest_path}") from exc
+        if manifest.get("append_mode"):
+            return
+        allowed = set(manifest.get("produced_outputs") or manifest.get("expected_outputs") or [])
+        if not allowed:
+            raise RuntimeError(f"Preprocessing manifest has no expected outputs: {manifest_path}")
+        actual = {Path(path).name for path in glob.glob(os.path.join(self.root, "*.pt"))}
+        orphaned = sorted(actual - allowed)
+        if orphaned:
+            raise RuntimeError(
+                "Processed data directory contains .pt files not listed in "
+                f"{PREPROCESS_MANIFEST}: {', '.join(orphaned)}. "
+                "Re-run protcross preprocess without --append or remove stale files."
+            )
 
     def _write_cache_manifest(self, raw_files: list[str]) -> None:
         manifest = {

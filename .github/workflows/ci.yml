@@ -50,3 +50,258 @@ jobs:
           /tmp/protcross-smoke/bin/python -m pip install dist/*.whl
           /tmp/protcross-smoke/bin/python -c "import protcross; print(protcross.__version__)"
           /tmp/protcross-smoke/bin/protcross --help
+
+      - name: Clean predict-extra install smoke
+        run: |
+          python -m venv /tmp/protcross-predict-smoke
+          /tmp/protcross-predict-smoke/bin/python -m pip install --upgrade pip
+          wheel="$(ls dist/*.whl)"
+          /tmp/protcross-predict-smoke/bin/python -m pip install "${wheel}[predict]"
+          /tmp/protcross-predict-smoke/bin/protcross predict --help
+
+  no-deps-help:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install package without runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-deps .
+
+      - name: CLI help without torch or Lightning
+        run: |
+          protcross --help
+          protcross predict --help
+          protcross setup-assets --help
+          protcross preprocess --help
+          protcross download-af2 --help
+          protcross map-labels --help
+          protcross train --help
+
+  release-checkpoint-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install test environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Download verified release checkpoint
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from protcross.assets import DEFAULT_ASSET_BUNDLE, download_asset
+
+          out = Path("/tmp/protcross-release-smoke/checkpoints")
+          checkpoint = DEFAULT_ASSET_BUNDLE.assets[1]
+          download_asset(checkpoint, out / checkpoint.filename, force=True, verify=True)
+          PY
+
+      - name: Check release checkpoint forward pass
+        run: |
+          PROTCROSS_RELEASE_SMOKE=1 \
+          PROTCROSS_RELEASE_SYNTHETIC_SAMPLE=1 \
+          PROTCROSS_RELEASE_CHECKPOINT=/tmp/protcross-release-smoke/checkpoints/protcross-0.1.2-binding-moad-final.ckpt \
+          pytest -q tests/test_checkpoint_smoke.py
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install desktop backend test environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[predict,test]"
+          python -m pip install --no-deps -e desktop/backend
+
+      - name: Desktop backend tests
+        run: pytest -q tests/desktop
+
+      - name: Frontend build and audit
+        working-directory: desktop/frontend
+        run: |
+          npm ci
+          npm run build
+          npm audit --omit=dev
+
+      - name: Tauri cargo check
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
+
+  desktop-release-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install desktop release build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build requests tqdm uv
+
+      - name: Frontend dependencies
+        working-directory: desktop/frontend
+        run: npm ci
+
+      - name: Build local ProtCross wheel for desktop runtime
+        run: python -m build --wheel --outdir dist
+
+      - name: Download desktop bundled assets
+        shell: bash
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "src")
+          from protcross.assets import DEFAULT_ASSET_BUNDLE, download_asset
+
+          targets = {
+              "checkpoint": Path("checkpoints"),
+              "pca": Path("data"),
+          }
+          for spec, out_dir in (
+              (DEFAULT_ASSET_BUNDLE.assets[1], targets["checkpoint"]),
+              (DEFAULT_ASSET_BUNDLE.assets[2], targets["pca"]),
+          ):
+              download_asset(spec, out_dir / spec.filename, force=True, verify=True)
+          PY
+
+      - name: Prepare desktop bundled assets (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\desktop\installer\prepare_bundled_assets.ps1
+
+      - name: Prepare desktop bundled assets (macOS)
+        if: runner.os == 'macOS'
+        run: desktop/installer/prepare_bundled_assets.sh
+
+      - name: Prepare desktop runtime bundle
+        shell: bash
+        run: |
+          wheel="$(ls dist/protcross-*.whl | head -n 1)"
+          python desktop/installer/prepare_runtime_wheelhouse.py \
+            --runtime-dir desktop/runtime \
+            --backend all \
+            --local-protcross-wheel "$wheel"
+          python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend all
+
+      - name: Validate staged desktop sidecar resources
+        shell: bash
+        run: |
+          python - <<'PY'
+          import shutil
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "protcross-sidecar-resources"
+          if root.exists():
+              shutil.rmtree(root)
+          root.mkdir(parents=True)
+          shutil.copytree("desktop/backend", root / "backend", ignore=shutil.ignore_patterns("*.egg-info", "build", "dist", "__pycache__"))
+          shutil.copytree("src", root / "python-src", ignore=shutil.ignore_patterns("*.egg-info", "__pycache__", "*.pyc"))
+          shutil.copytree("desktop/runtime", root / "runtime", ignore=shutil.ignore_patterns("__pycache__"))
+          shutil.copytree("desktop/bundled-assets", root / "bundled-assets")
+          print(root)
+          PY
+          python desktop/installer/validate_packaged_sidecar.py \
+            --resource-dir "$RUNNER_TEMP/protcross-sidecar-resources"
+
+      - name: CPU backend offline install smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\desktop\runtime\install_cpu_backend.ps1 -InstallRoot "$env:RUNNER_TEMP\protcross-runtime-smoke"
+          .\desktop\runtime\test_backend.ps1 -Backend cpu -InstallRoot "$env:RUNNER_TEMP\protcross-runtime-smoke"
+
+      - name: CPU backend offline install smoke (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          desktop/runtime/install_cpu_backend.sh --install-root "$RUNNER_TEMP/protcross-runtime-smoke"
+          desktop/runtime/test_backend.sh --backend cpu --install-root "$RUNNER_TEMP/protcross-runtime-smoke"
+
+      - name: Tauri Windows NSIS build smoke
+        if: runner.os == 'Windows'
+        working-directory: desktop/frontend
+        run: npm run tauri:release-build -- --bundles nsis
+
+      - name: Tauri macOS app build smoke
+        if: runner.os == 'macOS'
+        working-directory: desktop/frontend
+        run: npm run tauri:release-build -- --bundles app
+
+      - name: Validate packaged macOS sidecar resources
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_path="$(find desktop/src-tauri/target -path '*/bundle/macos/ProtCross Desktop.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "Built .app bundle not found" >&2
+            exit 1
+          fi
+          python desktop/installer/validate_packaged_sidecar.py \
+            --resource-dir "$app_path/Contents/Resources"
+
+      - name: Runtime installer syntax smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          [scriptblock]::Create((Get-Content -Raw desktop/runtime/install_cpu_backend.ps1)) > $null
+          [scriptblock]::Create((Get-Content -Raw desktop/runtime/install_gpu_backend.ps1)) > $null
+          [scriptblock]::Create((Get-Content -Raw desktop/runtime/test_backend.ps1)) > $null
+          [scriptblock]::Create((Get-Content -Raw desktop/installer/validate-release.ps1)) > $null
+
+      - name: Runtime installer syntax smoke (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          bash -n desktop/runtime/install_cpu_backend.sh
+          bash -n desktop/runtime/install_gpu_backend.sh
+          bash -n desktop/runtime/test_backend.sh
+          bash -n desktop/installer/sign-notarize-macos.sh
+          bash -n desktop/installer/validate-release-macos.sh

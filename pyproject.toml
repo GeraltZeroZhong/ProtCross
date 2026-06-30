@@ -63,4 +63,5 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
   "slow: integration tests that require large model weights or substantial runtime",
+  "network: tests that intentionally open local or remote sockets",
 ]

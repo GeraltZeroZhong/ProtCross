@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import re
 import threading
@@ -13,6 +14,7 @@ import requests
 
 
 PDB_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{4}$")
+AF2_MODEL_VERSION = "model_v6"
 
 
 @dataclass
@@ -25,6 +27,9 @@ class AF2DownloadConfig:
     max_workers: int = 8
     uniprot_candidates: int = 3
     timeout_seconds: int = 30
+    allow_empty: bool = False
+    allow_partial: bool = False
+    refresh: bool = False
 
 
 class AF2Downloader:
@@ -45,14 +50,29 @@ class AF2Downloader:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         if not pdb_ids:
             source = self.config.pdb_id_file or self.config.raw_pdb_dir
-            print(f"No PDB IDs found in {source}.")
-            return {}
+            if self.config.allow_empty:
+                print(f"No PDB IDs found in {source}.")
+                return {}
+            raise ValueError(f"No PDB IDs found in {source}. Provide PDB files, --pdb-id-file, or pass --allow-empty.")
 
         print(f"Found {len(pdb_ids)} PDB IDs. Starting AlphaFold downloads...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
-            list(executor.map(self.process_pdb_id, pdb_ids))
+            results = dict(zip(pdb_ids, executor.map(self.process_pdb_id, pdb_ids)))
 
         self.save_mapping()
+        failed = [pdb_id for pdb_id, success in results.items() if not success]
+        succeeded = [pdb_id for pdb_id, success in results.items() if success]
+        if failed and not self.config.allow_partial:
+            raise RuntimeError(
+                "AlphaFold download failed for PDB IDs: "
+                + ", ".join(failed)
+                + ". Pass --allow-partial to keep successful downloads."
+            )
+        if not succeeded and not self.config.allow_empty:
+            raise RuntimeError(
+                "No AlphaFold structures were resolved or downloaded. "
+                "Check network access, input IDs, or pass --allow-empty-downloads."
+            )
         return self.mapping
 
     def collect_pdb_ids(self) -> list[str]:
@@ -93,23 +113,24 @@ class AF2Downloader:
                 pdb_ids.append(pdb_id)
         return pdb_ids
 
-    def process_pdb_file(self, pdb_file: Path) -> None:
-        self.process_pdb_id(pdb_file.stem.upper())
+    def process_pdb_file(self, pdb_file: Path) -> bool:
+        return self.process_pdb_id(pdb_file.stem.upper())
 
-    def process_pdb_id(self, pdb_id: str) -> None:
+    def process_pdb_id(self, pdb_id: str) -> bool:
         preloaded_accession = self.preloaded_mapping.get(pdb_id)
         uniprot_ids = [preloaded_accession] if preloaded_accession else self.fetch_uniprot_ids(pdb_id)
         if not uniprot_ids:
             self.safe_print(f"[skip] No UniProt accession found for PDB {pdb_id}.")
-            return
+            return False
 
         for accession in uniprot_ids:
             if self.download_structure(accession):
                 with self.mapping_lock:
                     self.mapping[pdb_id] = accession
-                return
+                return True
 
         self.safe_print(f"[skip] All AlphaFold candidates failed for PDB {pdb_id}: {uniprot_ids}")
+        return False
 
     def fetch_uniprot_ids(self, pdb_id: str) -> list[str]:
         url = (
@@ -117,7 +138,7 @@ class AF2Downloader:
             f"?query=xref:pdb-{pdb_id}&fields=accession&size={self.config.uniprot_candidates}"
         )
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=self.config.timeout_seconds)
             response.raise_for_status()
             data = response.json()
             return [item["primaryAccession"] for item in data.get("results", [])]
@@ -126,26 +147,29 @@ class AF2Downloader:
             return []
 
     def download_structure(self, uniprot_id: str) -> bool:
-        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v6.pdb"
+        url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-{AF2_MODEL_VERSION}.pdb"
         output_path = self.config.output_dir / f"AF-{uniprot_id}.pdb"
         download_lock = self.get_download_lock(output_path)
 
         with download_lock:
             if output_path.exists():
-                if output_path.stat().st_size > 0:
+                if not self.config.refresh and self._existing_structure_is_valid(output_path, uniprot_id):
                     self.safe_print(f"[ok] {output_path.name} already exists.")
                     return True
+                self.safe_print(f"[warn] Refreshing invalid or unverifiable cached AlphaFold file: {output_path.name}")
                 output_path.unlink()
+                self._manifest_path(output_path).unlink(missing_ok=True)
 
             try:
                 response = requests.get(url, timeout=self.config.timeout_seconds)
                 if response.status_code == 200:
-                    if not self._looks_like_pdb(response.content):
+                    if not self._looks_like_pdb(response.content) or not self._has_ca_atoms(response.content):
                         self.safe_print(f"[warn] AlphaFold response for {uniprot_id} did not look like a PDB file.")
                         return False
                     tmp_path = output_path.with_suffix(output_path.suffix + ".part")
                     tmp_path.write_bytes(response.content)
                     tmp_path.replace(output_path)
+                    self._write_download_manifest(output_path, uniprot_id, url, response.content)
                     self.safe_print(f"[ok] Downloaded {output_path}")
                     return True
                 if response.status_code != 404:
@@ -192,6 +216,51 @@ class AF2Downloader:
             return False
         prefix = content[:2048].decode("utf-8", errors="ignore")
         return any(token in prefix for token in ("HEADER", "ATOM", "MODEL", "TITLE"))
+
+    @staticmethod
+    def _has_ca_atoms(content: bytes) -> bool:
+        text = content.decode("utf-8", errors="ignore")
+        for line in text.splitlines():
+            if line.startswith("ATOM") and len(line) >= 16 and line[12:16].strip() == "CA":
+                return True
+        return False
+
+    def _existing_structure_is_valid(self, output_path: Path, uniprot_id: str) -> bool:
+        if output_path.stat().st_size <= 0:
+            return False
+        manifest_path = self._manifest_path(output_path)
+        if not manifest_path.exists():
+            return False
+        try:
+            content = output_path.read_bytes()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if manifest.get("uniprot_id") != uniprot_id or manifest.get("model_version") != AF2_MODEL_VERSION:
+            return False
+        if manifest.get("sha256") != self._sha256_bytes(content):
+            return False
+        return self._looks_like_pdb(content) and self._has_ca_atoms(content)
+
+    def _write_download_manifest(self, output_path: Path, uniprot_id: str, url: str, content: bytes) -> None:
+        manifest = {
+            "schema_version": "protcross-af2-download-v1",
+            "uniprot_id": uniprot_id,
+            "model_version": AF2_MODEL_VERSION,
+            "download_url": url,
+            "filename": output_path.name,
+            "size_bytes": len(content),
+            "sha256": self._sha256_bytes(content),
+        }
+        self._manifest_path(output_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _manifest_path(output_path: Path) -> Path:
+        return output_path.with_suffix(output_path.suffix + ".protcross-af2.json")
+
+    @staticmethod
+    def _sha256_bytes(content: bytes) -> str:
+        return hashlib.sha256(content).hexdigest()
 
 
 def download_af2_structures(config: AF2DownloadConfig) -> dict[str, str]:
