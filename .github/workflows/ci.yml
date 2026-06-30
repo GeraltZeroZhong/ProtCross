@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,test]"
+
+      - name: Run tests
+        run: pytest -q -m "not slow"
+
+      - name: CLI help smoke
+        run: |
+          protcross --help
+          protcross predict --help
+          protcross setup-assets --help
+          protcross preprocess --help
+          protcross download-af2 --help
+          protcross map-labels --help
+          protcross train --help
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distributions
+        run: python -m twine check dist/*
+
+      - name: Clean install smoke
+        run: |
+          python -m venv /tmp/protcross-smoke
+          /tmp/protcross-smoke/bin/python -m pip install --upgrade pip
+          /tmp/protcross-smoke/bin/python -m pip install dist/*.whl
+          /tmp/protcross-smoke/bin/python -c "import protcross; print(protcross.__version__)"
+          /tmp/protcross-smoke/bin/protcross --help

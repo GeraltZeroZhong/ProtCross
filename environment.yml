@@ -1,4 +1,4 @@
-name: evopoint_da
+name: protcross
 channels:
   - pytorch
   - nvidia

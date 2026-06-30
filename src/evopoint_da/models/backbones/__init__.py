@@ -1,6 +1,5 @@
-"""Backbone networks."""
+from evopoint_da._compat import alias_children, alias_module
 
-from .pointnet2 import PointNet2Backbone
-
-__all__ = ["PointNet2Backbone"]
-
+_module = alias_module(__name__, "protcross.models.backbones")
+alias_children(__name__, "protcross.models.backbones", ("pointnet2",))
+globals().update(_module.__dict__)

@@ -1,6 +1,5 @@
-"""Training helpers."""
+from evopoint_da._compat import alias_children, alias_module
 
-from .run import run_training
-
-__all__ = ["run_training"]
-
+_module = alias_module(__name__, "protcross.training")
+alias_children(__name__, "protcross.training", ("run",))
+globals().update(_module.__dict__)

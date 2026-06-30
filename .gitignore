@@ -8,23 +8,16 @@ outputs/
 logs/
 checkpoints/
 saved_weights/
+artifacts/
+.protcross-feature-cache/
 *.ckpt
 *.pth
 multiseed_raw_results.csv
 multiseed_summary_report.csv
 
-data/binding_moad/
-data/raw_af2/*.pdb
-data/raw_pdb/*.pdb
-data/raw_pdb/*.cif
-data/raw_pdb/*.mmcif
-data/weights/
-data/processed_af2/*.pt
-data/processed_pdb/*.pt
-data/processed_af2/processed/
-data/processed_pdb/processed/
-data/pca_esmc_128_binding_moad_0.1.2.pkl
-data/internal_eval_0.1.2/
+/data/
+RELEASE_NOTES_0.1.2.md
+scripts/internal_compare_checkpoint_curves.py
 
 *.egg-info/
 build/

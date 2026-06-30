@@ -1,0 +1,27 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include environment.yml
+recursive-include configs *.yaml
+recursive-include src/protcross/configs *.yaml
+recursive-include examples *.pdb *.md
+recursive-include reproduction/legacy *.py *.md *.json
+recursive-include tests *.py
+exclude RELEASE_NOTES_0.1.2.md
+recursive-exclude data *
+recursive-exclude checkpoint *
+recursive-exclude checkpoints *
+recursive-exclude artifacts *
+recursive-exclude outputs *
+recursive-exclude logs *
+recursive-exclude saved_weights *
+recursive-exclude build *
+recursive-exclude dist *
+recursive-exclude scripts *
+recursive-exclude src/protcross.egg-info *
+global-exclude __pycache__/*
+global-exclude *.py[cod]
+global-exclude *.egg-info/*
+global-exclude *.ckpt
+global-exclude *.pth
+global-exclude *.part

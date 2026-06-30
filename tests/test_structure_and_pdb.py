@@ -1,9 +1,10 @@
 from pathlib import Path
 
 import numpy as np
+from Bio.PDB import MMCIFParser, PDBParser
 
-from evopoint_da.data import StructureParser
-from evopoint_da.inference.pdb import write_bfactor_pdb
+from protcross.data import StructureParser
+from protcross.inference.pdb import write_bfactor_pdb
 
 from conftest import PUBLISH_RAW_PDB, require_file
 
@@ -53,6 +54,43 @@ def test_structure_parser_ignores_default_hetatm_blacklist(tmp_path: Path):
     assert parsed["labels"].tolist() == [0.0, 1.0]
 
 
+def test_structure_parser_preserves_raw_coordinates_for_pocket_reporting(tmp_path: Path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(ADDITIVE_AND_LIGAND_PDB)
+
+    parsed = StructureParser().parse_file_with_labels(input_pdb)
+
+    assert parsed is not None
+    np.testing.assert_allclose(parsed["raw_coords"][0], [0.0, 0.0, 0.0])
+    np.testing.assert_allclose(parsed["raw_coords"][1], [15.0, 0.0, 0.0])
+    np.testing.assert_allclose(parsed["coords"].mean(axis=0), [0.0, 0.0, 0.0])
+    assert parsed["residue_metadata"][0]["residue_key"] == "model:0|chain:A|het:ATOM|resseq:1|icode:|resname:ALA"
+    assert parsed["residue_metadata"][0]["input_bfactor"] == 20.0
+    assert parsed["residue_metadata"][0]["residue_id_namespace"] == "pdb"
+    assert parsed["residue_metadata"][0]["label_asym_id"] is None
+
+
+def test_structure_parser_preserves_insertion_code_metadata(tmp_path: Path):
+    input_pdb = tmp_path / "insertion.pdb"
+    input_pdb.write_text(
+        """\
+ATOM      1  N   ALA A  10A      0.000   0.000   0.000  1.00 21.00           N
+ATOM      2  CA  ALA A  10A      1.000   0.000   0.000  1.00 21.00           C
+ATOM      3  C   ALA A  10A      2.000   0.000   0.000  1.00 21.00           C
+TER
+END
+""",
+        encoding="utf-8",
+    )
+
+    parsed = StructureParser().parse_file_with_labels(input_pdb)
+
+    assert parsed is not None
+    assert parsed["residue_ids"] == ["A_10A"]
+    assert parsed["residue_metadata"][0]["insertion_code"] == "A"
+    assert parsed["residue_metadata"][0]["residue_key"] == "model:0|chain:A|het:ATOM|resseq:10|icode:A|resname:ALA"
+
+
 def test_structure_parser_can_disable_extra_hetatm_blacklist(tmp_path: Path):
     input_pdb = tmp_path / "input.pdb"
     input_pdb.write_text(ADDITIVE_AND_LIGAND_PDB)
@@ -73,3 +111,243 @@ def test_write_bfactor_pdb_sets_scores(tmp_path: Path):
     text = output_pdb.read_text()
     assert "  0.25" in text
     assert "  0.75" in text
+    assert " 10.00" in text
+
+
+def test_write_bfactor_can_emit_mmcif(tmp_path: Path):
+    input_pdb = tmp_path / "input.pdb"
+    output_cif = tmp_path / "output.cif"
+    input_pdb.write_text(MINIMAL_PDB)
+
+    write_bfactor_pdb(input_pdb, output_cif, ["A_1", "A_2"], np.array([0.25, 0.75]))
+
+    structure = MMCIFParser(QUIET=True).get_structure("out", str(output_cif))
+    residues = [residue for residue in structure.get_residues() if residue.id[0] == " "]
+    assert residues[0]["CA"].get_bfactor() == 0.25
+    assert residues[1]["CA"].get_bfactor() == 0.75
+
+
+def test_write_bfactor_can_zero_unscored_atoms(tmp_path: Path):
+    input_pdb = tmp_path / "input.pdb"
+    output_pdb = tmp_path / "output.pdb"
+    input_pdb.write_text(MINIMAL_PDB)
+
+    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.25]), missing_value=0.0)
+
+    text = output_pdb.read_text()
+    assert "  0.25" in text
+    assert "  0.00" in text
+    assert " 10.00" not in text
+
+
+def test_write_bfactor_does_not_score_hetatm_with_colliding_residue_number(tmp_path: Path):
+    input_pdb = tmp_path / "collision.pdb"
+    output_pdb = tmp_path / "collision.out.pdb"
+    input_pdb.write_text(
+        """\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N
+ATOM      2  CA  ALA A   1       1.000   0.000   0.000  1.00 20.00           C
+ATOM      3  C   ALA A   1       2.000   0.000   0.000  1.00 20.00           C
+HETATM    4  C1  LIG A   1       1.000   1.000   0.000  1.00 10.00           C
+TER
+END
+""",
+        encoding="utf-8",
+    )
+
+    write_bfactor_pdb(
+        input_pdb,
+        output_pdb,
+        ["A_1"],
+        np.array([0.87]),
+        residue_metadata=[
+            {
+                "residue_key": "model:0|chain:A|het:ATOM|resseq:1|icode:|resname:ALA",
+            }
+        ],
+    )
+
+    structure = PDBParser(QUIET=True).get_structure("out", str(output_pdb))
+    residues = list(structure.get_residues())
+    assert residues[0]["CA"].get_bfactor() == 0.87
+    assert residues[1]["C1"].get_bfactor() == 10.0
+
+
+def test_write_bfactor_legacy_fallback_does_not_score_hetatm_collision(tmp_path: Path):
+    input_pdb = tmp_path / "collision.pdb"
+    output_pdb = tmp_path / "collision.out.pdb"
+    input_pdb.write_text(
+        """\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N
+ATOM      2  CA  ALA A   1       1.000   0.000   0.000  1.00 20.00           C
+ATOM      3  C   ALA A   1       2.000   0.000   0.000  1.00 20.00           C
+HETATM    4  C1  LIG A   1       1.000   1.000   0.000  1.00 10.00           C
+TER
+END
+""",
+        encoding="utf-8",
+    )
+
+    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.87]), residue_metadata=None)
+
+    structure = PDBParser(QUIET=True).get_structure("out", str(output_pdb))
+    residues = list(structure.get_residues())
+    assert residues[0]["CA"].get_bfactor() == 0.87
+    assert residues[1]["C1"].get_bfactor() == 10.0
+
+
+def test_write_bfactor_legacy_fallback_only_updates_first_model(tmp_path: Path):
+    input_pdb = tmp_path / "models.pdb"
+    output_pdb = tmp_path / "models.out.pdb"
+    input_pdb.write_text(
+        """\
+MODEL        1
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N
+ATOM      2  CA  ALA A   1       1.000   0.000   0.000  1.00 20.00           C
+ENDMDL
+MODEL        2
+ATOM      3  N   ALA A   1       0.000   0.000   1.000  1.00 50.00           N
+ATOM      4  CA  ALA A   1       1.000   0.000   1.000  1.00 50.00           C
+ENDMDL
+END
+""",
+        encoding="utf-8",
+    )
+
+    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.42]), residue_metadata=None)
+
+    models = list(PDBParser(QUIET=True).get_structure("out", str(output_pdb)))
+    assert next(models[0].get_residues())["CA"].get_bfactor() == 0.42
+    assert next(models[1].get_residues())["CA"].get_bfactor() == 50.0
+
+
+def test_write_bfactor_updates_all_altloc_atoms_for_scored_residue(tmp_path: Path):
+    input_pdb = tmp_path / "altloc.pdb"
+    output_pdb = tmp_path / "altloc.out.pdb"
+    input_pdb.write_text(
+        """\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N
+ATOM      2  CA AALA A   1       1.000   0.000   0.000  0.50 21.00           C
+ATOM      3  CA BALA A   1       1.100   0.000   0.000  0.50 22.00           C
+ATOM      4  C   ALA A   1       2.000   0.000   0.000  1.00 23.00           C
+TER
+END
+""",
+        encoding="utf-8",
+    )
+
+    write_bfactor_pdb(input_pdb, output_pdb, ["A_1"], np.array([0.91]), residue_metadata=None)
+
+    text = output_pdb.read_text(encoding="utf-8")
+    assert text.count("  0.91") >= 3
+
+
+def test_write_bfactor_only_updates_scored_model_when_metadata_is_present(tmp_path: Path):
+    input_pdb = tmp_path / "models.pdb"
+    output_pdb = tmp_path / "models.out.pdb"
+    input_pdb.write_text(
+        """\
+MODEL        1
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N
+ATOM      2  CA  ALA A   1       1.000   0.000   0.000  1.00 20.00           C
+ATOM      3  C   ALA A   1       2.000   0.000   0.000  1.00 20.00           C
+ENDMDL
+MODEL        2
+ATOM      4  N   ALA A   1       0.000   0.000   1.000  1.00 50.00           N
+ATOM      5  CA  ALA A   1       1.000   0.000   1.000  1.00 50.00           C
+ATOM      6  C   ALA A   1       2.000   0.000   1.000  1.00 50.00           C
+ENDMDL
+END
+""",
+        encoding="utf-8",
+    )
+
+    write_bfactor_pdb(
+        input_pdb,
+        output_pdb,
+        ["A_1"],
+        np.array([0.42]),
+        residue_metadata=[
+            {
+                "residue_key": "model:0|chain:A|het:ATOM|resseq:1|icode:|resname:ALA",
+            }
+        ],
+    )
+
+    structure = PDBParser(QUIET=True).get_structure("out", str(output_pdb))
+    models = list(structure)
+    assert next(models[0].get_residues())["CA"].get_bfactor() == 0.42
+    assert next(models[1].get_residues())["CA"].get_bfactor() == 50.0
+
+
+def test_structure_parser_reads_mmcif_auth_and_label_metadata(tmp_path: Path):
+    input_cif = tmp_path / "input.cif"
+    input_cif.write_text(
+        """\
+data_test
+#
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1 N N . ALA X 1 7 ? 0.000 0.000 0.000 1.00 11.00 ? 101 ALA A N 1
+ATOM 2 C CA . ALA X 1 7 ? 1.000 0.000 0.000 1.00 12.00 ? 101 ALA A CA 1
+ATOM 3 C C . ALA X 1 7 ? 2.000 0.000 0.000 1.00 13.00 ? 101 ALA A C 1
+#
+""",
+        encoding="utf-8",
+    )
+
+    parsed = StructureParser().parse_file_with_labels(input_cif)
+
+    assert parsed is not None
+    metadata = parsed["residue_metadata"][0]
+    assert metadata["residue_id"] == "A_101"
+    assert metadata["residue_id_namespace"] == "mmcif_auth"
+    assert metadata["auth_asym_id"] == "A"
+    assert metadata["label_asym_id"] == "X"
+    assert metadata["auth_seq_id"] == 101
+    assert metadata["label_seq_id"] == 7
+
+
+def test_structure_parser_records_multimodel_warning(tmp_path: Path):
+    input_pdb = tmp_path / "models.pdb"
+    input_pdb.write_text(
+        """\
+MODEL        1
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N
+ATOM      2  CA  ALA A   1       1.000   0.000   0.000  1.00 20.00           C
+ENDMDL
+MODEL        2
+ATOM      3  N   ALA A   1       0.000   0.000   1.000  1.00 50.00           N
+ATOM      4  CA  ALA A   1       1.000   0.000   1.000  1.00 50.00           C
+ENDMDL
+END
+""",
+        encoding="utf-8",
+    )
+
+    parsed = StructureParser().parse_file_with_labels(input_pdb)
+
+    assert parsed is not None
+    assert parsed["model_count"] == 2
+    assert parsed["models_scored"] == ["0"]
+    assert "only model 0" in parsed["structure_warnings"][0]
