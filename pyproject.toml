@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "protcross"
-version = "0.1.2"
+version = "0.1.3"
 description = "Domain-adaptive protein point-cloud binding-site prediction."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,16 +44,19 @@ dev = ["pytest", "build", "twine"]
 Publication = "https://doi.org/10.1021/acs.jcim.5c03224"
 
 [project.scripts]
-protcross-predict = "evopoint_da.cli.predict:main"
-protcross-setup-assets = "evopoint_da.cli.setup_assets:main"
-protcross-preprocess = "evopoint_da.cli.preprocess:main"
-protcross-train = "evopoint_da.cli.train:main"
-protcross = "evopoint_da.cli.main:main"
-protcross-download-af2 = "evopoint_da.cli.download_af2:main"
-protcross-map-labels = "evopoint_da.cli.map_labels:main"
+protcross-predict = "protcross.cli.predict:main"
+protcross-setup-assets = "protcross.cli.setup_assets:main"
+protcross-preprocess = "protcross.cli.preprocess:main"
+protcross-train = "protcross.cli.train:main"
+protcross = "protcross.cli.main:main"
+protcross-download-af2 = "protcross.cli.download_af2:main"
+protcross-map-labels = "protcross.cli.map_labels:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"protcross.configs" = ["*.yaml", "data/*.yaml", "model/*.yaml", "trainer/*.yaml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
