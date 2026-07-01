@@ -158,6 +158,8 @@ def test_tauri_lockfile_pins_release_compatible_family():
     assert package_versions["tauri-plugin-fs"] == "2.2.0"
     assert package_versions["tauri-runtime-wry"] == "2.3.0"
     assert package_versions["tauri-utils"] == "2.4.0"
+    assert package_versions["time"] == "0.3.47"
+    assert package_versions["time-macros"] == "0.2.27"
 
 
 def _make_runtime_bundle(root: Path) -> Path:
