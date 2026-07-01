@@ -107,7 +107,7 @@ def test_readme_frontloads_desktop_download_links():
     quick_start = readme.split("## Table of Contents", 1)[0]
 
     assert "### Recommended for new users: Desktop app" in quick_start
-    assert "https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross%20Desktop_0.2.0_x64-setup.exe" in quick_start
+    assert "https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_x64-setup.exe" in quick_start
     assert "https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_macos.dmg" in quick_start
     assert quick_start.index("### Recommended for new users: Desktop app") < quick_start.index("### Command line")
     assert "official ProtCross release assets" in quick_start

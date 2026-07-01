@@ -95,7 +95,7 @@ jobs:
             -ValidateInstalledPackage `
             -SkipLocalBackendTests
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
-          Copy-Item $installer.FullName "release-assets\ProtCross Desktop_${env:DESKTOP_VERSION}_x64-setup.exe" -Force
+          Copy-Item $installer.FullName "release-assets\ProtCross_Desktop_${env:DESKTOP_VERSION}_x64-setup.exe" -Force
 
       - uses: actions/upload-artifact@v4
         with:
@@ -227,7 +227,7 @@ jobs:
         run: |
           mkdir -p release-assets
           find downloaded-assets -type f \( -name "*.exe" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
-          test -f "release-assets/ProtCross Desktop_${DESKTOP_VERSION}_x64-setup.exe"
+          test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_x64-setup.exe"
           test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos.dmg"
           (cd release-assets && sha256sum * > SHA256SUMS.txt)
           cat > release-notes.md <<'MD'
@@ -237,7 +237,7 @@ jobs:
 
           ## Downloads
 
-          - Windows 10/11 x64: `ProtCross Desktop_0.2.0_x64-setup.exe`
+          - Windows 10/11 x64: `ProtCross_Desktop_0.2.0_x64-setup.exe`
           - macOS 12+: `ProtCross_Desktop_0.2.0_macos.dmg`
           - Checksums: `SHA256SUMS.txt`
 

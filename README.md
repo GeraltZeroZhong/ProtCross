@@ -19,7 +19,7 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
 
 Download ProtCross Desktop from the GitHub release page:
 
-- Windows 10/11 x64: [ProtCross Desktop 0.2.0 setup.exe](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross%20Desktop_0.2.0_x64-setup.exe)
+- Windows 10/11 x64: [ProtCross Desktop 0.2.0 setup.exe](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_x64-setup.exe)
 - macOS 12+: [ProtCross Desktop 0.2.0 DMG](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_macos.dmg)
 - Release page: [ProtCross v0.2.0](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.0)
 
