@@ -99,6 +99,17 @@ def test_windows_release_scripts_validate_signed_runtime_and_installed_package()
     assert "install_cpu_backend.ps1" in validate_script
 
 
+def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
+    bundled_assets_script = Path("desktop/installer/prepare_bundled_assets.sh").read_text(encoding="utf-8")
+    wheelhouse_script = Path("desktop/installer/prepare_runtime_wheelhouse.py").read_text(encoding="utf-8")
+
+    assert "hashlib.sha256" in bundled_assets_script
+    assert "sha256sum" not in bundled_assets_script
+    assert '"wheel"' in wheelhouse_script
+    assert '"download"' not in wheelhouse_script
+    assert "--only-binary=:all:" not in wheelhouse_script
+
+
 def _make_runtime_bundle(root: Path) -> Path:
     runtime_dir = root / "runtime"
     wheelhouse = runtime_dir / "wheelhouse"

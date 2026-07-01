@@ -83,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--extra-pip-arg",
         action="append",
         default=[],
-        help="Additional argument forwarded to pip download; repeat as needed.",
+        help="Additional argument forwarded to pip wheel; repeat as needed.",
     )
     return parser
 
@@ -116,10 +116,9 @@ def _prepare_backend(
             sys.executable,
             "-m",
             "pip",
-            "download",
-            "--dest",
+            "wheel",
+            "--wheel-dir",
             str(tmp_dir / "wheels"),
-            "--only-binary=:all:",
             "-r",
             str(temp_requirements),
         ]

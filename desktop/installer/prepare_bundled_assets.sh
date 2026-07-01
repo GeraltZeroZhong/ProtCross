@@ -26,6 +26,19 @@ PCA="$REPO_ROOT/data/pca_esmc_128_binding_moad_0.1.2.pkl"
 CHECKPOINT_SHA256="ccb56884b21402a027bfae9d4779f38c8f534513d980a96d7cd78c9931748b65"
 PCA_SHA256="0f4e11806a622642c07dad539cec4216030220c1b5f3fc44c7926a2f6bca4d62"
 
+sha256_file() {
+  "${PYTHON:-python}" - "$1" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+}
+
 if [[ ! -f "$CHECKPOINT" ]]; then
   echo "Missing checkpoint asset: $CHECKPOINT" >&2
   exit 1
@@ -34,8 +47,8 @@ if [[ ! -f "$PCA" ]]; then
   echo "Missing PCA asset: $PCA" >&2
   exit 1
 fi
-actual_checkpoint_sha="$(sha256sum "$CHECKPOINT" | awk '{print $1}')"
-actual_pca_sha="$(sha256sum "$PCA" | awk '{print $1}')"
+actual_checkpoint_sha="$(sha256_file "$CHECKPOINT")"
+actual_pca_sha="$(sha256_file "$PCA")"
 checkpoint_size="$(wc -c < "$CHECKPOINT" | tr -d ' ')"
 pca_size="$(wc -c < "$PCA" | tr -d ' ')"
 if [[ "$actual_checkpoint_sha" != "$CHECKPOINT_SHA256" ]]; then
