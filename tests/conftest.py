@@ -1,11 +1,12 @@
 from pathlib import Path
+import os
 import socket
 
 import pytest
 import requests
 
 
-PUBLISH_ROOT = Path("/home/zero/ProtCross-all/ProtCross-publish")
+PUBLISH_ROOT = Path(os.environ.get("PROTCROSS_PUBLISH_ROOT", "/home/zero/ProtCross-all/ProtCross-publish"))
 PUBLISH_PDB_SAMPLE = PUBLISH_ROOT / "data/processed_pdb/6fhu.pt"
 PUBLISH_RAW_PDB = PUBLISH_ROOT / "data/raw_pdb/6fhu.pdb"
 PUBLISH_ESM_WEIGHTS = PUBLISH_ROOT / "esmc_weights/esmc_600m_2024_12_v0.pth"
@@ -13,6 +14,8 @@ PUBLISH_ESM_WEIGHTS = PUBLISH_ROOT / "esmc_weights/esmc_600m_2024_12_v0.pth"
 
 def require_file(path: Path) -> Path:
     if not path.exists():
+        if os.environ.get("PROTCROSS_RELEASE_SMOKE") == "1":
+            pytest.fail(f"test fixture not found: {path}")
         pytest.skip(f"test fixture not found: {path}")
     return path
 

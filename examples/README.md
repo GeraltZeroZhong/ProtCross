@@ -1,14 +1,15 @@
 # ProtCross Examples
 
-`6fhu.pdb` is a small published smoke-test structure copied from the 0.1.0 release data. It is intended for quick inference checks with the released checkpoint and PCA file.
+`6fhu.pdb` is a small smoke-test structure for quick inference checks with the released checkpoint and PCA file.
 
 Example:
 
 ```bash
-protcross predict examples/6fhu.pdb --out-dir examples/protcross-results
+protcross predict examples/6fhu.pdb --accept-esm-license --out-dir examples/protcross-results
 ```
 
-If the default runtime assets are missing, prediction installs them automatically.
+If the default runtime assets are missing, prediction installs them after
+explicit ESM-C license confirmation.
 The command writes:
 
 ```text
@@ -40,3 +41,6 @@ protcross predict examples/6fhu.pdb \
   --pca data/pca_esmc_128_binding_moad_0.1.2.pkl \
   --out-dir examples/protcross-results
 ```
+
+Use `--trust-unverified-assets` only for custom or experimental local assets
+after verifying their provenance.

@@ -21,6 +21,9 @@ _EXPORTS = {
     "STANDARD_AA": ("protcross.data.structure", "STANDARD_AA"),
     "WATER_RESNAMES": ("protcross.data.structure", "WATER_RESNAMES"),
     "StructureParser": ("protcross.data.structure", "StructureParser"),
+    "parsed_structure_long_chunks": ("protcross.data.structure", "parsed_structure_long_chunks"),
+    "parsed_structure_sequence_chunks": ("protcross.data.structure", "parsed_structure_sequence_chunks"),
+    "truncate_parsed_structure_by_chain": ("protcross.data.structure", "truncate_parsed_structure_by_chain"),
     "truncate_parsed_structure": ("protcross.data.structure", "truncate_parsed_structure"),
 }
 

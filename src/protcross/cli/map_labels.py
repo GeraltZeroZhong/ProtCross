@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -23,6 +24,17 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--min-chain-score", type=_non_negative_float, default=0.15)
     parser.add_argument("--max-rmsd", type=_positive_float, default=30.0)
     parser.add_argument("--dry-run", action="store_true", help="Compute mapping statistics without modifying AF2 .pt files.")
+    parser.add_argument(
+        "--allow-empty-mapping",
+        action="store_true",
+        help="Exit successfully even when no AF2 labels are mapped.",
+    )
+    parser.add_argument(
+        "--min-success-rate",
+        type=_fraction,
+        default=0.0,
+        help="Minimum matched sample fraction required unless --allow-empty-mapping is set.",
+    )
     return parser
 
 
@@ -42,6 +54,8 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
             min_chain_score=args.min_chain_score,
             max_rmsd=args.max_rmsd,
             in_place=not args.dry_run,
+            allow_empty_mapping=args.allow_empty_mapping,
+            min_success_rate=args.min_success_rate,
         )
         map_labels(config)
         return 0
@@ -59,15 +73,22 @@ def _non_negative_int(value: str) -> int:
 
 def _non_negative_float(value: str) -> float:
     number = float(value)
-    if number < 0:
+    if not math.isfinite(number) or number < 0:
         raise argparse.ArgumentTypeError("must be >= 0")
     return number
 
 
 def _positive_float(value: str) -> float:
     number = float(value)
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
+    return number
+
+
+def _fraction(value: str) -> float:
+    number = _non_negative_float(value)
+    if number > 1:
+        raise argparse.ArgumentTypeError("must be <= 1")
     return number
 
 

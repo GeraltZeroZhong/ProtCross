@@ -29,6 +29,9 @@ LEGACY_CHECKPOINT_RELEASE_FILENAME = "best-epoch.59.ckpt"
 LEGACY_PCA_FILENAME = "pca_esmc_128.pkl"
 DEFAULT_CHECKPOINT_URL = f"{GITHUB_RELEASE_BASE}/{DEFAULT_CHECKPOINT_FILENAME}"
 DEFAULT_PCA_URL = f"{GITHUB_RELEASE_BASE}/{DEFAULT_PCA_FILENAME}"
+ESM_LICENSE_URL = "https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement"
+ESM_LICENSE_ACCEPT_ENV = "PROTCROSS_ACCEPT_ESM_LICENSE"
+TRUST_UNVERIFIED_ASSETS_ENV = "PROTCROSS_TRUST_UNVERIFIED_ASSETS"
 LEGACY_RELEASE_TAG = "v0.1.1"
 LEGACY_GITHUB_RELEASE_BASE = f"https://github.com/GeraltZeroZhong/ProtCross/releases/download/{LEGACY_RELEASE_TAG}"
 LEGACY_CHECKPOINT_URL = f"{LEGACY_GITHUB_RELEASE_BASE}/{LEGACY_CHECKPOINT_RELEASE_FILENAME}"
@@ -227,6 +230,7 @@ def setup_assets(
     force: bool = False,
     verify: bool = True,
     skip_esm: bool = False,
+    accept_esm_license: bool = False,
 ) -> Path:
     """Download ProtCross assets and return the asset directory."""
     bundle = get_asset_bundle(asset_version)
@@ -257,6 +261,8 @@ def setup_assets(
 
     print(f"Installing ProtCross assets into {output_dir}")
     print("Note: ESM-C weights are distributed by EvolutionaryScale under their Hugging Face model terms.")
+    if not skip_esm and _asset_needs_download(specs[0], output_dir / specs[0].filename, force=force, verify=verify):
+        _require_esm_license_acceptance(accept_esm_license)
     for spec in download_specs:
         download_asset(spec, output_dir / spec.filename, force=force, verify=verify)
 
@@ -368,6 +374,7 @@ def write_asset_manifest(
         path = output_dir / spec.filename
         actual_sha256 = sha256_file(path) if path.exists() else None
         size_bytes = path.stat().st_size if path.exists() else None
+        mtime_ns = path.stat().st_mtime_ns if path.exists() else None
         verified = None
         if spec.sha256 and actual_sha256:
             verified = actual_sha256 == spec.sha256
@@ -380,6 +387,7 @@ def write_asset_manifest(
             "actual_sha256": actual_sha256,
             "sha256": spec.sha256,
             "size_bytes": size_bytes,
+            "mtime_ns": mtime_ns,
             "present": path.exists(),
             "verified": verified,
         }
@@ -422,23 +430,41 @@ def resolve_prediction_assets(
     asset_version: str = "default",
     refresh_assets: bool = False,
     offline: bool = False,
+    accept_esm_license: bool = False,
+    require_esm_license_for_use: bool = False,
+    trust_unverified_assets: bool = False,
 ) -> ResolvedPredictionAssets:
     """Resolve prediction assets using the public precedence contract."""
     auto_setup_assets = auto_setup_assets and not offline
-    ckpt, ckpt_source = _path_or_env_with_source(ckpt_path, "PROTCROSS_CHECKPOINT")
-    esm, esm_source = _path_or_env_with_source(esm_weights, "PROTCROSS_ESM_WEIGHTS")
-    pca, pca_source = _path_or_env_with_source(pca_path, "PROTCROSS_PCA")
+    ckpt, ckpt_source, ckpt_label = _path_or_env_with_source(ckpt_path, "PROTCROSS_CHECKPOINT", "--checkpoint")
+    esm, esm_source, esm_label = _path_or_env_with_source(esm_weights, "PROTCROSS_ESM_WEIGHTS", "--esm-weights")
+    pca, pca_source, pca_label = _path_or_env_with_source(pca_path, "PROTCROSS_PCA", "--pca")
     sources = {
         "checkpoint": ckpt_source,
         "esm_weights": esm_source,
         "pca": pca_source,
     }
-
-    assets = (
-        PredictorAssets.from_dir(assets_dir, asset_version=asset_version)
-        if assets_dir
-        else PredictorAssets.from_default_dir(asset_version=asset_version)
-    )
+    source_labels = {
+        "checkpoint": ckpt_label,
+        "esm_weights": esm_label,
+        "pca": pca_label,
+    }
+    all_assets_explicit = all(source == "user" for source in sources.values())
+    if all_assets_explicit:
+        bundle = get_asset_bundle(asset_version)
+        assert ckpt is not None and esm is not None and pca is not None
+        assets = PredictorAssets(
+            checkpoint=ckpt,
+            esm_weights=esm,
+            pca=pca,
+            asset_version=bundle.version,
+        )
+    else:
+        assets = (
+            PredictorAssets.from_dir(assets_dir, asset_version=asset_version)
+            if assets_dir
+            else PredictorAssets.from_default_dir(asset_version=asset_version)
+        )
 
     def fill_from_assets(*, require_exists: bool) -> None:
         nonlocal ckpt, esm, pca
@@ -459,6 +485,7 @@ def resolve_prediction_assets(
                 pca = candidate
                 sources[name] = "managed"
 
+    _raise_missing_user_assets(ckpt, esm, pca, sources, source_labels)
     fill_from_assets(require_exists=True)
     mismatches = _managed_asset_mismatches(assets, ckpt, esm, pca, sources)
 
@@ -470,6 +497,7 @@ def resolve_prediction_assets(
             asset_version=asset_version,
             force=should_refresh_managed,
             skip_esm=skip_esm,
+            accept_esm_license=accept_esm_license,
         )
         assets = PredictorAssets.from_dir(output_dir, asset_version=asset_version)
         fill_from_assets(require_exists=True)
@@ -492,27 +520,59 @@ def resolve_prediction_assets(
             + ". Use --refresh-assets to reinstall managed assets."
         )
 
+    if not _trust_unverified_assets(trust_unverified_assets):
+        untrusted = _unverified_user_assets(assets, ckpt, esm, pca, sources)
+        if untrusted:
+            raise RuntimeError(
+                "Explicit prediction assets did not match the selected bundle SHA256: "
+                + ", ".join(untrusted)
+                + ". Use managed assets, pass the matching --asset-version, or set "
+                "--trust-unverified-assets only for local files you trust."
+            )
+
     if mismatches:
         raise RuntimeError(
             "Managed prediction assets failed SHA256 verification: "
             + ", ".join(mismatches)
             + ". Run `protcross setup-assets --force` or `protcross predict --refresh-assets`."
         )
+    if require_esm_license_for_use:
+        _require_esm_license_acceptance(accept_esm_license)
 
     return ResolvedPredictionAssets(
         checkpoint=ckpt,
         esm_weights=esm,
         pca=pca,
         assets=assets,
-        asset_version=_resolved_asset_version(assets, sources),
+        asset_version=_resolved_asset_version(assets, ckpt, esm, pca, sources),
     )
 
 
-def _path_or_env_with_source(value: str | Path | None, env_name: str) -> tuple[Path | None, str | None]:
+def _path_or_env_with_source(
+    value: str | Path | None,
+    env_name: str,
+    option_name: str,
+) -> tuple[Path | None, str | None, str | None]:
     if value:
-        return Path(value).expanduser(), "user"
+        return Path(value).expanduser(), "user", option_name
     env_value = os.environ.get(env_name)
-    return (Path(env_value).expanduser(), "user") if env_value else (None, None)
+    return (Path(env_value).expanduser(), "user", env_name) if env_value else (None, None, None)
+
+
+def _raise_missing_user_assets(
+    ckpt: Path | None,
+    esm: Path | None,
+    pca: Path | None,
+    sources: dict[str, str | None],
+    labels: dict[str, str | None],
+) -> None:
+    missing = [
+        f"{name} from {labels[name]}: {path}"
+        for name, path in (("checkpoint", ckpt), ("esm_weights", esm), ("pca", pca))
+        if sources.get(name) == "user" and path is not None and not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError("Explicit prediction asset file not found: " + "; ".join(missing))
 
 
 def _missing_asset_names(ckpt: Path | None, esm: Path | None, pca: Path | None) -> list[str]:
@@ -554,10 +614,103 @@ def _managed_asset_mismatches(
     return mismatches
 
 
-def _resolved_asset_version(assets: PredictorAssets, sources: dict[str, str | None]) -> str:
-    if any(source == "user" for source in sources.values()):
+def _unverified_user_assets(
+    assets: PredictorAssets,
+    ckpt: Path,
+    esm: Path,
+    pca: Path,
+    sources: dict[str, str | None],
+) -> list[str]:
+    bundle = get_asset_bundle(assets.asset_version)
+    expected = {
+        "checkpoint": bundle.assets[1].sha256,
+        "esm_weights": bundle.assets[0].sha256,
+        "pca": bundle.assets[2].sha256,
+    }
+    paths = {"checkpoint": ckpt, "esm_weights": esm, "pca": pca}
+    untrusted = []
+    for name, path in paths.items():
+        if sources.get(name) != "user":
+            continue
+        expected_sha = expected.get(name)
+        if expected_sha and sha256_file(path) != expected_sha:
+            untrusted.append(f"{name} ({path})")
+    return untrusted
+
+
+def _asset_needs_download(spec: AssetSpec, output_path: Path, *, force: bool, verify: bool) -> bool:
+    if force or not output_path.exists():
+        return True
+    return bool(verify and spec.sha256 and sha256_file(output_path) != spec.sha256)
+
+
+def _require_esm_license_acceptance(accept_esm_license: bool) -> None:
+    if accept_esm_license or _env_truthy(ESM_LICENSE_ACCEPT_ENV):
+        return
+    raise RuntimeError(
+        "ESM-C weights are distributed under EvolutionaryScale's model terms. "
+        f"Review {ESM_LICENSE_URL} and rerun with --accept-esm-license "
+        f"or {ESM_LICENSE_ACCEPT_ENV}=1 before downloading or using ESM-C."
+    )
+
+
+def require_esm_license_acceptance(accept_esm_license: bool) -> None:
+    _require_esm_license_acceptance(accept_esm_license)
+
+
+def _trust_unverified_assets(value: bool) -> bool:
+    return value or _env_truthy(TRUST_UNVERIFIED_ASSETS_ENV)
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolved_asset_version(
+    assets: PredictorAssets,
+    ckpt: Path,
+    esm: Path,
+    pca: Path,
+    sources: dict[str, str | None],
+) -> str:
+    if any(source == "user" for source in sources.values()) and not _user_assets_match_selected_bundle(
+        assets,
+        ckpt,
+        esm,
+        pca,
+        sources,
+    ):
         return os.environ.get("PROTCROSS_ASSET_VERSION", "custom")
     return assets.asset_version
+
+
+def _user_assets_match_selected_bundle(
+    assets: PredictorAssets,
+    ckpt: Path,
+    esm: Path,
+    pca: Path,
+    sources: dict[str, str | None],
+) -> bool:
+    bundle = get_asset_bundle(assets.asset_version)
+    expected = {
+        "checkpoint": bundle.assets[1].sha256,
+        "esm_weights": bundle.assets[0].sha256,
+        "pca": bundle.assets[2].sha256,
+    }
+    paths = {"checkpoint": ckpt, "esm_weights": esm, "pca": pca}
+    for name, path in paths.items():
+        if sources.get(name) != "user":
+            continue
+        expected_sha = expected.get(name)
+        if not expected_sha or not path.exists():
+            return False
+        try:
+            actual_sha = sha256_file(path)
+        except Exception:
+            return False
+        if actual_sha != expected_sha:
+            return False
+    return True
 
 
 def _export_line(name: str, value: str | Path) -> str:

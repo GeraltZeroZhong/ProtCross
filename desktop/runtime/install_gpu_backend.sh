@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_ROOT="${INSTALL_ROOT:-$HOME/Library/Application Support/ProtCross}"
+PYTHON_BIN="${PYTHON_BIN:-python3.10}"
+PROXY_URL="${PROXY_URL:-}"
+UV_BIN="${UV_BIN:-}"
+WHEELHOUSE="${WHEELHOUSE:-}"
+ALLOW_ONLINE_PACKAGE_INDEX="${ALLOW_ONLINE_PACKAGE_INDEX:-0}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --install-root)
+      INSTALL_ROOT="$2"
+      shift 2
+      ;;
+    --python)
+      PYTHON_BIN="$2"
+      shift 2
+      ;;
+    --proxy-url)
+      PROXY_URL="$2"
+      shift 2
+      ;;
+    --uv-bin)
+      UV_BIN="$2"
+      shift 2
+      ;;
+    --wheelhouse)
+      WHEELHOUSE="$2"
+      shift 2
+      ;;
+    --allow-online-package-index)
+      ALLOW_ONLINE_PACKAGE_INDEX=1
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_DIR="$INSTALL_ROOT/runtime/gpu-env"
+COMMON_REQUIREMENTS="$SCRIPT_DIR/requirements-common.lock"
+BACKEND_HASH_REQUIREMENTS="$SCRIPT_DIR/requirements-gpu.hashes"
+BACKEND_PACKAGE="$DESKTOP_DIR/backend"
+WHEELHOUSE="${WHEELHOUSE:-$SCRIPT_DIR/wheelhouse}"
+
+if [[ -n "$PROXY_URL" ]]; then
+  export HTTP_PROXY="$PROXY_URL"
+  export HTTPS_PROXY="$PROXY_URL"
+fi
+
+mkdir -p "$(dirname "$ENV_DIR")"
+
+bootstrap_uv() {
+  local uv_bin="${UV_BIN:-$SCRIPT_DIR/uv/uv}"
+  if [[ ! -x "$uv_bin" ]]; then
+    echo "Python 3.10 was not found and no bundled uv executable is available." >&2
+    echo "Release builds must ship a signed/hashed Python bootstrapper; development installs may pass --python." >&2
+    exit 1
+  fi
+  "$uv_bin" python install 3.10
+  "$uv_bin" venv --python 3.10 "$ENV_DIR"
+}
+
+install_requirements() {
+  if [[ -d "$WHEELHOUSE" && -f "$BACKEND_HASH_REQUIREMENTS" ]]; then
+    "${PIP[@]}" install --no-index --find-links "$WHEELHOUSE" --require-hashes -r "$BACKEND_HASH_REQUIREMENTS"
+    return
+  fi
+  if [[ "$ALLOW_ONLINE_PACKAGE_INDEX" == "1" ]]; then
+    echo "[warn] Installing the optional GPU/MPS backend from fixed online package indexes." >&2
+    "${PIP[@]}" install torch==2.3.1 torchvision==0.18.1
+    "${PIP[@]}" install -r "$COMMON_REQUIREMENTS"
+    "${PIP[@]}" install "$BACKEND_PACKAGE"
+    return
+  fi
+  echo "Missing hash-locked desktop wheelhouse: $WHEELHOUSE" >&2
+  echo "Pass --allow-online-package-index for the public optional GPU/MPS install path, or generate requirements-gpu.hashes for an internal offline GPU bundle." >&2
+  exit 1
+}
+
+if [[ ! -d "$ENV_DIR" ]]; then
+  if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    "$PYTHON_BIN" -m venv "$ENV_DIR"
+  else
+    bootstrap_uv
+  fi
+fi
+
+PYTHON="$ENV_DIR/bin/python"
+PIP=("$PYTHON" -m pip)
+
+install_requirements
+
+"$PYTHON" - <<'PY'
+import sys
+import torch
+
+mps_available = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+print(f"torch={torch.__version__}")
+print(f"mps_available={mps_available}")
+if not mps_available:
+    print("Apple Metal/MPS acceleration is not available in this environment.", file=sys.stderr)
+    sys.exit(2)
+PY
+
+echo "ProtCross Apple Metal backend installed at $ENV_DIR"

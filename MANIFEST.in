@@ -2,11 +2,13 @@ include README.md
 include LICENSE
 include pyproject.toml
 include environment.yml
+recursive-include constraints *.txt
 recursive-include configs *.yaml
 recursive-include src/protcross/configs *.yaml
 recursive-include examples *.pdb *.md
 recursive-include reproduction/legacy *.py *.md *.json
 recursive-include tests *.py
+recursive-exclude tests/desktop *
 exclude RELEASE_NOTES_0.1.2.md
 recursive-exclude data *
 recursive-exclude checkpoint *

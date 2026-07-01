@@ -39,6 +39,11 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-verify", action="store_true", help="Skip SHA256 verification.")
     parser.add_argument("--skip-esm", action="store_true", help="Only download ProtCross checkpoint and PCA reducer.")
+    parser.add_argument(
+        "--accept-esm-license",
+        action="store_true",
+        help="Confirm that you reviewed the upstream ESM-C license before downloading ESM-C weights.",
+    )
     return parser
 
 
@@ -54,6 +59,7 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
             force=args.force,
             verify=not args.no_verify,
             skip_esm=args.skip_esm,
+            accept_esm_license=args.accept_esm_license,
         )
         return 0
     except Exception as exc:

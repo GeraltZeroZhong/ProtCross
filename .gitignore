@@ -22,3 +22,13 @@ scripts/internal_compare_checkpoint_curves.py
 *.egg-info/
 build/
 dist/
+
+desktop/frontend/node_modules/
+desktop/frontend/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/bundled-assets/*
+!desktop/bundled-assets/.gitkeep
+desktop/runtime/wheelhouse/
+desktop/runtime/uv/
+desktop/runtime/requirements-*.hashes

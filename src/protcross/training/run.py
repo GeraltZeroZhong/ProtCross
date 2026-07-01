@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import hydra
 import pytorch_lightning as pl
@@ -26,6 +27,7 @@ def run_training(cfg: DictConfig) -> None:
         cfg.data.data_dir_pdb = os.path.join(project_root, cfg.data.data_dir_pdb)
     if not os.path.isabs(cfg.data.data_dir_af2):
         cfg.data.data_dir_af2 = os.path.join(project_root, cfg.data.data_dir_af2)
+    _preflight_training_data(cfg)
 
     print(f"[Train] Instantiating DataModule <{cfg.data._target_}>")
     datamodule = hydra.utils.instantiate(cfg.data)
@@ -66,3 +68,21 @@ def run_training(cfg: DictConfig) -> None:
     print("[Train] Starting training...")
     trainer.fit(model=model, datamodule=datamodule)
     print(f"[Train] Done. Checkpoints saved in {checkpoint_dir}")
+
+
+def _preflight_training_data(cfg: DictConfig) -> None:
+    source_dir = Path(str(cfg.data.data_dir_pdb))
+    if not source_dir.exists():
+        raise FileNotFoundError(f"Training source data directory not found: {source_dir}")
+    if not any(source_dir.glob("*.pt")):
+        raise FileNotFoundError(f"No source .pt files found in {source_dir}")
+
+    if bool(cfg.data.get("use_target_domain")):
+        target_dir = Path(str(cfg.data.data_dir_af2))
+        if not target_dir.exists():
+            raise FileNotFoundError(f"Target-domain data directory not found: {target_dir}")
+        if not any(target_dir.glob("*.pt")):
+            raise FileNotFoundError(
+                f"Target-domain training is enabled but no AF2 .pt files were found in {target_dir}. "
+                "Disable data.use_target_domain or preprocess target samples."
+            )

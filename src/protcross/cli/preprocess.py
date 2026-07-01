@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -30,6 +31,16 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--max-len", type=_max_len, default=MAX_ESM_RESIDUES)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--keep-going", action="store_true", help="Do not fail the command when individual files fail.")
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Keep existing .pt files in the output directory instead of quarantining files not produced by current inputs.",
+    )
+    parser.add_argument(
+        "--accept-esm-license",
+        action="store_true",
+        help="Confirm that you reviewed and accept the ESM-C model license before using local ESM-C weights.",
+    )
     return parser
 
 
@@ -51,6 +62,8 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
             max_len=args.max_len,
             seed=args.seed,
             fail_on_error=not args.keep_going,
+            accept_esm_license=args.accept_esm_license,
+            append=args.append,
         )
         preprocess_directory(config)
         return 0
@@ -68,7 +81,7 @@ def _positive_int(value: str) -> int:
 
 def _positive_float(value: str) -> float:
     number = float(value)
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
     return number
 

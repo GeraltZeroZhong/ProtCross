@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +32,8 @@ class LabelMappingConfig:
     min_chain_score: float = 0.15
     max_rmsd: float = 30.0
     in_place: bool = True
+    allow_empty_mapping: bool = False
+    min_success_rate: float = 0.0
 
 
 def create_ca_atoms(coords) -> list[Atom.Atom]:
@@ -71,6 +75,7 @@ def split_data_by_chain(full_data: dict) -> dict[str, dict]:
         if len(data["sequence"]) < 5:
             continue
         chain_payloads[chain_id] = {
+            "chain_id": chain_id,
             "coords": np.asarray(data["coords"], dtype=np.float32),
             "sequence": "".join(data["sequence"]),
             "labels": np.asarray(data["labels"], dtype=np.float32),
@@ -210,6 +215,52 @@ def parse_sequence(parser: StructureParser, raw_path: str | Path) -> str | None:
     return parsed["sequence"] if parsed else None
 
 
+def load_processed_pdb_labels(processed_pdb_dir: Path, raw_pdb_file: Path) -> dict | None:
+    processed_path = find_processed_pdb_file(processed_pdb_dir, raw_pdb_file)
+    if processed_path is None:
+        return None
+    data = torch.load(processed_path, weights_only=False)
+    source_sha = data.get("source_sha256")
+    if source_sha and raw_pdb_file.exists() and source_sha != _file_sha256(raw_pdb_file):
+        raise RuntimeError(
+            f"Processed PDB labels are stale for {raw_pdb_file}: "
+            f"{processed_path} source_sha256 does not match the current raw structure."
+        )
+    if "pos" not in data or "y" not in data:
+        return None
+    sequence = data.get("sequence")
+    if not isinstance(sequence, str) or not sequence:
+        return None
+    coords = data["pos"]
+    if isinstance(coords, torch.Tensor):
+        coords = coords.detach().cpu().numpy()
+    labels = data["y"]
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu().numpy()
+    residue_ids = data.get("residue_ids") or [f"A_{index + 1}" for index in range(len(sequence))]
+    return {
+        "coords": np.asarray(coords, dtype=np.float32),
+        "labels": np.asarray(labels, dtype=np.float32),
+        "sequence": sequence,
+        "residue_ids": list(residue_ids),
+        "processed_pdb_path": str(processed_path),
+        "processed_pdb_sha256": _file_sha256(processed_path),
+    }
+
+
+def find_processed_pdb_file(processed_pdb_dir: Path, raw_pdb_file: Path) -> Path | None:
+    stems = []
+    stem = raw_pdb_file.stem
+    for candidate in (stem, stem.lower(), stem.upper()):
+        if candidate not in stems:
+            stems.append(candidate)
+    for stem_value in stems:
+        path = processed_pdb_dir / f"{stem_value}.pt"
+        if path.exists():
+            return path
+    return None
+
+
 def sequence_from_processed_or_raw(af2_data: dict, raw_sequence: str | None) -> str | None:
     processed_sequence = af2_data.get("sequence")
     if isinstance(processed_sequence, str) and processed_sequence:
@@ -220,11 +271,23 @@ def sequence_from_processed_or_raw(af2_data: dict, raw_sequence: str | None) -> 
 def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
     if not config.mapping_file.exists():
         raise FileNotFoundError(f"Mapping file not found: {config.mapping_file}")
+    for label, directory in (
+        ("processed AF2 directory", config.processed_af2_dir),
+        ("processed PDB directory", config.processed_pdb_dir),
+        ("raw PDB directory", config.raw_pdb_dir),
+        ("raw AF2 directory", config.raw_af2_dir),
+    ):
+        if not directory.exists():
+            raise FileNotFoundError(f"{label} not found: {directory}")
 
     parser = StructureParser()
     mapping = json.loads(config.mapping_file.read_text(encoding="utf-8"))
+    if not isinstance(mapping, dict):
+        raise ValueError(f"Mapping file must contain a JSON object: {config.mapping_file}")
     uniprot_to_pdb = _reverse_pdb_uniprot_mapping(mapping)
     af2_files = sorted(config.processed_af2_dir.glob("*.pt"))
+    if not af2_files:
+        raise FileNotFoundError(f"No processed AF2 .pt files found in {config.processed_af2_dir}")
 
     print(f"Scanning {len(af2_files)} processed AF2 files.")
     stats = {
@@ -288,9 +351,10 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
             mapped_any = False
             no_chain_for_all = True
             site_shifts = []
+            provenance_records = []
 
             for raw_pdb_file in raw_pdb_files:
-                full_pdb_data = parser.parse_file_with_labels(raw_pdb_file, chain_id=None)
+                full_pdb_data = load_processed_pdb_labels(config.processed_pdb_dir, Path(raw_pdb_file))
                 if not full_pdb_data:
                     continue
 
@@ -326,6 +390,21 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
                 if mean_shift > 0:
                     site_shifts.append(mean_shift)
                 mapped_any = mapped_any or mapped_count > 0
+                provenance_records.append(
+                    {
+                        "raw_pdb_path": str(raw_pdb_file),
+                        "raw_pdb_sha256": _file_sha256(Path(raw_pdb_file)),
+                        "processed_pdb_path": full_pdb_data.get("processed_pdb_path"),
+                        "processed_pdb_sha256": full_pdb_data.get("processed_pdb_sha256"),
+                        "matched_chain_id": best_chain_data.get("chain_id"),
+                        "chain_score": float(score),
+                        "rmsd": float(rmsd),
+                        "mapped_sites": int(mapped_count),
+                        "total_pdb_sites": int(total_sites),
+                        "mean_site_shift": float(mean_shift),
+                        "message": message,
+                    }
+                )
 
             if no_chain_for_all:
                 stats["no_chain_found"] += 1
@@ -342,6 +421,16 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
 
             if mapped_count > 0:
                 af2_data["y"] = combined_labels
+                af2_data["label_provenance"] = _label_provenance(
+                    config,
+                    af2_path=af2_path,
+                    raw_af2_files=raw_af2_files,
+                    target_pdb_ids=target_pdb_ids,
+                    uniprot_id=current_uniprot,
+                    records=provenance_records,
+                    mapped_count=mapped_count,
+                    total_sites=total_sites_sum,
+                )
                 if config.in_place:
                     tmp_path = af2_path.with_suffix(af2_path.suffix + ".part")
                     torch.save(af2_data, tmp_path)
@@ -350,11 +439,15 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
             else:
                 stats["skipped"] += 1
         except Exception as exc:
+            if "Processed PDB labels are stale" in str(exc):
+                raise
             stats["failed"] += 1
             if debug:
                 print(f"   [debug] Mapping failed: {exc}")
 
     total = stats["matched"] + stats["failed"] + stats["skipped"]
+    if total == 0:
+        raise RuntimeError("No AF2 samples were scanned for label mapping.")
     success_rate = stats["matched"] / total if total else 0.0
     label_loss = (
         1.0 - (stats["mapped_af2_sites"] / stats["total_pdb_sites"])
@@ -365,6 +458,9 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
 
     report = {
         "Total_Samples": total,
+        "Matched_Samples": stats["matched"],
+        "Failed_Samples": stats["failed"],
+        "Skipped_Samples": stats["skipped"],
         "Success_Rate": success_rate,
         "Sequence_Label_Loss": label_loss,
         "Avg_Site_Shift": average_shift,
@@ -374,6 +470,7 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
     }
     config.output_csv.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([report]).to_csv(config.output_csv, index=False)
+    _write_mapping_manifest(config, report)
 
     print("\nLabel mapping completed.")
     print("=" * 50)
@@ -384,6 +481,18 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
     print(f"No matching chain      : {stats['no_chain_found']}")
     print(f"Report saved to        : {config.output_csv}")
     print("=" * 50)
+
+    if not config.allow_empty_mapping:
+        if stats["matched"] == 0 or stats["mapped_af2_sites"] == 0:
+            raise RuntimeError(
+                "Label mapping produced no mapped AF2 labels. "
+                "Check PDB-to-UniProt mapping and input directories, or pass --allow-empty-mapping."
+            )
+        if success_rate < config.min_success_rate:
+            raise RuntimeError(
+                f"Label mapping success rate {success_rate:.2%} is below required "
+                f"{config.min_success_rate:.2%}. Pass --allow-empty-mapping to override."
+            )
 
     return report
 
@@ -403,3 +512,68 @@ def _reverse_pdb_uniprot_mapping(mapping: dict) -> dict[str, list[str]]:
             if normalized_accession and normalized_pdb_id not in uniprot_to_pdb[normalized_accession]:
                 uniprot_to_pdb[normalized_accession].append(normalized_pdb_id)
     return dict(uniprot_to_pdb)
+
+
+def _label_provenance(
+    config: LabelMappingConfig,
+    *,
+    af2_path: Path,
+    raw_af2_files: list[str],
+    target_pdb_ids: list[str],
+    uniprot_id: str,
+    records: list[dict],
+    mapped_count: int,
+    total_sites: int,
+) -> dict:
+    return {
+        "schema_version": "protcross-label-provenance-v1",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "mapping_file": str(config.mapping_file),
+        "mapping_file_sha256": _file_sha256(config.mapping_file),
+        "processed_af2_path": str(af2_path),
+        "processed_af2_sha256_before_save": _file_sha256(af2_path) if af2_path.exists() else None,
+        "raw_af2_files": [
+            {"path": str(path), "sha256": _file_sha256(Path(path))}
+            for path in raw_af2_files
+            if Path(path).exists()
+        ],
+        "uniprot_id": uniprot_id,
+        "target_pdb_ids": target_pdb_ids,
+        "min_chain_score": config.min_chain_score,
+        "max_rmsd": config.max_rmsd,
+        "mapped_sites": int(mapped_count),
+        "total_pdb_sites": int(total_sites),
+        "records": records,
+    }
+
+
+def _write_mapping_manifest(config: LabelMappingConfig, report: dict) -> None:
+    manifest = {
+        "schema_version": "protcross-label-mapping-run-v1",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "config": {
+            "processed_pdb_dir": str(config.processed_pdb_dir),
+            "processed_af2_dir": str(config.processed_af2_dir),
+            "raw_pdb_dir": str(config.raw_pdb_dir),
+            "raw_af2_dir": str(config.raw_af2_dir),
+            "mapping_file": str(config.mapping_file),
+            "mapping_file_sha256": _file_sha256(config.mapping_file),
+            "debug_limit": config.debug_limit,
+            "min_chain_score": config.min_chain_score,
+            "max_rmsd": config.max_rmsd,
+            "in_place": config.in_place,
+            "allow_empty_mapping": config.allow_empty_mapping,
+            "min_success_rate": config.min_success_rate,
+        },
+        "report": report,
+    }
+    manifest_path = config.output_csv.with_suffix(config.output_csv.suffix + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

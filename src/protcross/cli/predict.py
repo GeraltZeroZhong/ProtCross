@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         default=os.environ.get("PROTCROSS_CHECKPOINT"),
         help=(
             "ProtCross Lightning checkpoint. Defaults to PROTCROSS_CHECKPOINT, "
-            "installed assets, or a known local checkpoint when present."
+            "installed assets, or the selected asset bundle cache."
         ),
     )
     parser.add_argument(
@@ -51,7 +52,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         default=os.environ.get("PROTCROSS_PCA"),
         help=(
             "Fitted PCA pickle for ESM-C embeddings. Defaults to PROTCROSS_PCA, "
-            "installed assets, or a known local PCA reducer when present."
+            "installed assets, or the selected asset bundle cache."
         ),
     )
     parser.add_argument(
@@ -96,6 +97,16 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument("--refresh-assets", action="store_true", help="Re-download and verify the selected asset bundle.")
     parser.add_argument(
+        "--accept-esm-license",
+        action="store_true",
+        help="Confirm that you reviewed the upstream ESM-C license before downloading or using ESM-C weights.",
+    )
+    parser.add_argument(
+        "--trust-unverified-assets",
+        action="store_true",
+        help="Allow explicit local checkpoint/PCA/ESM files whose SHA256 does not match the selected release bundle.",
+    )
+    parser.add_argument(
         "--no-auto-assets",
         dest="auto_assets",
         action="store_false",
@@ -112,8 +123,12 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--unscored-bfactor-policy",
         choices=("keep", "zero"),
-        default="keep",
-        help="How to write B-factors for unscored atoms/residues in the annotated structure.",
+        default="zero",
+        help=(
+            "How to write B-factors for unscored atoms/residues in the annotated structure. "
+            "Default zero keeps the B-factor column in ProtCross probability units; use keep "
+            "to preserve original B-factors/pLDDT for unscored atoms."
+        ),
     )
     parser.add_argument("--summary-only", action="store_true", help="Print the summary without creating default output files.")
     parser.add_argument("--quiet", action="store_true")
@@ -138,6 +153,11 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
             f"ProtCross prediction failed: Unsupported input structure extension: {input_path.suffix or '<none>'}",
             file=sys.stderr,
         )
+        return 1
+    try:
+        _preflight_structure(input_path, chain_id=args.chain_id, max_len=args.max_len, allow_truncation=args.allow_truncation)
+    except Exception as exc:
+        print(f"ProtCross prediction failed: {exc}", file=sys.stderr)
         return 1
 
     if not args.summary_only:
@@ -165,6 +185,7 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
             max_len=args.max_len,
             asset_version=assets.asset_version,
             embedding_cache_dir=args.embedding_cache_dir,
+            accept_esm_license=True,
         )
         result = predictor.predict(
             input_pdb,
@@ -198,6 +219,7 @@ def _resolve_asset_directory(
     auto_setup: bool = False,
     asset_version: str = "default",
     refresh: bool = False,
+    accept_esm_license: bool = False,
 ):
     from protcross.assets import resolve_prediction_assets
 
@@ -206,6 +228,7 @@ def _resolve_asset_directory(
         auto_setup_assets=auto_setup,
         asset_version=asset_version,
         refresh_assets=refresh,
+        accept_esm_license=accept_esm_license,
     )
     return resolved.assets
 
@@ -222,6 +245,9 @@ def _resolve_prediction_asset_paths(args: argparse.Namespace, *, auto_setup: boo
         asset_version=args.asset_version,
         refresh_assets=args.refresh_assets,
         offline=args.offline,
+        accept_esm_license=args.accept_esm_license,
+        require_esm_license_for_use=True,
+        trust_unverified_assets=args.trust_unverified_assets,
     )
     args.ckpt_path = str(resolved.checkpoint)
     args.esm_weights = str(resolved.esm_weights)
@@ -244,14 +270,14 @@ def _default_output_paths(input_pdb: str | Path, out_dir: str | Path | None = No
 
 def _probability_threshold(value: str) -> float:
     threshold = float(value)
-    if not 0.0 <= threshold <= 1.0:
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
         raise argparse.ArgumentTypeError("must be in [0, 1]")
     return threshold
 
 
 def _positive_float(value: str) -> float:
     number = float(value)
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
     return number
 
@@ -268,6 +294,32 @@ def _max_len(value: str) -> int:
     if number > MAX_ESM_RESIDUES:
         raise argparse.ArgumentTypeError(f"must be <= {MAX_ESM_RESIDUES} for ESM-C")
     return number
+
+
+def _preflight_structure(
+    input_path: Path,
+    *,
+    chain_id: str | None,
+    max_len: int,
+    allow_truncation: bool,
+) -> None:
+    from protcross.data import StructureParser, parsed_structure_long_chunks
+
+    parser = StructureParser()
+    parsed = parser.parse_file_with_labels(input_path, chain_id=chain_id)
+    if not parsed:
+        if chain_id:
+            any_chain = parser.parse_file_with_labels(input_path, chain_id=None)
+            if any_chain:
+                raise ValueError(f"No standard amino-acid residues with CA atoms found for chain {chain_id!r}.")
+        raise ValueError(f"No standard amino-acid residues with CA atoms found in {input_path}.")
+    long_chunks = parsed_structure_long_chunks(parsed, max_len)
+    if long_chunks and not allow_truncation:
+        longest = max(end - start for start, end in long_chunks)
+        raise ValueError(
+            f"Input has an ESM chain context of {longest} scored residues, which exceeds --max-len={max_len}. "
+            "Pass --allow-truncation to score only the leading residues of each long chain."
+        )
 
 
 if __name__ == "__main__":

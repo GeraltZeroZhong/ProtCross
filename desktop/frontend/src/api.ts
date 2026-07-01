@@ -1,0 +1,154 @@
+import type { BackendMode, BatchJob, BatchResultResponse, DesktopStatus, PredictResponse } from "./types";
+
+let baseUrl = "";
+let desktopToken = "";
+
+export function configureDesktopApi(token: string, port: number): void {
+  desktopToken = token;
+  baseUrl = `http://127.0.0.1:${port}`;
+}
+
+export function desktopFileUrl(path: string): string {
+  const url = requireBaseUrl();
+  const token = desktopToken ? `&token=${encodeURIComponent(desktopToken)}` : "";
+  return `${url}/file?path=${encodeURIComponent(path)}${token}`;
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${requireBaseUrl()}${path}`, {
+    headers: {
+      "content-type": "application/json",
+      ...(desktopToken
+        ? {
+            authorization: `Bearer ${desktopToken}`,
+            "x-protcross-desktop-token": desktopToken
+          }
+        : {}),
+      ...(options.headers ?? {})
+    },
+    ...options
+  });
+  const contentType = response.headers.get("content-type") ?? "";
+  const payload = contentType.includes("application/json")
+    ? await response.json()
+    : { error: await response.text() };
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.error ?? `Request failed: ${response.status}`);
+  }
+  return payload as T;
+}
+
+function requireBaseUrl(): string {
+  if (!baseUrl) {
+    throw new Error("Desktop backend API is not configured yet.");
+  }
+  return baseUrl;
+}
+
+export function getStatus(): Promise<DesktopStatus> {
+  return request<DesktopStatus>("/status");
+}
+
+export function confirmLicense(): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/license/confirm", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export function configureBackend(mode: BackendMode, condaPython?: string, proxyUrl?: string): Promise<DesktopStatus["backend"]> {
+  return request<DesktopStatus["backend"]>("/backend/configure", {
+    method: "POST",
+    body: JSON.stringify({
+      mode,
+      conda_python: condaPython || undefined,
+      proxy_url: proxyUrl || undefined
+    })
+  });
+}
+
+export function testBackend(mode?: BackendMode): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/backend/test", {
+    method: "POST",
+    body: JSON.stringify(mode ? { mode } : {})
+  });
+}
+
+export function importEsm(path: string, copyToCache = true): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/assets/import-esm", {
+    method: "POST",
+    body: JSON.stringify({ path, copy_to_cache: copyToCache })
+  });
+}
+
+export function importCheckpoint(path: string): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/assets/import-checkpoint", {
+    method: "POST",
+    body: JSON.stringify({ path })
+  });
+}
+
+export function importPca(path: string): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/assets/import-pca", {
+    method: "POST",
+    body: JSON.stringify({ path })
+  });
+}
+
+export function downloadEsm(force = false): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/assets/download-esm", {
+    method: "POST",
+    body: JSON.stringify({ force })
+  });
+}
+
+export function runPrediction(payload: {
+  input_structure: string;
+  output_dir?: string;
+  threshold: number;
+  pocket_cluster_cutoff: number;
+  chain_id?: string;
+  allow_truncation: boolean;
+}): Promise<PredictResponse> {
+  return request<PredictResponse>("/predict", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function submitBatch(payload: {
+  structures: string[];
+  output_dir?: string;
+  threshold: number;
+  pocket_cluster_cutoff: number;
+  allow_truncation: boolean;
+}): Promise<BatchJob> {
+  return request<BatchJob>("/batch", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getBatch(jobId: string, limit = 500, offset = 0): Promise<BatchJob> {
+  return request<BatchJob>(`/batch/${jobId}?limit=${limit}&offset=${offset}`);
+}
+
+export function getBatchResult(jobId: string, inputStructure: string): Promise<BatchResultResponse> {
+  return request<BatchResultResponse>(
+    `/batch/${jobId}/result?input_structure=${encodeURIComponent(inputStructure)}`
+  );
+}
+
+export function cancelBatch(jobId: string): Promise<BatchJob> {
+  return request<BatchJob>(`/batch/${jobId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export function exportDiagnostics(path?: string): Promise<{ path: string }> {
+  return request<{ path: string }>("/diagnostics/export", {
+    method: "POST",
+    body: JSON.stringify(path ? { output_zip: path } : {})
+  });
+}

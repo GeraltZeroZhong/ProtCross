@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
 import time
 from typing import Optional
@@ -13,8 +14,15 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 
-from protcross.assets import PredictorAssets, resolve_prediction_assets
-from protcross.data import MAX_ESM_RESIDUES, PCAReducer, StructureParser, truncate_parsed_structure
+from protcross.assets import PredictorAssets, require_esm_license_acceptance, resolve_prediction_assets
+from protcross.data import (
+    MAX_ESM_RESIDUES,
+    PCAReducer,
+    StructureParser,
+    parsed_structure_long_chunks,
+    parsed_structure_sequence_chunks,
+    truncate_parsed_structure_by_chain,
+)
 from protcross.data.esm import ESMFeatureExtractor
 from protcross.models import EvoPointDALitModule
 
@@ -40,13 +48,19 @@ class PredictionResult:
     cluster_cutoff: float = 8.0
     residue_metadata: list[dict[str, object]] | None = None
     asset_version: str | None = None
+    asset_metadata: dict[str, object] | None = None
     device: str | None = None
     max_len: int | None = None
     output_files: dict[str, str] | None = None
     output_format_warning: str | None = None
-    unscored_bfactor_policy: str = "keep"
+    unscored_bfactor_policy: str = "zero"
     elapsed_seconds: float | None = None
     warnings: list[str] | None = None
+    _records_cache: list[dict[str, str | int | float | None]] | None = field(default=None, init=False, repr=False)
+    _cluster_indices_cache: list[np.ndarray] | None = field(default=None, init=False, repr=False)
+    _cluster_id_cache: np.ndarray | None = field(default=None, init=False, repr=False)
+    _pocket_dict_cache: dict | None = field(default=None, init=False, repr=False)
+    _summary_dict_cache: dict | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.input_pdb = Path(self.input_pdb)
@@ -179,6 +193,8 @@ class PredictionResult:
         output_json.write_text(json.dumps(self.to_summary_dict(), indent=2), encoding="utf-8")
 
     def to_records(self) -> list[dict[str, str | int | float | None]]:
+        if self._records_cache is not None:
+            return self._records_cache
         records = []
         coords = self._coordinate_array(required=False)
         cluster_ids = self._cluster_id_by_index() if coords is not None else np.zeros(len(self.residue_ids), dtype=int)
@@ -214,16 +230,21 @@ class PredictionResult:
                     "rank_within_chain": int(chain_ranks[index]),
                 }
             )
+        self._records_cache = records
         return records
 
     def to_pocket_dict(self) -> dict:
+        if self._pocket_dict_cache is not None:
+            return self._pocket_dict_cache
         coords = self._coordinate_array(required=True)
         selected_indices = self._selected_indices()
         clusters = self._cluster_indices()
-        return {
+        records = self.to_records()
+        payload = {
             "schema_version": "protcross-pocket-v1",
             "protcross_version": self._protcross_version(),
             "asset_version": self.asset_version,
+            "assets": self.asset_metadata or {},
             "input_structure": str(self.input_pdb),
             "threshold": float(self.threshold),
             "threshold_operator": ">",
@@ -241,14 +262,22 @@ class PredictionResult:
             "chains_analyzed": self.chains_analyzed,
             "residue_id_namespaces": self.residue_id_namespaces,
             "warnings": self.warnings,
-            "aggregate_pocket": self._pocket_from_indices(selected_indices, coords) if len(selected_indices) else None,
+            "aggregate_pocket": (
+                self._pocket_from_indices(selected_indices, coords, records=records)
+                if len(selected_indices)
+                else None
+            ),
             "clustered_pockets": [
-                self._pocket_from_indices(indices, coords, cluster_id=cluster_id)
+                self._pocket_from_indices(indices, coords, cluster_id=cluster_id, records=records)
                 for cluster_id, indices in enumerate(clusters, start=1)
             ],
         }
+        self._pocket_dict_cache = payload
+        return payload
 
     def to_summary_dict(self) -> dict:
+        if self._summary_dict_cache is not None:
+            return self._summary_dict_cache
         pockets = (
             self.to_pocket_dict()
             if self.ca_coords is not None
@@ -268,10 +297,11 @@ class PredictionResult:
             }
             for record in sorted(self.to_records(), key=lambda record: int(record["rank_global"]))[:10]
         ]
-        return {
+        payload = {
             "schema_version": "protcross-summary-v1",
             "protcross_version": self._protcross_version(),
             "asset_version": self.asset_version,
+            "assets": self.asset_metadata or {},
             "input_structure": str(self.input_pdb),
             "device": self.device,
             "threshold": float(self.threshold),
@@ -320,6 +350,8 @@ class PredictionResult:
             "output_format_warning": self.output_format_warning,
             "warnings": self.warnings,
         }
+        self._summary_dict_cache = payload
+        return payload
 
     def format_summary(self, *, max_items: int = 50) -> str:
         summary = self.to_summary_dict()
@@ -391,16 +423,22 @@ class PredictionResult:
         return np.flatnonzero(np.asarray(self.probabilities, dtype=float) > self.threshold)
 
     def _cluster_id_by_index(self) -> np.ndarray:
+        if self._cluster_id_cache is not None:
+            return self._cluster_id_cache
         cluster_ids = np.zeros(len(self.residue_ids), dtype=int)
         for cluster_id, indices in enumerate(self._cluster_indices(), start=1):
             cluster_ids[indices] = cluster_id
+        self._cluster_id_cache = cluster_ids
         return cluster_ids
 
     def _cluster_indices(self) -> list[np.ndarray]:
+        if self._cluster_indices_cache is not None:
+            return self._cluster_indices_cache
         coords = self._coordinate_array(required=True)
         selected = self._selected_indices()
         if len(selected) == 0:
-            return []
+            self._cluster_indices_cache = []
+            return self._cluster_indices_cache
 
         selected_coords = coords[selected]
         visited = np.zeros(len(selected), dtype=bool)
@@ -430,9 +468,17 @@ class PredictionResult:
                 int(indices.min()),
             )
         )
+        self._cluster_indices_cache = components
         return components
 
-    def _pocket_from_indices(self, indices: np.ndarray, coords: np.ndarray, cluster_id: int | None = None) -> dict:
+    def _pocket_from_indices(
+        self,
+        indices: np.ndarray,
+        coords: np.ndarray,
+        *,
+        records: list[dict[str, str | int | float | None]],
+        cluster_id: int | None = None,
+    ) -> dict:
         pocket_coords = coords[indices]
         pocket_probs = np.asarray(self.probabilities, dtype=float)[indices]
         weight_sum = float(pocket_probs.sum())
@@ -445,12 +491,11 @@ class PredictionResult:
         bbox_max = pocket_coords.max(axis=0)
         radius = float(np.max(np.linalg.norm(pocket_coords - center, axis=1)))
 
-        records = []
-        all_records = self.to_records()
+        pocket_records = []
         for index in indices:
             coord = coords[int(index)]
-            record = dict(all_records[int(index)])
-            records.append(
+            record = dict(records[int(index)])
+            pocket_records.append(
                 {
                     "residue_id": record["residue_id"],
                     "residue_key": record["residue_key"],
@@ -484,7 +529,7 @@ class PredictionResult:
             "bbox_min": [float(bbox_min[0]), float(bbox_min[1]), float(bbox_min[2])],
             "bbox_max": [float(bbox_max[0]), float(bbox_max[1]), float(bbox_max[2])],
             "radius": radius,
-            "residues": records,
+            "residues": pocket_records,
         }
         if cluster_id is not None:
             pocket = {"cluster_id": cluster_id, **pocket}
@@ -594,6 +639,8 @@ class ProtCrossPredictor:
         structure_parser: StructureParser | None = None,
         model: EvoPointDALitModule | None = None,
         asset_version: str | None = None,
+        asset_metadata: dict[str, object] | None = None,
+        accept_esm_license: bool = False,
     ) -> None:
         self.device = self._resolve_device(device)
         if max_len <= 0 or max_len > MAX_ESM_RESIDUES:
@@ -604,6 +651,7 @@ class ProtCrossPredictor:
         self.pca_dim = pca_dim
         self.embedding_cache_dir = Path(embedding_cache_dir).expanduser() if embedding_cache_dir else None
         self.asset_version = asset_version
+        self.asset_metadata = asset_metadata
         esm_weights_path = self._optional_existing_path(esm_weights, "esm_weights") if esm_weights is not None else None
         pca_path_obj = self._optional_existing_path(pca_path, "pca_path") if pca_path is not None else None
         ckpt_path_obj = self._optional_existing_path(ckpt_path, "ckpt_path") if ckpt_path is not None else None
@@ -612,6 +660,8 @@ class ProtCrossPredictor:
             pca_path_obj,
         )
         self.structure_parser = structure_parser or StructureParser()
+        if esm_extractor is None:
+            require_esm_license_acceptance(accept_esm_license)
         self.esm_extractor = esm_extractor or ESMFeatureExtractor(
             self._require_path(esm_weights_path, "esm_weights"),
             self.device,
@@ -630,7 +680,9 @@ class ProtCrossPredictor:
         pca_dim: int = 128,
         max_len: int = MAX_ESM_RESIDUES,
         asset_version: str | None = None,
+        asset_metadata: dict[str, object] | None = None,
         embedding_cache_dir: str | Path | None = None,
+        accept_esm_license: bool = False,
     ) -> "ProtCrossPredictor":
         return cls(
             ckpt_path=ckpt_path,
@@ -640,7 +692,9 @@ class ProtCrossPredictor:
             pca_dim=pca_dim,
             max_len=max_len,
             asset_version=asset_version,
+            asset_metadata=asset_metadata,
             embedding_cache_dir=embedding_cache_dir,
+            accept_esm_license=accept_esm_license,
         )
 
     @classmethod
@@ -652,6 +706,7 @@ class ProtCrossPredictor:
         pca_dim: int = 128,
         max_len: int = MAX_ESM_RESIDUES,
         embedding_cache_dir: str | Path | None = None,
+        accept_esm_license: bool = False,
     ) -> "ProtCrossPredictor":
         return cls.from_files(
             ckpt_path=assets.checkpoint,
@@ -661,7 +716,9 @@ class ProtCrossPredictor:
             pca_dim=pca_dim,
             max_len=max_len,
             asset_version=assets.asset_version,
+            asset_metadata=None,
             embedding_cache_dir=embedding_cache_dir,
+            accept_esm_license=accept_esm_license,
         )
 
     @classmethod
@@ -672,6 +729,7 @@ class ProtCrossPredictor:
         pca_dim: int = 128,
         max_len: int = MAX_ESM_RESIDUES,
         embedding_cache_dir: str | Path | None = None,
+        accept_esm_license: bool = False,
     ) -> "ProtCrossPredictor":
         return cls.from_assets(
             PredictorAssets.from_env(),
@@ -679,6 +737,7 @@ class ProtCrossPredictor:
             pca_dim=pca_dim,
             max_len=max_len,
             embedding_cache_dir=embedding_cache_dir,
+            accept_esm_license=accept_esm_license,
         )
 
     @classmethod
@@ -690,6 +749,7 @@ class ProtCrossPredictor:
         max_len: int = MAX_ESM_RESIDUES,
         asset_version: str = "default",
         embedding_cache_dir: str | Path | None = None,
+        accept_esm_license: bool = False,
     ) -> "ProtCrossPredictor":
         return cls.from_assets(
             PredictorAssets.from_default_dir(asset_version=asset_version),
@@ -697,6 +757,7 @@ class ProtCrossPredictor:
             pca_dim=pca_dim,
             max_len=max_len,
             embedding_cache_dir=embedding_cache_dir,
+            accept_esm_license=accept_esm_license,
         )
 
     def predict(
@@ -711,7 +772,7 @@ class ProtCrossPredictor:
         pocket_json: str | Path | None = None,
         summary_json: str | Path | None = None,
         allow_truncation: bool = False,
-        unscored_bfactor_policy: str = "keep",
+        unscored_bfactor_policy: str = "zero",
     ) -> PredictionResult:
         _validate_prediction_options(
             threshold=threshold,
@@ -727,15 +788,17 @@ class ProtCrossPredictor:
         if not parsed:
             raise ValueError(f"No standard amino-acid residues with CA atoms found in {pdb_file}")
 
-        if len(parsed["sequence"]) > self.max_len and not allow_truncation:
+        long_chunks = parsed_structure_long_chunks(parsed, self.max_len)
+        if long_chunks and not allow_truncation:
+            longest = max(end - start for start, end in long_chunks)
             raise ValueError(
-                f"Input has {len(parsed['sequence'])} scored residues, which exceeds --max-len={self.max_len}. "
-                "Pass --allow-truncation to score only the leading residues."
+                f"Input has an ESM chain context of {longest} scored residues, which exceeds --max-len={self.max_len}. "
+                "Pass --allow-truncation to score only the leading residues of each long chain."
             )
 
-        parsed = truncate_parsed_structure(parsed, self.max_len)
+        parsed = truncate_parsed_structure_by_chain(parsed, self.max_len)
         start_time = time.perf_counter()
-        features = self._featurize(parsed["sequence"])
+        features = self._featurize_parsed(parsed)
         data = Data(
             x=features,
             pos=torch.from_numpy(parsed["coords"]),
@@ -757,6 +820,7 @@ class ProtCrossPredictor:
                 list(parsed["residue_metadata"]) if parsed.get("residue_metadata") is not None else None
             ),
             asset_version=self.asset_version,
+            asset_metadata=self.asset_metadata,
             device=self.device,
             max_len=self.max_len,
             output_files=self._output_files(output_pdb, scores_tsv, pocket_json, summary_json),
@@ -832,6 +896,15 @@ class ProtCrossPredictor:
             tmp_path.replace(cache_path)
         return reduced_embeddings.float()
 
+    def _featurize_parsed(self, parsed: dict) -> torch.Tensor:
+        sequence = parsed["sequence"]
+        chunks = parsed_structure_sequence_chunks(parsed)
+        if len(chunks) <= 1:
+            return self._featurize(sequence)
+
+        features = [self._featurize(sequence[start:end]) for start, end in chunks if start < end]
+        return torch.cat(features, dim=0)
+
     def _embedding_cache_path(self, sequence: str) -> Path | None:
         if self.embedding_cache_dir is None:
             return None
@@ -904,6 +977,7 @@ class ProtCrossPredictor:
         return f"{path.resolve()}|size={stat.st_size}|mtime_ns={stat.st_mtime_ns}"
 
 
+
 def predict_pdb(
     pdb_file: str | Path,
     *,
@@ -923,9 +997,11 @@ def predict_pdb(
     asset_version: str = "default",
     refresh_assets: bool = False,
     offline: bool = False,
+    accept_esm_license: bool = False,
+    trust_unverified_assets: bool = False,
     max_len: int = MAX_ESM_RESIDUES,
     allow_truncation: bool = False,
-    unscored_bfactor_policy: str = "keep",
+    unscored_bfactor_policy: str = "zero",
     embedding_cache_dir: str | Path | None = None,
 ) -> PredictionResult:
     pdb_file = Path(pdb_file)
@@ -937,6 +1013,12 @@ def predict_pdb(
         max_len=max_len,
         unscored_bfactor_policy=unscored_bfactor_policy,
     )
+    _preflight_prediction_structure(
+        pdb_file,
+        chain_id=chain_id,
+        max_len=max_len,
+        allow_truncation=allow_truncation,
+    )
     resolved = resolve_prediction_assets(
         ckpt_path,
         esm_weights,
@@ -946,6 +1028,9 @@ def predict_pdb(
         asset_version=asset_version,
         refresh_assets=refresh_assets,
         offline=offline,
+        accept_esm_license=accept_esm_license,
+        require_esm_license_for_use=True,
+        trust_unverified_assets=trust_unverified_assets,
     )
     predictor = ProtCrossPredictor.from_files(
         ckpt_path=resolved.checkpoint,
@@ -955,6 +1040,7 @@ def predict_pdb(
         max_len=max_len,
         asset_version=resolved.asset_version,
         embedding_cache_dir=embedding_cache_dir,
+        accept_esm_license=True,
     )
     return predictor.predict(
         pdb_file,
@@ -980,6 +1066,8 @@ def _resolve_predict_pdb_assets(
     asset_version: str = "default",
     refresh_assets: bool = False,
     offline: bool = False,
+    accept_esm_license: bool = False,
+    trust_unverified_assets: bool = False,
 ) -> tuple[str | Path, str | Path, str | Path]:
     resolved = resolve_prediction_assets(
         ckpt_path,
@@ -990,6 +1078,8 @@ def _resolve_predict_pdb_assets(
         asset_version=asset_version,
         refresh_assets=refresh_assets,
         offline=offline,
+        accept_esm_license=accept_esm_license,
+        trust_unverified_assets=trust_unverified_assets,
     )
     return resolved.checkpoint, resolved.esm_weights, resolved.pca
 
@@ -1001,11 +1091,37 @@ def _validate_prediction_options(
     max_len: int,
     unscored_bfactor_policy: str,
 ) -> None:
-    if not 0.0 <= float(threshold) <= 1.0:
+    threshold_value = float(threshold)
+    cutoff_value = float(pocket_cluster_cutoff)
+    if not math.isfinite(threshold_value) or not 0.0 <= threshold_value <= 1.0:
         raise ValueError("threshold must be in [0, 1].")
-    if pocket_cluster_cutoff <= 0:
+    if not math.isfinite(cutoff_value) or cutoff_value <= 0:
         raise ValueError("pocket_cluster_cutoff must be greater than 0.")
     if max_len <= 0 or max_len > MAX_ESM_RESIDUES:
         raise ValueError(f"max_len must be between 1 and {MAX_ESM_RESIDUES}.")
     if unscored_bfactor_policy not in {"keep", "zero"}:
         raise ValueError("unscored_bfactor_policy must be 'keep' or 'zero'.")
+
+
+def _preflight_prediction_structure(
+    pdb_file: Path,
+    *,
+    chain_id: Optional[str],
+    max_len: int,
+    allow_truncation: bool,
+) -> None:
+    parser = StructureParser()
+    parsed = parser.parse_file_with_labels(pdb_file, chain_id=chain_id)
+    if not parsed:
+        if chain_id:
+            any_chain = parser.parse_file_with_labels(pdb_file, chain_id=None)
+            if any_chain:
+                raise ValueError(f"No standard amino-acid residues with CA atoms found for chain {chain_id!r}.")
+        raise ValueError(f"No standard amino-acid residues with CA atoms found in {pdb_file}.")
+    long_chunks = parsed_structure_long_chunks(parsed, max_len)
+    if long_chunks and not allow_truncation:
+        longest = max(end - start for start, end in long_chunks)
+        raise ValueError(
+            f"Input has an ESM chain context of {longest} scored residues, which exceeds --max-len={max_len}. "
+            "Pass allow_truncation=True or CLI --allow-truncation to score only the leading residues of each long chain."
+        )

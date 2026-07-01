@@ -100,6 +100,65 @@ def truncate_parsed_structure(parsed: Dict, max_len: int = MAX_ESM_RESIDUES) -> 
     return out
 
 
+def parsed_structure_sequence_chunks(parsed: Dict) -> list[tuple[int, int]]:
+    """Return contiguous ESM sequence chunks, split by parsed model/chain."""
+    sequence = parsed.get("sequence", "")
+    metadata = parsed.get("residue_metadata") or []
+    if not sequence:
+        return []
+    if len(metadata) != len(sequence):
+        return [(0, len(sequence))]
+
+    chunks: list[tuple[int, int]] = []
+    start = 0
+    current = _metadata_chain_key(metadata[0])
+    for index, item in enumerate(metadata[1:], start=1):
+        key = _metadata_chain_key(item)
+        if key != current:
+            chunks.append((start, index))
+            start = index
+            current = key
+    chunks.append((start, len(sequence)))
+    return chunks
+
+
+def parsed_structure_long_chunks(parsed: Dict, max_len: int = MAX_ESM_RESIDUES) -> list[tuple[int, int]]:
+    return [
+        (start, end)
+        for start, end in parsed_structure_sequence_chunks(parsed)
+        if end - start > max_len
+    ]
+
+
+def truncate_parsed_structure_by_chain(parsed: Dict, max_len: int = MAX_ESM_RESIDUES) -> Dict:
+    """Truncate each parsed model/chain chunk independently for ESM-C."""
+    chunks = parsed_structure_sequence_chunks(parsed)
+    if not any(end - start > max_len for start, end in chunks):
+        return parsed
+    keep_indices: list[int] = []
+    for start, end in chunks:
+        keep_indices.extend(range(start, min(end, start + max_len)))
+    return _subset_parsed_structure(parsed, keep_indices, original_length=len(parsed["sequence"]))
+
+
+def _subset_parsed_structure(parsed: Dict, indices: list[int], *, original_length: int) -> Dict:
+    out = dict(parsed)
+    out["sequence"] = "".join(parsed["sequence"][index] for index in indices)
+    for key in ("coords", "raw_coords", "plddts", "labels"):
+        if key in out:
+            out[key] = out[key][indices]
+    for key in ("residue_ids", "residue_metadata"):
+        if key in out:
+            out[key] = [out[key][index] for index in indices]
+    out["truncated"] = True
+    out["original_length"] = original_length
+    return out
+
+
+def _metadata_chain_key(metadata: dict) -> tuple[str, str]:
+    return (str(metadata.get("model_id", "")), str(metadata.get("chain_id", "")))
+
+
 class StructureParser:
     """Parse PDB/mmCIF files into residue-level point-cloud inputs."""
 
@@ -194,10 +253,17 @@ class StructureParser:
                     "input_bfactor": float(ca_atom.get_bfactor()),
                 }
                 if is_mmcif:
+                    model_num = self._mmcif_model_num(model.id)
                     metadata.update(
                         mmcif_ca_metadata.get(
-                            (chain.id, residue_number, insertion_code, res_name),
-                            mmcif_ca_metadata.get((chain.id, residue_number, insertion_code, None), {}),
+                            (model_num, chain.id, residue_number, insertion_code, res_name),
+                            mmcif_ca_metadata.get(
+                                (model_num, chain.id, residue_number, insertion_code, None),
+                                mmcif_ca_metadata.get(
+                                    (None, chain.id, residue_number, insertion_code, res_name),
+                                    mmcif_ca_metadata.get((None, chain.id, residue_number, insertion_code, None), {}),
+                                ),
+                            ),
                         )
                     )
                 residue_metadata.append(metadata)
@@ -235,7 +301,10 @@ class StructureParser:
             f"icode:{insertion_code}|resname:{resname_part}"
         )
 
-    def _load_mmcif_ca_metadata(self, file_path: Path) -> dict[tuple[str | None, int | None, str, str | None], dict[str, object]]:
+    def _load_mmcif_ca_metadata(
+        self,
+        file_path: Path,
+    ) -> dict[tuple[str | None, str | None, int | None, str, str | None], dict[str, object]]:
         try:
             atom_site = MMCIF2Dict(str(file_path))
         except Exception:
@@ -260,7 +329,7 @@ class StructureParser:
         label_comp_ids = values("_atom_site.label_comp_id")
         model_nums = values("_atom_site.pdbx_PDB_model_num")
 
-        metadata_by_key: dict[tuple[str | None, int | None, str, str | None], dict[str, object]] = {}
+        metadata_by_key: dict[tuple[str | None, str | None, int | None, str, str | None], dict[str, object]] = {}
         for index in range(row_count):
             atom_name = self._clean_mmcif_value(
                 label_atom_ids[index] if index < len(label_atom_ids) else None
@@ -292,14 +361,21 @@ class StructureParser:
                 metadata["mmcif_model_num"] = model_num
 
             for key in (
-                (auth_asym_id, auth_seq_id, insertion_code, auth_comp_id),
-                (auth_asym_id, auth_seq_id, insertion_code, None),
-                (label_asym_id, label_seq_id, insertion_code, label_comp_id),
-                (label_asym_id, label_seq_id, insertion_code, None),
+                (model_num, auth_asym_id, auth_seq_id, insertion_code, auth_comp_id),
+                (model_num, auth_asym_id, auth_seq_id, insertion_code, None),
+                (model_num, label_asym_id, label_seq_id, insertion_code, label_comp_id),
+                (model_num, label_asym_id, label_seq_id, insertion_code, None),
             ):
-                if key[0] is not None and key[1] is not None:
+                if key[1] is not None and key[2] is not None:
                     metadata_by_key[key] = metadata
         return metadata_by_key
+
+    @staticmethod
+    def _mmcif_model_num(model_id) -> str:
+        try:
+            return str(int(model_id) + 1)
+        except (TypeError, ValueError):
+            return str(model_id)
 
     @staticmethod
     def _mmcif_values(atom_site: dict, field: str, *, row_count: int | None = None) -> list[str | None]:

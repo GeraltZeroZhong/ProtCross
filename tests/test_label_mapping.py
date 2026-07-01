@@ -1,8 +1,10 @@
 import numpy as np
+import pytest
 import torch
 
 from protcross.data.label_mapping import (
     _reverse_pdb_uniprot_mapping,
+    load_processed_pdb_labels,
     sequence_based_mapping,
     sequence_from_processed_or_raw,
     split_data_by_chain,
@@ -62,3 +64,55 @@ def test_sequence_from_processed_or_raw_prefers_truncated_processed_sequence():
 
     assert sequence_from_processed_or_raw(af2_data, "ACDEFGHIK") == "ACDE"
     assert sequence_from_processed_or_raw({"pos": torch.zeros((4, 3))}, "ACDEFGHIK") == "ACDE"
+
+
+def test_load_processed_pdb_labels_uses_processed_payload_and_provenance(tmp_path):
+    raw = tmp_path / "raw_pdb" / "1abc.pdb"
+    raw.parent.mkdir()
+    raw.write_text("HEADER raw\n", encoding="utf-8")
+    processed_dir = tmp_path / "processed_pdb"
+    processed_dir.mkdir()
+    processed = processed_dir / "1abc.pt"
+    from protcross.data.label_mapping import _file_sha256
+
+    torch.save(
+        {
+            "pos": torch.ones((5, 3)),
+            "y": torch.tensor([0, 1, 0, 0, 1], dtype=torch.float32),
+            "sequence": "ACDEF",
+            "residue_ids": ["A_1", "A_2", "A_3", "A_4", "A_5"],
+            "source_sha256": _file_sha256(raw),
+        },
+        processed,
+    )
+
+    payload = load_processed_pdb_labels(processed_dir, raw)
+
+    assert payload is not None
+    assert payload["sequence"] == "ACDEF"
+    assert payload["labels"].tolist() == [0, 1, 0, 0, 1]
+    assert payload["processed_pdb_path"] == str(processed)
+    assert payload["processed_pdb_sha256"] == _file_sha256(processed)
+
+
+def test_load_processed_pdb_labels_rejects_stale_source(tmp_path):
+    raw = tmp_path / "raw_pdb" / "1abc.pdb"
+    raw.parent.mkdir()
+    raw.write_text("HEADER old\n", encoding="utf-8")
+    processed_dir = tmp_path / "processed_pdb"
+    processed_dir.mkdir()
+    from protcross.data.label_mapping import _file_sha256
+
+    torch.save(
+        {
+            "pos": torch.ones((5, 3)),
+            "y": torch.zeros(5),
+            "sequence": "ACDEF",
+            "source_sha256": _file_sha256(raw),
+        },
+        processed_dir / "1abc.pt",
+    )
+    raw.write_text("HEADER changed\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="stale"):
+        load_processed_pdb_labels(processed_dir, raw)

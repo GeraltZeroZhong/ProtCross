@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import glob
 import os
+import shlex
 import shutil
+import signal
 import subprocess
+import sys
 from collections import defaultdict
 
 import numpy as np
@@ -42,26 +45,48 @@ def run_command(command: str, log_file: str) -> str:
     print(f"Exec: {command}")
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     output_buffer = ""
+    args = shlex.split(command)
     with open(log_file, "w", encoding="utf-8") as file:
         process = subprocess.Popen(
-            command,
-            shell=True,
+            args,
+            shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=(sys.platform != "win32"),
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0),
         )
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="")
-            file.write(line)
-            output_buffer += line
-        process.wait()
-        if process.returncode != 0:
-            print(f"Command failed with return code {process.returncode}")
-            print("Last 5 log lines:")
-            print("   " + "\n   ".join(output_buffer.splitlines()[-5:]))
-            raise subprocess.CalledProcessError(process.returncode, command, output=output_buffer)
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="")
+                file.write(line)
+                output_buffer += line
+            process.wait()
+            if process.returncode != 0:
+                print(f"Command failed with return code {process.returncode}")
+                print("Last 5 log lines:")
+                print("   " + "\n   ".join(output_buffer.splitlines()[-5:]))
+                raise subprocess.CalledProcessError(process.returncode, args, output=output_buffer)
+        except BaseException:
+            _terminate_process(process)
+            raise
     return output_buffer
+
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+    except Exception:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def parse_metrics(output: str) -> dict[str, float]:
