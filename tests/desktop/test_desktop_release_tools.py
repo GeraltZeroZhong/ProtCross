@@ -108,6 +108,8 @@ def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
     assert '"wheel"' in wheelhouse_script
     assert '"download"' not in wheelhouse_script
     assert "--only-binary=:all:" not in wheelhouse_script
+    assert "local_desktop_backend_wheel" in wheelhouse_script
+    assert 'shutil.rmtree(package_dir / "build"' in wheelhouse_script
 
 
 def _make_runtime_bundle(root: Path) -> Path:

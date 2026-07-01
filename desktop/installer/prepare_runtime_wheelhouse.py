@@ -44,15 +44,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Copied uv bootstrapper: {copied_uv}")
 
     backends = ["cpu", "gpu"] if args.backend == "all" else [args.backend]
-    for backend in backends:
-        _prepare_backend(
-            runtime_dir=runtime_dir,
-            wheelhouse=wheelhouse,
-            backend=backend,
-            desktop_backend_dir=args.desktop_backend_dir.resolve() if args.desktop_backend_dir else None,
-            local_protcross_wheel=local_wheel,
-            extra_pip_args=args.extra_pip_arg,
-        )
+    desktop_backend_dir = args.desktop_backend_dir.resolve() if args.desktop_backend_dir else runtime_dir.parent / "backend"
+    if not desktop_backend_dir.exists():
+        raise FileNotFoundError(f"Desktop backend package not found: {desktop_backend_dir}")
+    with tempfile.TemporaryDirectory(prefix="protcross-desktop-backend-wheel-") as shared_tmp:
+        desktop_backend_wheel = _build_local_wheel(desktop_backend_dir, Path(shared_tmp))
+        for backend in backends:
+            _prepare_backend(
+                runtime_dir=runtime_dir,
+                wheelhouse=wheelhouse,
+                backend=backend,
+                local_desktop_backend_wheel=desktop_backend_wheel,
+                local_protcross_wheel=local_wheel,
+                extra_pip_args=args.extra_pip_arg,
+            )
     return 0
 
 
@@ -93,7 +98,7 @@ def _prepare_backend(
     runtime_dir: Path,
     wheelhouse: Path,
     backend: str,
-    desktop_backend_dir: Path | None,
+    local_desktop_backend_wheel: Path,
     local_protcross_wheel: Path | None,
     extra_pip_args: list[str],
 ) -> None:
@@ -129,10 +134,7 @@ def _prepare_backend(
 
         if local_protcross_wheel:
             shutil.copy2(local_protcross_wheel, tmp_dir / "wheels" / local_protcross_wheel.name)
-        desktop_backend_dir = desktop_backend_dir or runtime_dir.parent / "backend"
-        if not desktop_backend_dir.exists():
-            raise FileNotFoundError(f"Desktop backend package not found: {desktop_backend_dir}")
-        _build_local_wheel(desktop_backend_dir, tmp_dir / "wheels")
+        shutil.copy2(local_desktop_backend_wheel, tmp_dir / "wheels" / local_desktop_backend_wheel.name)
 
         backend_wheels = []
         for wheel in sorted((tmp_dir / "wheels").glob("*.whl")):
@@ -144,11 +146,24 @@ def _prepare_backend(
     print(f"Wrote {runtime_dir / f'requirements-{backend}.hashes'}")
 
 
-def _build_local_wheel(package_dir: Path, output_dir: Path) -> None:
+def _build_local_wheel(package_dir: Path, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(package_dir / "build", ignore_errors=True)
+    shutil.rmtree(package_dir / "protcross_desktop_backend.egg-info", ignore_errors=True)
+    before = {path.resolve() for path in output_dir.glob("*.whl")}
     command = [sys.executable, "-m", "build", "--wheel", "--outdir", str(output_dir)]
     print("+ " + " ".join(command) + f"  # cwd={package_dir}")
     subprocess.run(command, cwd=package_dir, check=True)
+    wheels = [
+        path
+        for path in output_dir.glob("protcross_desktop_backend-*.whl")
+        if path.resolve() not in before
+    ]
+    shutil.rmtree(package_dir / "build", ignore_errors=True)
+    shutil.rmtree(package_dir / "protcross_desktop_backend.egg-info", ignore_errors=True)
+    if len(wheels) != 1:
+        raise RuntimeError(f"Expected one desktop backend wheel from {package_dir}, found {len(wheels)}.")
+    return wheels[0]
 
 
 def _backend_requirements(*, requirements_lock: Path, backend: str, use_local_protcross: bool) -> str:
