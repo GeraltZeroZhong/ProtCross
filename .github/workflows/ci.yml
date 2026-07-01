@@ -282,6 +282,7 @@ jobs:
           }
           .\desktop\installer\validate-release.ps1 `
             -InstallerPath $installer.FullName `
+            -AcceptEsmLicenseForCi `
             -ValidateInstalledPackage `
             -SkipLocalBackendTests
 

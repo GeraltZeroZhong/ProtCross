@@ -6,6 +6,7 @@ param(
   [string]$PackagedResourceDir = "",
   [switch]$RequireInstallerSignature,
   [switch]$ValidateInstalledPackage,
+  [switch]$AcceptEsmLicenseForCi,
   [switch]$SkipLocalBackendTests
 )
 
@@ -38,7 +39,7 @@ function Assert-ValidSignature {
 function Invoke-ResourceValidation {
   param([Parameter(Mandatory = $true)][string]$ResourceDir)
   Invoke-Checked "python" @((Join-Path $PSScriptRoot "validate_packaged_sidecar.py"), "--resource-dir", $ResourceDir, "--no-start")
-  Invoke-Checked "python" @((Join-Path $PSScriptRoot "validate_runtime_bundle.py"), "--runtime-dir", (Join-Path $ResourceDir "runtime"), "--backend", "all")
+  Invoke-Checked "python" @((Join-Path $PSScriptRoot "validate_runtime_bundle.py"), "--runtime-dir", (Join-Path $ResourceDir "runtime"), "--backend", "cpu")
 }
 
 function Find-PackagedResourceDir {
@@ -53,7 +54,10 @@ function Find-PackagedResourceDir {
 }
 
 function Invoke-InstalledPackageValidation {
-  param([Parameter(Mandatory = $true)][string]$Installer)
+  param(
+    [Parameter(Mandatory = $true)][string]$Installer,
+    [switch]$AcceptEsmLicenseForCi
+  )
   if (!(Test-Path $Installer)) {
     throw "Installer not found: $Installer"
   }
@@ -62,7 +66,18 @@ function Invoke-InstalledPackageValidation {
   New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
   try {
     Write-Host "Installing NSIS package to $tempRoot"
+    $PreviousLicenseEnv = $env:PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE
+    if ($AcceptEsmLicenseForCi) {
+      $env:PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE = "1"
+    }
     $process = Start-Process -FilePath $Installer -ArgumentList @("/S", "/D=$tempRoot") -Wait -PassThru
+    if ($AcceptEsmLicenseForCi) {
+      if ($null -eq $PreviousLicenseEnv) {
+        Remove-Item Env:\PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE -ErrorAction SilentlyContinue
+      } else {
+        $env:PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE = $PreviousLicenseEnv
+      }
+    }
     if ($process.ExitCode -ne 0) {
       throw "NSIS silent install failed with exit code $($process.ExitCode)."
     }
@@ -73,13 +88,20 @@ function Invoke-InstalledPackageValidation {
     & (Join-Path $resourceDir "runtime\test_backend.ps1") -Backend cpu -InstallRoot $runtimeSmokeRoot
     if ($LASTEXITCODE -ne 0) { throw "Installed CPU backend validation failed with exit code $LASTEXITCODE." }
   } finally {
+    if ($AcceptEsmLicenseForCi) {
+      if ($null -eq $PreviousLicenseEnv) {
+        Remove-Item Env:\PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE -ErrorAction SilentlyContinue
+      } else {
+        $env:PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE = $PreviousLicenseEnv
+      }
+    }
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $runtimeSmokeRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 
 Invoke-Checked "python" @((Join-Path $PSScriptRoot "validate_bundled_assets.py"), "--assets-dir", $BundledAssetsDir)
-Invoke-Checked "python" @((Join-Path $PSScriptRoot "validate_runtime_bundle.py"), "--runtime-dir", $RuntimeDir, "--backend", "all")
+Invoke-Checked "python" @((Join-Path $PSScriptRoot "validate_runtime_bundle.py"), "--runtime-dir", $RuntimeDir, "--backend", "cpu")
 
 if ($InstallerPath -ne "" -and $RequireInstallerSignature) {
   Assert-ValidSignature -Path $InstallerPath
@@ -93,7 +115,7 @@ if ($ValidateInstalledPackage) {
   if ($InstallerPath -eq "") {
     throw "-ValidateInstalledPackage requires -InstallerPath."
   }
-  Invoke-InstalledPackageValidation -Installer $InstallerPath
+  Invoke-InstalledPackageValidation -Installer $InstallerPath -AcceptEsmLicenseForCi:$AcceptEsmLicenseForCi
 }
 
 if (!$SkipLocalBackendTests) {

@@ -5,8 +5,15 @@ Var EsmLicenseCheckbox
 Var EsmLicenseAccepted
 
 !macro NSIS_HOOK_PREINSTALL
-  MessageBox MB_ICONQUESTION|MB_YESNO "ProtCross Desktop prediction support requires ESM-C weights. The weights are not included in this installer. By continuing, you confirm that you have reviewed and agree to comply with the applicable ESM-C model license before downloading or importing ESM-C weights." IDYES +2
+  IfSilent protcross_silent_license_check protcross_interactive_license_check
+protcross_silent_license_check:
+  ReadEnvStr $0 "PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE"
+  StrCmp $0 "1" protcross_license_confirmed 0
   Abort
+protcross_interactive_license_check:
+  MessageBox MB_ICONQUESTION|MB_YESNO "ProtCross Desktop prediction support requires ESM-C weights. The weights are not included in this installer. By continuing, you confirm that you have reviewed and agree to comply with the applicable ESM-C model license before downloading or importing ESM-C weights." IDYES protcross_license_confirmed
+  Abort
+protcross_license_confirmed:
 !macroend
 
 Function ProtCrossEsmLicensePageCreate

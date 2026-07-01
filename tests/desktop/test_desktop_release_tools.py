@@ -106,6 +106,7 @@ def test_packaged_sidecar_smoke_uses_env_token_only():
 def test_windows_release_scripts_validate_signed_runtime_and_installed_package():
     sign_script = Path("desktop/installer/sign-installer.ps1").read_text(encoding="utf-8")
     validate_script = Path("desktop/installer/validate-release.ps1").read_text(encoding="utf-8")
+    nsis_hook = Path("desktop/installer/esm-license-confirmation.nsh").read_text(encoding="utf-8")
     cpu_installer = Path("desktop/runtime/install_cpu_backend.ps1").read_text(encoding="utf-8")
     gpu_installer = Path("desktop/runtime/install_gpu_backend.ps1").read_text(encoding="utf-8")
     tauri_main = Path("desktop/src-tauri/src/main.rs").read_text(encoding="utf-8")
@@ -115,8 +116,13 @@ def test_windows_release_scripts_validate_signed_runtime_and_installed_package()
     assert "Set-AuthenticodeSignature" in sign_script
     assert "ValidateInstalledPackage" in validate_script
     assert "RequireInstallerSignature" in validate_script
+    assert "AcceptEsmLicenseForCi" in validate_script
+    assert "PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE" in validate_script
+    assert 'validate_runtime_bundle.py"), "--runtime-dir", $RuntimeDir, "--backend", "cpu"' in validate_script
     assert "validate_packaged_sidecar.py" in validate_script
     assert "install_cpu_backend.ps1" in validate_script
+    assert "IfSilent" in nsis_hook
+    assert "PROTCROSS_DESKTOP_CI_ACCEPT_ESMC_LICENSE" in nsis_hook
     for script in (validate_script, cpu_installer, gpu_installer):
         assert "${LASTEXITCODE}:" in script
         assert "$LASTEXITCODE:" not in script
@@ -143,6 +149,7 @@ def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
     assert "cargo +1.88.0 check --locked" in ci_workflow
     assert "dtolnay/rust-toolchain@1.88.0" in ci_workflow
     assert "--backend cpu" in ci_workflow
+    assert "-AcceptEsmLicenseForCi" in ci_workflow
     assert "tauri:release-build -- --bundles app -- --locked" in ci_workflow
     assert "tauri:release-build -- --bundles nsis -- --locked" in ci_workflow
 
