@@ -167,6 +167,15 @@ def test_tauri_lockfile_pins_release_compatible_family():
     assert package_json["devDependencies"]["@tauri-apps/cli"] == "2.11.4"
 
 
+def test_tauri_default_icon_exists_for_generate_context():
+    icon = Path("desktop/src-tauri/icons/icon.png")
+
+    assert icon.exists()
+    data = icon.read_bytes()
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert data[12:16] == b"IHDR"
+
+
 def _make_runtime_bundle(root: Path) -> Path:
     runtime_dir = root / "runtime"
     wheelhouse = runtime_dir / "wheelhouse"
