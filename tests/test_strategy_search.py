@@ -65,3 +65,5 @@ def test_strategy_checkpoint_resume_requires_env_and_matching_manifest(monkeypat
     monkeypatch.setenv("PROTCROSS_STRATEGY_RESUME", "1")
     assert strategy_search.should_resume_checkpoint(str(checkpoint), signature) is True
     assert strategy_search.should_resume_checkpoint(str(checkpoint), {"strategy": "other"}) is False
+    checkpoint.write_bytes(b"changed checkpoint")
+    assert strategy_search.should_resume_checkpoint(str(checkpoint), signature) is False

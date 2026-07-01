@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -75,6 +76,27 @@ def test_validate_packaged_sidecar_accepts_resource_layout(tmp_path: Path):
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_frontend_release_build_prepares_generated_inputs():
+    package_json = json.loads(Path("desktop/frontend/package.json").read_text(encoding="utf-8"))
+
+    assert "tauri:prepare-release" in package_json["scripts"]
+    assert "prepare_release_inputs.py" in package_json["scripts"]["tauri:prepare-release"]
+    assert package_json["scripts"]["tauri:release-build"].startswith("npm run tauri:prepare-release")
+
+
+def test_windows_release_scripts_validate_signed_runtime_and_installed_package():
+    sign_script = Path("desktop/installer/sign-installer.ps1").read_text(encoding="utf-8")
+    validate_script = Path("desktop/installer/validate-release.ps1").read_text(encoding="utf-8")
+
+    assert "uv\\uv.exe" in sign_script
+    assert "uv.sha256" in sign_script
+    assert "Set-AuthenticodeSignature" in sign_script
+    assert "ValidateInstalledPackage" in validate_script
+    assert "RequireInstallerSignature" in validate_script
+    assert "validate_packaged_sidecar.py" in validate_script
+    assert "install_cpu_backend.ps1" in validate_script
 
 
 def _make_runtime_bundle(root: Path) -> Path:

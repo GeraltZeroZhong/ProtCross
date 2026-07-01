@@ -28,6 +28,7 @@ interface BackendStartResult {
 
 const DEFAULT_THRESHOLD = 0.5;
 const DEFAULT_CLUSTER_CUTOFF = 8.0;
+const BATCH_PAGE_SIZE = 500;
 const ESM_LICENSE_URL = "https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement";
 const MolstarViewer = lazy(() =>
   import("./components/MolstarViewer").then((module) => ({ default: module.MolstarViewer }))
@@ -48,6 +49,7 @@ export default function App() {
   const [allowTruncation, setAllowTruncation] = useState(false);
   const [batchInputs, setBatchInputs] = useState<string[]>([]);
   const [batchJob, setBatchJob] = useState<BatchJob | null>(null);
+  const [batchPageOffset, setBatchPageOffset] = useState(0);
   const [batchResult, setBatchResult] = useState<PredictResponse | null>(null);
   const [selectedBatchInput, setSelectedBatchInput] = useState("");
   const [prediction, setPrediction] = useState<PredictResponse | null>(null);
@@ -136,15 +138,32 @@ export default function App() {
     if (!batchJob || !["queued", "running"].includes(batchJob.status)) {
       return;
     }
+    const jobId = batchJob.id;
     const timer = window.setInterval(async () => {
       try {
-        setBatchJob(await getBatch(batchJob.id));
+        const next = await getBatch(jobId, BATCH_PAGE_SIZE, batchPageOffset);
+        setBatchJob(next);
+        setBatchPageOffset(next.items_offset ?? batchPageOffset);
       } catch (exc) {
         setError(exc instanceof Error ? exc.message : String(exc));
       }
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [batchJob]);
+  }, [batchJob?.id, batchJob?.status, batchPageOffset]);
+
+  async function loadBatchPage(offset: number) {
+    if (!batchJob) {
+      return;
+    }
+    setError("");
+    try {
+      const next = await getBatch(batchJob.id, BATCH_PAGE_SIZE, Math.max(0, offset));
+      setBatchJob(next);
+      setBatchPageOffset(next.items_offset ?? Math.max(0, offset));
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
 
   const setupIssues = useMemo(() => readinessIssues(status), [status]);
   const ready = setupIssues.length === 0;
@@ -328,6 +347,8 @@ export default function App() {
             setAllowTruncation={setAllowTruncation}
             batchJob={batchJob}
             batchActive={batchActive}
+            batchPageSize={BATCH_PAGE_SIZE}
+            batchPageOffset={batchPageOffset}
             onViewItem={async (item) => {
               if (!batchJob) {
                 return;
@@ -368,6 +389,7 @@ export default function App() {
                   allow_truncation: allowTruncation
                 });
                 setBatchJob(job);
+                setBatchPageOffset(job.items_offset ?? 0);
                 setBatchResult(null);
                 setSelectedBatchInput("");
               } catch (exc) {
@@ -377,6 +399,7 @@ export default function App() {
               }
             }}
             onCancel={() => batchJob && cancelBatch(batchJob.id).then(setBatchJob).catch((exc) => setError(String(exc)))}
+            onPageChange={(offset) => void loadBatchPage(offset)}
           />
         ) : null}
 
@@ -595,14 +618,23 @@ function BatchPanel(props: {
   setAllowTruncation: (value: boolean) => void;
   batchJob: BatchJob | null;
   batchActive: boolean;
+  batchPageSize: number;
+  batchPageOffset: number;
   onViewItem: (item: BatchJob["items"][number]) => void | Promise<void>;
   onSubmit: () => void;
   onCancel: () => void;
+  onPageChange: (offset: number) => void;
 }) {
   const progressLabel = props.batchJob
     ? `${props.batchJob.completed}/${props.batchJob.item_count ?? props.batchJob.items.length} processed, ${props.batchJob.failed} failed`
     : "";
-  const hiddenCount = props.batchJob ? Math.max(0, (props.batchJob.item_count ?? props.batchJob.items.length) - props.batchJob.items.length) : 0;
+  const pageOffset = props.batchJob?.items_offset ?? props.batchPageOffset;
+  const pageReturned = props.batchJob?.items_returned ?? props.batchJob?.items.length ?? 0;
+  const itemCount = props.batchJob?.item_count ?? props.batchJob?.items.length ?? 0;
+  const pageStart = itemCount === 0 ? 0 : pageOffset + 1;
+  const pageEnd = Math.min(itemCount, pageOffset + pageReturned);
+  const canPrevious = Boolean(props.batchJob && pageOffset > 0);
+  const canNext = Boolean(props.batchJob && pageOffset + pageReturned < itemCount);
   return (
     <section className="panel">
       <h2>Batch Queue</h2>
@@ -640,7 +672,7 @@ function BatchPanel(props: {
         <div className="table-wrap">
           <div className="table-header">
             <h3>{props.batchJob.status}</h3>
-            <span>{progressLabel}</span>
+            <span>{progressLabel}; showing {pageStart}-{pageEnd} of {itemCount}</span>
           </div>
           {props.batchJob.error ? (
             <div className="banner error batch-error">
@@ -679,9 +711,15 @@ function BatchPanel(props: {
               ))}
             </tbody>
           </table>
-          {hiddenCount > 0 ? (
-            <p className="muted-note">Showing the first {props.batchJob.items.length} rows; {hiddenCount} more are tracked by the backend.</p>
-          ) : null}
+          <div className="pager">
+            <button disabled={!canPrevious || props.busy} onClick={() => props.onPageChange(Math.max(0, pageOffset - props.batchPageSize))}>
+              Previous
+            </button>
+            <span>{pageStart}-{pageEnd} / {itemCount}</span>
+            <button disabled={!canNext || props.busy} onClick={() => props.onPageChange(pageOffset + props.batchPageSize)}>
+              Next
+            </button>
+          </div>
         </div>
       ) : null}
     </section>

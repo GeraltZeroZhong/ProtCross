@@ -6,7 +6,7 @@ on:
 
 jobs:
   test-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -21,8 +21,8 @@ jobs:
 
       - name: Install package
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,test]"
+          python -m pip install --upgrade "pip==26.0.1"
+          python -m pip install -c constraints/py310-ci.txt -e ".[dev,test]"
 
       - name: Run tests
         run: pytest -q -m "not slow"
@@ -46,21 +46,21 @@ jobs:
       - name: Clean install smoke
         run: |
           python -m venv /tmp/protcross-smoke
-          /tmp/protcross-smoke/bin/python -m pip install --upgrade pip
-          /tmp/protcross-smoke/bin/python -m pip install dist/*.whl
+          /tmp/protcross-smoke/bin/python -m pip install --upgrade "pip==26.0.1"
+          /tmp/protcross-smoke/bin/python -m pip install -c constraints/py310-ci.txt dist/*.whl
           /tmp/protcross-smoke/bin/python -c "import protcross; print(protcross.__version__)"
           /tmp/protcross-smoke/bin/protcross --help
 
       - name: Clean predict-extra install smoke
         run: |
           python -m venv /tmp/protcross-predict-smoke
-          /tmp/protcross-predict-smoke/bin/python -m pip install --upgrade pip
+          /tmp/protcross-predict-smoke/bin/python -m pip install --upgrade "pip==26.0.1"
           wheel="$(ls dist/*.whl)"
-          /tmp/protcross-predict-smoke/bin/python -m pip install "${wheel}[predict]"
+          /tmp/protcross-predict-smoke/bin/python -m pip install -c constraints/py310-ci.txt "${wheel}[predict]"
           /tmp/protcross-predict-smoke/bin/protcross predict --help
 
   no-deps-help:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -70,7 +70,7 @@ jobs:
 
       - name: Install package without runtime dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip==26.0.1"
           python -m pip install --no-deps .
 
       - name: CLI help without torch or Lightning
@@ -84,7 +84,7 @@ jobs:
           protcross train --help
 
   release-checkpoint-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -94,8 +94,8 @@ jobs:
 
       - name: Install test environment
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          python -m pip install --upgrade "pip==26.0.1"
+          python -m pip install -c constraints/py310-ci.txt -e ".[test]"
 
       - name: Download verified release checkpoint
         run: |
@@ -116,7 +116,7 @@ jobs:
           pytest -q tests/test_checkpoint_smoke.py
 
   desktop:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -136,13 +136,13 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install 1.82.0 --profile minimal
 
       - name: Install desktop backend test environment
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[predict,test]"
-          python -m pip install --no-deps -e desktop/backend
+          python -m pip install --upgrade "pip==26.0.1"
+          python -m pip install -c constraints/py310-ci.txt -e ".[predict,test]"
+          python -m pip install -c constraints/py310-ci.txt --no-deps -e desktop/backend
 
       - name: Desktop backend tests
         run: pytest -q tests/desktop
@@ -156,13 +156,13 @@ jobs:
 
       - name: Tauri cargo check
         working-directory: desktop/src-tauri
-        run: cargo check --locked
+        run: cargo +1.82.0 check --locked
 
   desktop-release-smoke:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-2022, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -173,7 +173,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: desktop/frontend/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.82.0
 
       - uses: actions/setup-python@v5
         with:
@@ -181,8 +181,8 @@ jobs:
 
       - name: Install desktop release build tooling
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install build requests tqdm uv
+          python -m pip install --upgrade "pip==26.0.1"
+          python -m pip install -c constraints/py310-ci.txt build requests tqdm uv
 
       - name: Frontend dependencies
         working-directory: desktop/frontend
@@ -269,6 +269,21 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: desktop/frontend
         run: npm run tauri:release-build -- --bundles nsis
+
+      - name: Validate packaged Windows installer resources
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "desktop/src-tauri/target" -Filter "*.exe" -Recurse |
+            Where-Object { $_.FullName -match "\\bundle\\nsis\\" } |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "NSIS installer not found after Tauri build."
+          }
+          .\desktop\installer\validate-release.ps1 `
+            -InstallerPath $installer.FullName `
+            -ValidateInstalledPackage `
+            -SkipLocalBackendTests
 
       - name: Tauri macOS app build smoke
         if: runner.os == 'macOS'

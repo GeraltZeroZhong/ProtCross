@@ -126,6 +126,8 @@ def _process_files(
     produced_outputs = []
     for file_path in tqdm(raw_files, desc="Processing"):
         output_path = config.output_dir / f"{file_path.stem}.pt"
+        output_path.unlink(missing_ok=True)
+        output_path.with_suffix(output_path.suffix + ".part").unlink(missing_ok=True)
 
         try:
             parsed = structure_parser.parse_file_with_labels(file_path)
@@ -170,7 +172,11 @@ def _process_files(
         print(f"Skipped {len(skipped)} files without usable protein residues.")
     if failures:
         print(f"Failed {len(failures)} files during preprocessing.")
-    if config.fail_on_error and (failures or success_count == 0):
+    if success_count == 0:
+        first = failures[0] if failures else skipped[0]
+        _write_preprocess_manifest(config, raw_files, produced_outputs, failures, skipped)
+        raise RuntimeError(f"Preprocessing produced no .pt files; first problem: {first[0]}: {first[1]}")
+    if config.fail_on_error and failures:
         first = failures[0] if failures else skipped[0]
         raise RuntimeError(f"Preprocessing did not complete cleanly; first problem: {first[0]}: {first[1]}")
     _write_preprocess_manifest(config, raw_files, produced_outputs, failures, skipped)

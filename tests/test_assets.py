@@ -208,6 +208,34 @@ def test_resolve_labels_all_explicit_assets_as_custom(tmp_path):
     assert resolved.asset_version == "custom"
 
 
+def test_resolve_all_explicit_official_assets_ignores_bad_managed_manifest(tmp_path, monkeypatch):
+    ckpt = tmp_path / DEFAULT_CHECKPOINT_FILENAME
+    esm = tmp_path / DEFAULT_ASSET_BUNDLE.assets[0].filename
+    pca = tmp_path / DEFAULT_PCA_FILENAME
+    for path in (ckpt, esm, pca):
+        path.write_bytes(path.name.encode("utf-8"))
+    bad_cache = tmp_path / "bad-cache"
+    bad_cache.mkdir()
+    (bad_cache / ASSET_MANIFEST_FILENAME).write_text('{"asset_version": "unknown"}', encoding="utf-8")
+    expected_by_name = {
+        DEFAULT_CHECKPOINT_FILENAME: DEFAULT_ASSET_BUNDLE.assets[1].sha256,
+        DEFAULT_ASSET_BUNDLE.assets[0].filename: DEFAULT_ASSET_BUNDLE.assets[0].sha256,
+        DEFAULT_PCA_FILENAME: DEFAULT_ASSET_BUNDLE.assets[2].sha256,
+    }
+    monkeypatch.setattr("protcross.assets.sha256_file", lambda path: expected_by_name[Path(path).name])
+
+    resolved = resolve_prediction_assets(
+        ckpt,
+        esm,
+        pca,
+        assets_dir=bad_cache,
+        auto_setup_assets=False,
+    )
+
+    assert resolved.asset_version == "0.1.2"
+    assert resolved.assets.asset_version == "0.1.2"
+
+
 def test_setup_assets_requires_esm_license_acceptance(tmp_path, monkeypatch):
     def fail_download(*args, **kwargs):
         raise AssertionError("download should not start before license acceptance")

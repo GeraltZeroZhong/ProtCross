@@ -120,7 +120,9 @@ protcross predict input.pdb \
 ### 2.1 System Requirements
 
 - Linux (recommended) or WSL2
-- Python 3.10
+- Python 3.10. The 0.1.3 wheel metadata is intentionally limited to Python
+  3.10 because the release test matrix and PyTorch/Torch Geometric stack are
+  locked there.
 - Conda (Miniconda or Anaconda)
 - NVIDIA GPU + CUDA 12.1 (recommended for training and ESM-C preprocessing)
 
@@ -144,7 +146,7 @@ protcross predict input.pdb --accept-esm-license --output input.protcross.pdb
 ```
 
 The provided environment includes:
-- `pytorch==2.3.0`
+- `pytorch==2.3.x`
 - `pytorch-cuda==12.1`
 - Torch Geometric and companion packages
 - `esm>=3.1.0` for ESM-C APIs
@@ -218,8 +220,11 @@ Recommended checkpoint for this project:
 - **ESM-C 600M (2024-12)**: https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
 
 The ESM-C model repository uses upstream model terms that are separate from
-ProtCross's MIT code license. Review the model terms before downloading,
-using, or redistributing ESM-C weights or derived assets.
+ProtCross's MIT code license. Review the model terms before downloading or
+using ESM-C weights. ProtCross release checkpoint/PCA assets are distributed as
+ProtCross runtime assets and do not bundle ESM-C model weights; review both
+ProtCross and upstream model terms before redistributing custom assets derived
+from ESM-C embeddings.
 
 #### Manual ESM-C download fallback
 
@@ -562,7 +567,7 @@ ProtCross/
 - **`protcross setup-assets` cannot find GitHub release assets**
   - Attach `protcross-0.1.2-binding-moad-final.ckpt` and `pca_esmc_128_binding_moad_0.1.2.pkl` to the `v0.1.2` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
 - **Torch Geometric install issues**
-  - Verify that your torch version and wheel index URL match the environment (torch 2.3.0 + cu121).
+  - Verify that your torch version and wheel index URL match the environment (torch 2.3.x + cu121).
 - **OOM during preprocessing/training**
   - Reduce batch size, use shorter runs, or switch to a smaller subset first.
 
@@ -596,4 +601,7 @@ Earlier release notes and archived command references are maintained in
 
 ProtCross code is licensed under the MIT License. See [LICENSE](LICENSE) for
 details. ESM-C weights are not part of the ProtCross code license and remain
-governed by EvolutionaryScale's upstream model terms.
+governed by EvolutionaryScale's upstream model terms. The release
+checkpoint/PCA assets do not include ESM-C weights; custom redistribution of
+ESM-C-derived model assets should be reviewed against the applicable upstream
+and ProtCross terms.

@@ -136,7 +136,10 @@ class EvoPointDataset(InMemoryDataset):
             raise RuntimeError(f"Invalid preprocessing manifest: {manifest_path}") from exc
         if manifest.get("append_mode"):
             return
-        allowed = set(manifest.get("produced_outputs") or manifest.get("expected_outputs") or [])
+        if "produced_outputs" in manifest:
+            allowed = set(manifest.get("produced_outputs") or [])
+        else:
+            allowed = set(manifest.get("expected_outputs") or [])
         if not allowed:
             raise RuntimeError(f"Preprocessing manifest has no expected outputs: {manifest_path}")
         actual = {Path(path).name for path in glob.glob(os.path.join(self.root, "*.pt"))}

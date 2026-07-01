@@ -142,6 +142,7 @@ def test_download_af2_cli_accepts_pdb_id_file():
         "mapping.json",
         "--allow-partial",
         "--allow-empty-downloads",
+        "--append",
     ])
 
     assert args.pdb_id_file == "pdb_ids.txt"
@@ -149,6 +150,7 @@ def test_download_af2_cli_accepts_pdb_id_file():
     assert args.mapping_file == "artifacts/pdb_uniprot_mapping.json"
     assert args.allow_partial is True
     assert args.allow_empty_downloads is True
+    assert args.append is True
 
 
 def test_map_labels_cli_default_mapping_file_is_under_artifacts():
@@ -193,6 +195,17 @@ def test_af2_downloader_preloads_initial_mapping_file(tmp_path):
     assert downloader.mapping == {}
 
 
+def test_af2_downloader_append_mode_preserves_existing_mapping(tmp_path):
+    mapping_file = tmp_path / "mapping.json"
+    mapping_file.write_text('{"1e12": "P12345"}', encoding="utf-8")
+    config = AF2DownloadConfig(mapping_file=mapping_file, append=True)
+
+    downloader = AF2Downloader(config)
+
+    assert downloader.preloaded_mapping == {"1E12": "P12345"}
+    assert downloader.mapping == {"1E12": "P12345"}
+
+
 def test_af2_downloader_creates_mapping_parent(tmp_path):
     mapping_file = tmp_path / "nested" / "pdb_uniprot_mapping.json"
     config = AF2DownloadConfig(mapping_file=mapping_file)
@@ -235,6 +248,33 @@ def test_af2_downloader_allows_partial_success_when_requested(tmp_path, monkeypa
     mapping = downloader.run()
 
     assert mapping == {"1ABC": "P12345"}
+
+
+def test_af2_downloader_quarantines_stale_structures_without_append(tmp_path, monkeypatch):
+    pdb_id_file = tmp_path / "ids.txt"
+    pdb_id_file.write_text("1ABC\n", encoding="utf-8")
+    output_dir = tmp_path / "af2"
+    output_dir.mkdir()
+    stale = output_dir / "AF-OLD.pdb"
+    stale.write_text("HEADER stale\nATOM      1  CA  ALA A   1       0.0     0.0     0.0  1.00 90.00           C\n", encoding="utf-8")
+    stale_manifest = output_dir / "AF-OLD.pdb.protcross-af2.json"
+    stale_manifest.write_text("{}", encoding="utf-8")
+    config = AF2DownloadConfig(
+        pdb_id_file=pdb_id_file,
+        mapping_file=tmp_path / "mapping.json",
+        output_dir=output_dir,
+    )
+    downloader = AF2Downloader(config)
+    monkeypatch.setattr(downloader, "fetch_uniprot_ids", lambda pdb_id: ["P12345"])
+    monkeypatch.setattr(downloader, "download_structure", lambda accession: True)
+
+    mapping = downloader.run()
+
+    assert mapping == {"1ABC": "P12345"}
+    assert not stale.exists()
+    assert not stale_manifest.exists()
+    orphaned = list((output_dir / "_orphaned").glob("*/AF-OLD.pdb"))
+    assert len(orphaned) == 1
 
 
 def test_af2_downloader_refreshes_unverifiable_cached_file(tmp_path, monkeypatch):
@@ -464,10 +504,11 @@ def test_preprocess_preflight_does_not_create_output_before_input_validation(tmp
 def test_map_labels_rejects_empty_processed_af2_dir(tmp_path):
     from protcross.data.label_mapping import LabelMappingConfig, map_labels
 
+    processed_pdb = tmp_path / "processed_pdb"
     processed_af2 = tmp_path / "processed_af2"
     raw_pdb = tmp_path / "raw_pdb"
     raw_af2 = tmp_path / "raw_af2"
-    for directory in (processed_af2, raw_pdb, raw_af2):
+    for directory in (processed_pdb, processed_af2, raw_pdb, raw_af2):
         directory.mkdir()
     mapping = tmp_path / "mapping.json"
     mapping.write_text('{"1ABC": "P12345"}', encoding="utf-8")
@@ -475,6 +516,7 @@ def test_map_labels_rejects_empty_processed_af2_dir(tmp_path):
     try:
         map_labels(
             LabelMappingConfig(
+                processed_pdb_dir=processed_pdb,
                 processed_af2_dir=processed_af2,
                 raw_pdb_dir=raw_pdb,
                 raw_af2_dir=raw_af2,
@@ -491,10 +533,11 @@ def test_map_labels_rejects_empty_processed_af2_dir(tmp_path):
 def test_map_labels_rejects_zero_mapped_labels_by_default(tmp_path):
     from protcross.data.label_mapping import LabelMappingConfig, map_labels
 
+    processed_pdb = tmp_path / "processed_pdb"
     processed_af2 = tmp_path / "processed_af2"
     raw_pdb = tmp_path / "raw_pdb"
     raw_af2 = tmp_path / "raw_af2"
-    for directory in (processed_af2, raw_pdb, raw_af2):
+    for directory in (processed_pdb, processed_af2, raw_pdb, raw_af2):
         directory.mkdir()
     (processed_af2 / "AF-Q99999.pt").write_bytes(b"not loaded because no mapping target")
     mapping = tmp_path / "mapping.json"
@@ -503,6 +546,7 @@ def test_map_labels_rejects_zero_mapped_labels_by_default(tmp_path):
     with pytest.raises(RuntimeError, match="no mapped AF2 labels"):
         map_labels(
             LabelMappingConfig(
+                processed_pdb_dir=processed_pdb,
                 processed_af2_dir=processed_af2,
                 raw_pdb_dir=raw_pdb,
                 raw_af2_dir=raw_af2,
@@ -515,10 +559,11 @@ def test_map_labels_rejects_zero_mapped_labels_by_default(tmp_path):
 def test_map_labels_can_allow_empty_mapping_for_diagnostics(tmp_path):
     from protcross.data.label_mapping import LabelMappingConfig, map_labels
 
+    processed_pdb = tmp_path / "processed_pdb"
     processed_af2 = tmp_path / "processed_af2"
     raw_pdb = tmp_path / "raw_pdb"
     raw_af2 = tmp_path / "raw_af2"
-    for directory in (processed_af2, raw_pdb, raw_af2):
+    for directory in (processed_pdb, processed_af2, raw_pdb, raw_af2):
         directory.mkdir()
     (processed_af2 / "AF-Q99999.pt").write_bytes(b"not loaded because no mapping target")
     mapping = tmp_path / "mapping.json"
@@ -526,6 +571,7 @@ def test_map_labels_can_allow_empty_mapping_for_diagnostics(tmp_path):
 
     report = map_labels(
         LabelMappingConfig(
+            processed_pdb_dir=processed_pdb,
             processed_af2_dir=processed_af2,
             raw_pdb_dir=raw_pdb,
             raw_af2_dir=raw_af2,
@@ -596,7 +642,11 @@ def test_pyproject_exposes_setup_assets_entry_point():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
 
     assert 'protcross-setup-assets = "protcross.cli.setup_assets:main"' in pyproject
-    assert 'predict = ["esm>=3.1.0", "httpx"]' in pyproject
+    assert 'requires-python = ">=3.10,<3.11"' in pyproject
+    assert '"esm>=3.1.0,<3.3"' in pyproject
+    assert '"httpx>=0.27,<0.29"' in pyproject
+    assert '"torchvision>=0.18,<0.19"' in pyproject
+    assert '"torchtext>=0.18,<0.19"' in pyproject
 
 
 def test_unified_cli_help_does_not_import_torch():

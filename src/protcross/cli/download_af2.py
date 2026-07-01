@@ -33,6 +33,11 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         help="Exit successfully when requested IDs produce no AlphaFold downloads.",
     )
     parser.add_argument("--refresh", action="store_true", help="Re-download AlphaFold files even when a verified cache exists.")
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Keep existing mapping records and AF2 files that are not part of the current input set.",
+    )
     return parser
 
 
@@ -52,6 +57,7 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
         allow_empty=args.allow_empty or args.allow_empty_downloads,
         allow_partial=args.allow_partial,
         refresh=args.refresh,
+        append=args.append,
     )
     try:
         download_af2_structures(config)

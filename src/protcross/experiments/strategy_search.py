@@ -194,7 +194,10 @@ def should_resume_checkpoint(checkpoint_path: str, signature: dict) -> bool:
         manifest = json.loads(open(manifest_path, encoding="utf-8").read())
     except Exception:
         return False
-    return manifest.get("signature") == signature
+    if manifest.get("signature") != signature:
+        return False
+    recorded_sha = manifest.get("checkpoint_sha256")
+    return bool(recorded_sha and os.path.exists(checkpoint_path) and file_sha256(checkpoint_path) == recorded_sha)
 
 
 def write_checkpoint_manifest(checkpoint_path: str, signature: dict) -> None:

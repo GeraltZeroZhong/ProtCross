@@ -6,8 +6,10 @@ import concurrent.futures
 import hashlib
 import json
 import re
+import shutil
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -30,6 +32,7 @@ class AF2DownloadConfig:
     allow_empty: bool = False
     allow_partial: bool = False
     refresh: bool = False
+    append: bool = False
 
 
 class AF2Downloader:
@@ -42,7 +45,7 @@ class AF2Downloader:
         existing_mapping = self.load_mapping_file(config.mapping_file) if config.mapping_file.exists() else {}
         initial_mapping = self.load_mapping_file(config.initial_mapping_file) if config.initial_mapping_file else {}
         self.preloaded_mapping: dict[str, str] = {**initial_mapping, **existing_mapping}
-        self.mapping: dict[str, str] = dict(existing_mapping)
+        self.mapping: dict[str, str] = dict(existing_mapping) if config.append else {}
 
     def run(self) -> dict[str, str]:
         pdb_ids = self.collect_pdb_ids()
@@ -54,6 +57,9 @@ class AF2Downloader:
                 print(f"No PDB IDs found in {source}.")
                 return {}
             raise ValueError(f"No PDB IDs found in {source}. Provide PDB files, --pdb-id-file, or pass --allow-empty.")
+        requested_ids = set(pdb_ids)
+        if not self.config.append:
+            self.mapping = {pdb_id: accession for pdb_id, accession in self.mapping.items() if pdb_id in requested_ids}
 
         print(f"Found {len(pdb_ids)} PDB IDs. Starting AlphaFold downloads...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
@@ -73,6 +79,8 @@ class AF2Downloader:
                 "No AlphaFold structures were resolved or downloaded. "
                 "Check network access, input IDs, or pass --allow-empty-downloads."
             )
+        if not self.config.append:
+            self._quarantine_orphan_structures(set(self.mapping.values()))
         return self.mapping
 
     def collect_pdb_ids(self) -> list[str]:
@@ -187,7 +195,8 @@ class AF2Downloader:
     def save_mapping(self) -> None:
         print(f"Writing PDB-to-UniProt mapping to {self.config.mapping_file}...")
         self.config.mapping_file.parent.mkdir(parents=True, exist_ok=True)
-        self.config.mapping_file.write_text(json.dumps(self.mapping, indent=2, sort_keys=True), encoding="utf-8")
+        mapping = dict(sorted(self.mapping.items()))
+        self.config.mapping_file.write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
         print(f"Saved {len(self.mapping)} mapping records.")
 
     def load_mapping_file(self, mapping_file: Path) -> dict[str, str]:
@@ -253,6 +262,25 @@ class AF2Downloader:
             "sha256": self._sha256_bytes(content),
         }
         self._manifest_path(output_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    def _quarantine_orphan_structures(self, active_uniprot_ids: set[str]) -> None:
+        stale: list[Path] = []
+        active_names = {f"AF-{accession}.pdb" for accession in active_uniprot_ids}
+        for path in self.config.output_dir.glob("AF-*.pdb"):
+            if path.name not in active_names:
+                stale.append(path)
+                manifest = self._manifest_path(path)
+                if manifest.exists():
+                    stale.append(manifest)
+        if not stale:
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        quarantine_dir = self.config.output_dir / "_orphaned" / stamp
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        for path in stale:
+            if path.exists():
+                shutil.move(str(path), str(quarantine_dir / path.name))
+        self.safe_print(f"[warn] Moved {len(stale)} stale AlphaFold files to {quarantine_dir}. Pass --append to keep old files.")
 
     @staticmethod
     def _manifest_path(output_path: Path) -> Path:

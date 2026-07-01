@@ -215,6 +215,52 @@ def parse_sequence(parser: StructureParser, raw_path: str | Path) -> str | None:
     return parsed["sequence"] if parsed else None
 
 
+def load_processed_pdb_labels(processed_pdb_dir: Path, raw_pdb_file: Path) -> dict | None:
+    processed_path = find_processed_pdb_file(processed_pdb_dir, raw_pdb_file)
+    if processed_path is None:
+        return None
+    data = torch.load(processed_path, weights_only=False)
+    source_sha = data.get("source_sha256")
+    if source_sha and raw_pdb_file.exists() and source_sha != _file_sha256(raw_pdb_file):
+        raise RuntimeError(
+            f"Processed PDB labels are stale for {raw_pdb_file}: "
+            f"{processed_path} source_sha256 does not match the current raw structure."
+        )
+    if "pos" not in data or "y" not in data:
+        return None
+    sequence = data.get("sequence")
+    if not isinstance(sequence, str) or not sequence:
+        return None
+    coords = data["pos"]
+    if isinstance(coords, torch.Tensor):
+        coords = coords.detach().cpu().numpy()
+    labels = data["y"]
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu().numpy()
+    residue_ids = data.get("residue_ids") or [f"A_{index + 1}" for index in range(len(sequence))]
+    return {
+        "coords": np.asarray(coords, dtype=np.float32),
+        "labels": np.asarray(labels, dtype=np.float32),
+        "sequence": sequence,
+        "residue_ids": list(residue_ids),
+        "processed_pdb_path": str(processed_path),
+        "processed_pdb_sha256": _file_sha256(processed_path),
+    }
+
+
+def find_processed_pdb_file(processed_pdb_dir: Path, raw_pdb_file: Path) -> Path | None:
+    stems = []
+    stem = raw_pdb_file.stem
+    for candidate in (stem, stem.lower(), stem.upper()):
+        if candidate not in stems:
+            stems.append(candidate)
+    for stem_value in stems:
+        path = processed_pdb_dir / f"{stem_value}.pt"
+        if path.exists():
+            return path
+    return None
+
+
 def sequence_from_processed_or_raw(af2_data: dict, raw_sequence: str | None) -> str | None:
     processed_sequence = af2_data.get("sequence")
     if isinstance(processed_sequence, str) and processed_sequence:
@@ -227,6 +273,7 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
         raise FileNotFoundError(f"Mapping file not found: {config.mapping_file}")
     for label, directory in (
         ("processed AF2 directory", config.processed_af2_dir),
+        ("processed PDB directory", config.processed_pdb_dir),
         ("raw PDB directory", config.raw_pdb_dir),
         ("raw AF2 directory", config.raw_af2_dir),
     ):
@@ -307,7 +354,7 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
             provenance_records = []
 
             for raw_pdb_file in raw_pdb_files:
-                full_pdb_data = parser.parse_file_with_labels(raw_pdb_file, chain_id=None)
+                full_pdb_data = load_processed_pdb_labels(config.processed_pdb_dir, Path(raw_pdb_file))
                 if not full_pdb_data:
                     continue
 
@@ -347,6 +394,8 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
                     {
                         "raw_pdb_path": str(raw_pdb_file),
                         "raw_pdb_sha256": _file_sha256(Path(raw_pdb_file)),
+                        "processed_pdb_path": full_pdb_data.get("processed_pdb_path"),
+                        "processed_pdb_sha256": full_pdb_data.get("processed_pdb_sha256"),
                         "matched_chain_id": best_chain_data.get("chain_id"),
                         "chain_score": float(score),
                         "rmsd": float(rmsd),
@@ -390,6 +439,8 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
             else:
                 stats["skipped"] += 1
         except Exception as exc:
+            if "Processed PDB labels are stale" in str(exc):
+                raise
             stats["failed"] += 1
             if debug:
                 print(f"   [debug] Mapping failed: {exc}")

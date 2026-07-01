@@ -498,6 +498,25 @@ nav button:hover {
   font-size: 12px;
 }
 
+.pager {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid #d7dee2;
+  background: #ffffff;
+}
+
+.pager span {
+  color: #64747b;
+  font-size: 12px;
+  min-width: 92px;
+  text-align: center;
+}
+
 .warning-list {
   display: grid;
   gap: 6px;

@@ -68,6 +68,9 @@ The installer/bundle may include ProtCross-owned runtime assets:
 - `protcross-0.1.2-binding-moad-final.ckpt`
 - `pca_esmc_128_binding_moad_0.1.2.pkl`
 
+These assets are trained or fitted from ProtCross release workflows using
+ESM-C embeddings, but they do not contain or redistribute ESM-C model weights.
+
 ESM-C weights are not bundled. Users must explicitly confirm the ESM-C model
 license before downloading or importing:
 
@@ -162,10 +165,14 @@ cd desktop\frontend
 npm run tauri:release-build -- --bundles nsis
 cd ..\..
 desktop\installer\sign-installer.ps1 `
+  -AppExePath desktop\src-tauri\target\release\protcross-desktop.exe `
   -InstallerPath path\to\ProtCross-Setup-x64.exe `
   -CertificateThumbprint <thumbprint>
 desktop\installer\validate-release.ps1 `
-  -InstallerPath path\to\ProtCross-Setup-x64.exe
+  -InstallerPath path\to\ProtCross-Setup-x64.exe `
+  -RequireInstallerSignature `
+  -ValidateInstalledPackage `
+  -SkipLocalBackendTests
 ```
 
 macOS:

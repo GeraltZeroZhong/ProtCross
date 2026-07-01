@@ -449,12 +449,22 @@ def resolve_prediction_assets(
         "esm_weights": esm_label,
         "pca": pca_label,
     }
-
-    assets = (
-        PredictorAssets.from_dir(assets_dir, asset_version=asset_version)
-        if assets_dir
-        else PredictorAssets.from_default_dir(asset_version=asset_version)
-    )
+    all_assets_explicit = all(source == "user" for source in sources.values())
+    if all_assets_explicit:
+        bundle = get_asset_bundle(asset_version)
+        assert ckpt is not None and esm is not None and pca is not None
+        assets = PredictorAssets(
+            checkpoint=ckpt,
+            esm_weights=esm,
+            pca=pca,
+            asset_version=bundle.version,
+        )
+    else:
+        assets = (
+            PredictorAssets.from_dir(assets_dir, asset_version=asset_version)
+            if assets_dir
+            else PredictorAssets.from_default_dir(asset_version=asset_version)
+        )
 
     def fill_from_assets(*, require_exists: bool) -> None:
         nonlocal ckpt, esm, pca
@@ -534,7 +544,7 @@ def resolve_prediction_assets(
         esm_weights=esm,
         pca=pca,
         assets=assets,
-        asset_version=_resolved_asset_version(assets, sources),
+        asset_version=_resolved_asset_version(assets, ckpt, esm, pca, sources),
     )
 
 
@@ -656,10 +666,51 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _resolved_asset_version(assets: PredictorAssets, sources: dict[str, str | None]) -> str:
-    if any(source == "user" for source in sources.values()):
+def _resolved_asset_version(
+    assets: PredictorAssets,
+    ckpt: Path,
+    esm: Path,
+    pca: Path,
+    sources: dict[str, str | None],
+) -> str:
+    if any(source == "user" for source in sources.values()) and not _user_assets_match_selected_bundle(
+        assets,
+        ckpt,
+        esm,
+        pca,
+        sources,
+    ):
         return os.environ.get("PROTCROSS_ASSET_VERSION", "custom")
     return assets.asset_version
+
+
+def _user_assets_match_selected_bundle(
+    assets: PredictorAssets,
+    ckpt: Path,
+    esm: Path,
+    pca: Path,
+    sources: dict[str, str | None],
+) -> bool:
+    bundle = get_asset_bundle(assets.asset_version)
+    expected = {
+        "checkpoint": bundle.assets[1].sha256,
+        "esm_weights": bundle.assets[0].sha256,
+        "pca": bundle.assets[2].sha256,
+    }
+    paths = {"checkpoint": ckpt, "esm_weights": esm, "pca": pca}
+    for name, path in paths.items():
+        if sources.get(name) != "user":
+            continue
+        expected_sha = expected.get(name)
+        if not expected_sha or not path.exists():
+            return False
+        try:
+            actual_sha = sha256_file(path)
+        except Exception:
+            return False
+        if actual_sha != expected_sha:
+            return False
+    return True
 
 
 def _export_line(name: str, value: str | Path) -> str:
