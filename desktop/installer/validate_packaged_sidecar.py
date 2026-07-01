@@ -78,8 +78,6 @@ def _start_and_probe_sidecar(resource_dir: Path, python: str, timeout: float) ->
                 str(port),
                 "--root",
                 root,
-                "--token",
-                token,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

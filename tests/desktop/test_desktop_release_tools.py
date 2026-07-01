@@ -80,10 +80,20 @@ def test_validate_packaged_sidecar_accepts_resource_layout(tmp_path: Path):
 
 def test_frontend_release_build_prepares_generated_inputs():
     package_json = json.loads(Path("desktop/frontend/package.json").read_text(encoding="utf-8"))
+    tauri_config = json.loads(Path("desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
 
     assert "tauri:prepare-release" in package_json["scripts"]
     assert "prepare_release_inputs.py" in package_json["scripts"]["tauri:prepare-release"]
     assert package_json["scripts"]["tauri:release-build"].startswith("npm run tauri:prepare-release")
+    assert "cd desktop/frontend" in tauri_config["build"]["beforeBuildCommand"]
+    assert "cd ../frontend" in tauri_config["build"]["beforeBuildCommand"]
+
+
+def test_packaged_sidecar_smoke_uses_env_token_only():
+    validator = Path("desktop/installer/validate_packaged_sidecar.py").read_text(encoding="utf-8")
+
+    assert "PROTCROSS_DESKTOP_TOKEN" in validator
+    assert '"--token"' not in validator
 
 
 def test_windows_release_scripts_validate_signed_runtime_and_installed_package():
