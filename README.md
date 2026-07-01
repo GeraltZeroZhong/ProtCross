@@ -15,7 +15,7 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
 
 ## Quick Start
 
-### Recommended for new users: Desktop app
+### Desktop app
 
 Download ProtCross Desktop from the GitHub release page:
 
@@ -23,9 +23,11 @@ Download ProtCross Desktop from the GitHub release page:
 - macOS 12+: [ProtCross Desktop 0.2.0 DMG](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_macos.dmg)
 - Release page: [ProtCross v0.2.0](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.0)
 
-These links become active when the `v0.2.0` desktop release is published. If a
-direct file link is unavailable, open the release page and download the Windows
-installer or macOS DMG from the Assets section.
+The `v0.2.0` desktop artifacts are official ProtCross release assets, but the
+Windows and macOS installers are **unsigned testing builds**. Windows
+SmartScreen and macOS Gatekeeper may warn that the publisher cannot be verified.
+If a direct file link is unavailable, open the release page and download the
+Windows installer or macOS DMG from the Assets section.
 
 Desktop setup flow:
 

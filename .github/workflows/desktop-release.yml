@@ -1,0 +1,259 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update"
+        required: true
+        default: "v0.2.0"
+
+permissions:
+  contents: write
+
+env:
+  DESKTOP_VERSION: "0.2.0"
+
+jobs:
+  build-windows:
+    name: Build unsigned Windows installer
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install desktop release build tooling
+        run: |
+          python -m pip install --upgrade "pip==26.0.1"
+          python -m pip install -c constraints/py310-ci.txt build requests tqdm uv
+
+      - name: Frontend dependencies
+        working-directory: desktop/frontend
+        run: npm ci
+
+      - name: Build local ProtCross wheel for desktop runtime
+        run: python -m build --wheel --outdir dist
+
+      - name: Download desktop bundled assets
+        shell: bash
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "src")
+          from protcross.assets import DEFAULT_ASSET_BUNDLE, download_asset
+
+          for spec, out_dir in (
+              (DEFAULT_ASSET_BUNDLE.assets[1], Path("checkpoints")),
+              (DEFAULT_ASSET_BUNDLE.assets[2], Path("data")),
+          ):
+              download_asset(spec, out_dir / spec.filename, force=True, verify=True)
+          PY
+
+      - name: Prepare desktop bundled assets
+        shell: pwsh
+        run: .\desktop\installer\prepare_bundled_assets.ps1
+
+      - name: Prepare desktop runtime bundle
+        shell: bash
+        run: |
+          wheel="$(ls dist/protcross-*.whl | head -n 1)"
+          python desktop/installer/prepare_runtime_wheelhouse.py \
+            --runtime-dir desktop/runtime \
+            --backend cpu \
+            --local-protcross-wheel "$wheel"
+          python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend cpu
+
+      - name: Build unsigned NSIS installer
+        working-directory: desktop/frontend
+        run: npm run tauri:release-build -- --bundles nsis -- --locked
+
+      - name: Validate unsigned Windows installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "desktop/src-tauri/target" -Filter "*.exe" -Recurse |
+            Where-Object { $_.FullName -match "\\bundle\\nsis\\" } |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "NSIS installer not found after Tauri build."
+          }
+          .\desktop\installer\validate-release.ps1 `
+            -InstallerPath $installer.FullName `
+            -AcceptEsmLicenseForCi `
+            -ValidateInstalledPackage `
+            -SkipLocalBackendTests
+          New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
+          Copy-Item $installer.FullName "release-assets\ProtCross Desktop_${env:DESKTOP_VERSION}_x64-setup.exe" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: protcross-desktop-windows
+          path: release-assets/*
+          if-no-files-found: error
+
+  build-macos:
+    name: Build unsigned macOS DMG
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install desktop release build tooling
+        run: |
+          python -m pip install --upgrade "pip==26.0.1"
+          python -m pip install -c constraints/py310-ci.txt build requests tqdm uv
+
+      - name: Frontend dependencies
+        working-directory: desktop/frontend
+        run: npm ci
+
+      - name: Build local ProtCross wheel for desktop runtime
+        run: python -m build --wheel --outdir dist
+
+      - name: Download desktop bundled assets
+        shell: bash
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "src")
+          from protcross.assets import DEFAULT_ASSET_BUNDLE, download_asset
+
+          for spec, out_dir in (
+              (DEFAULT_ASSET_BUNDLE.assets[1], Path("checkpoints")),
+              (DEFAULT_ASSET_BUNDLE.assets[2], Path("data")),
+          ):
+              download_asset(spec, out_dir / spec.filename, force=True, verify=True)
+          PY
+
+      - name: Prepare desktop bundled assets
+        run: desktop/installer/prepare_bundled_assets.sh
+
+      - name: Prepare desktop runtime bundle
+        shell: bash
+        run: |
+          wheel="$(ls dist/protcross-*.whl | head -n 1)"
+          python desktop/installer/prepare_runtime_wheelhouse.py \
+            --runtime-dir desktop/runtime \
+            --backend cpu \
+            --local-protcross-wheel "$wheel"
+          python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend cpu
+
+      - name: Build unsigned DMG
+        working-directory: desktop/frontend
+        run: npm run tauri:release-build -- --bundles dmg -- --locked
+
+      - name: Validate packaged macOS sidecar resources
+        shell: bash
+        run: |
+          app_path="$(find desktop/src-tauri/target -path '*/bundle/macos/ProtCross Desktop.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "Built .app bundle not found" >&2
+            exit 1
+          fi
+          python desktop/installer/validate_packaged_sidecar.py \
+            --resource-dir "$app_path/Contents/Resources"
+
+      - name: Stage unsigned DMG
+        shell: bash
+        run: |
+          dmg_path="$(find desktop/src-tauri/target -path '*/bundle/dmg/*.dmg' -print -quit)"
+          if [[ -z "$dmg_path" ]]; then
+            echo "DMG not found after Tauri build." >&2
+            exit 1
+          fi
+          mkdir -p release-assets
+          cp "$dmg_path" "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: protcross-desktop-macos
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-24.04
+    needs:
+      - build-windows
+      - build-macos
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded-assets
+
+      - name: Prepare release assets and notes
+        run: |
+          mkdir -p release-assets
+          find downloaded-assets -type f \( -name "*.exe" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
+          test -f "release-assets/ProtCross Desktop_${DESKTOP_VERSION}_x64-setup.exe"
+          test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos.dmg"
+          (cd release-assets && sha256sum * > SHA256SUMS.txt)
+          cat > release-notes.md <<'MD'
+          # ProtCross Desktop 0.2.0
+
+          **Unsigned testing build.** These Windows and macOS desktop artifacts are official ProtCross release assets for the 0.2.0 desktop workflow, but they are not code-signed or notarized. Windows SmartScreen and macOS Gatekeeper may warn that the publisher cannot be verified.
+
+          ## Downloads
+
+          - Windows 10/11 x64: `ProtCross Desktop_0.2.0_x64-setup.exe`
+          - macOS 12+: `ProtCross_Desktop_0.2.0_macos.dmg`
+          - Checksums: `SHA256SUMS.txt`
+
+          ## What is included
+
+          - Tauri + React desktop interface.
+          - Mol* protein viewer with pocket center and residue table support.
+          - Local CPU prediction backend setup flow.
+          - Optional GPU or existing conda backend detection path.
+          - Bundled ProtCross checkpoint/PCA assets from the stable `0.1.2` asset bundle.
+
+          ESM-C weights are not bundled. Users must confirm the ESM-C license in the app and then download or import the ESM-C weights separately.
+          MD
+          ls -lh release-assets
+
+      - name: Create or update GitHub release
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "ProtCross Desktop ${DESKTOP_VERSION}" \
+              --notes-file release-notes.md \
+              --latest
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "ProtCross Desktop ${DESKTOP_VERSION}" \
+              --notes-file release-notes.md \
+              --latest
+            exit 0
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
