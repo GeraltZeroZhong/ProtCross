@@ -85,6 +85,7 @@ def test_frontend_release_build_prepares_generated_inputs():
     assert "tauri:prepare-release" in package_json["scripts"]
     assert "prepare_release_inputs.py" in package_json["scripts"]["tauri:prepare-release"]
     assert package_json["scripts"]["tauri:release-build"].startswith("npm run tauri:prepare-release")
+    assert "cd frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert "cd desktop/frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert "cd ../frontend" in tauri_config["build"]["beforeBuildCommand"]
 
