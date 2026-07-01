@@ -35,7 +35,7 @@
     "active": true,
     "targets": ["nsis", "app", "dmg"],
     "publisher": "ProtCross",
-    "category": "Science",
+    "category": "Education",
     "shortDescription": "Desktop binding-site prediction for protein structures.",
     "longDescription": "ProtCross Desktop provides Windows and macOS prediction workflows and molecular visualization for ProtCross binding-site outputs.",
     "windows": {

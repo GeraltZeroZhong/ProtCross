@@ -89,6 +89,7 @@ def test_frontend_release_build_prepares_generated_inputs():
     assert "cd frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert "cd desktop/frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert "cd ../frontend" in tauri_config["build"]["beforeBuildCommand"]
+    assert tauri_config["bundle"]["category"] == "Education"
 
 
 def test_packaged_sidecar_smoke_uses_env_token_only():
