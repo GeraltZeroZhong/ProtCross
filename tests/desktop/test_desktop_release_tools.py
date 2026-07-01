@@ -83,6 +83,8 @@ def test_frontend_release_build_prepares_generated_inputs():
     package_json = json.loads(Path("desktop/frontend/package.json").read_text(encoding="utf-8"))
     tauri_config = json.loads(Path("desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
     release_inputs = Path("desktop/installer/prepare_release_inputs.py").read_text(encoding="utf-8")
+    mac_sign_script = Path("desktop/installer/sign-notarize-macos.sh").read_text(encoding="utf-8")
+    mac_validate_script = Path("desktop/installer/validate-release-macos.sh").read_text(encoding="utf-8")
 
     assert "tauri:prepare-release" in package_json["scripts"]
     assert "prepare_release_inputs.py" in package_json["scripts"]["tauri:prepare-release"]
@@ -94,6 +96,21 @@ def test_frontend_release_build_prepares_generated_inputs():
     assert "cd desktop/frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert "cd ../frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert tauri_config["bundle"]["category"] == "Education"
+    assert "--backend cpu" in mac_sign_script
+    assert "--backend cpu" in mac_validate_script
+    assert "--backend all" not in mac_sign_script
+    assert "--backend all" not in mac_validate_script
+
+
+def test_readme_frontloads_desktop_download_links():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    quick_start = readme.split("## Table of Contents", 1)[0]
+
+    assert "### Recommended for new users: Desktop app" in quick_start
+    assert "https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross%20Desktop_0.2.0_x64-setup.exe" in quick_start
+    assert "https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_macos.dmg" in quick_start
+    assert quick_start.index("### Recommended for new users: Desktop app") < quick_start.index("### Command line")
+    assert "These links become active when the `v0.2.0` desktop release is published" in quick_start
 
 
 def test_packaged_sidecar_smoke_uses_env_token_only():

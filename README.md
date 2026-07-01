@@ -15,7 +15,28 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
 
 ## Quick Start
 
-Use this path when you only want to predict binding sites for one structure.
+### Recommended for new users: Desktop app
+
+Download ProtCross Desktop from the GitHub release page:
+
+- Windows 10/11 x64: [ProtCross Desktop 0.2.0 setup.exe](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross%20Desktop_0.2.0_x64-setup.exe)
+- macOS 12+: [ProtCross Desktop 0.2.0 DMG](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_macos.dmg)
+- Release page: [ProtCross v0.2.0](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.0)
+
+These links become active when the `v0.2.0` desktop release is published. If a
+direct file link is unavailable, open the release page and download the Windows
+installer or macOS DMG from the Assets section.
+
+Desktop setup flow:
+
+1. Install and launch ProtCross Desktop.
+2. Confirm the ESM-C license prompt. ESM-C weights are not bundled in the app.
+3. In Setup, install the CPU backend or choose GPU/MPS acceleration if needed.
+4. Download or import ESM-C weights when prompted.
+5. Select a PDB/mmCIF file and run prediction. Results include the annotated
+   structure, scores TSV, pockets JSON, and summary JSON.
+
+### Command line
 
 ```bash
 pip install "protcross[predict]"
@@ -54,10 +75,6 @@ Training a new release-style model uses the modern `protcross train`,
 commands. Paper-reproduction notes are documented in
 `reproduction/legacy/README.md`.
 
-Desktop GUI work for Windows and macOS is tracked under `desktop/` as the
-0.2.0 desktop release line. The app is a Tauri/React/Mol* frontend for
-prediction, batch prediction, asset setup, and local diagnostics; the
-command-line interface remains the maintained core API.
 CLI assets and Desktop assets are configured separately: CLI commands use the
 ProtCross cache or explicit `--checkpoint/--esm-weights/--pca` paths, while
 Desktop stores its manifest and user-selected assets under the app data folder.

@@ -34,7 +34,7 @@ done
 RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../runtime" && pwd)"
 INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-python "$INSTALLER_DIR/validate_runtime_bundle.py" --runtime-dir "$RUNTIME_DIR" --backend all
+python "$INSTALLER_DIR/validate_runtime_bundle.py" --runtime-dir "$RUNTIME_DIR" --backend cpu
 
 validate_app_assets() {
   local app_path="$1"

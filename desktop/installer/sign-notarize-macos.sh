@@ -68,7 +68,7 @@ if [[ -n "$APP_PATH" ]]; then
     printf "%s  %s\n" "$UV_SHA" "$(basename "$UV_PATH")" > "$APP_PATH/Contents/Resources/runtime/uv/uv.sha256"
   fi
   python "$SCRIPT_DIR/validate_bundled_assets.py" --assets-dir "$APP_PATH/Contents/Resources/bundled-assets"
-  python "$SCRIPT_DIR/validate_runtime_bundle.py" --runtime-dir "$APP_PATH/Contents/Resources/runtime" --backend all
+  python "$SCRIPT_DIR/validate_runtime_bundle.py" --runtime-dir "$APP_PATH/Contents/Resources/runtime" --backend cpu
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_PATH"
   codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 fi
@@ -104,7 +104,7 @@ if [[ -n "$DMG_PATH" ]]; then
   fi
   codesign --verify --deep --strict --verbose=2 "$INNER_APP"
   python "$SCRIPT_DIR/validate_bundled_assets.py" --assets-dir "$INNER_APP/Contents/Resources/bundled-assets"
-  python "$SCRIPT_DIR/validate_runtime_bundle.py" --runtime-dir "$INNER_APP/Contents/Resources/runtime" --backend all
+  python "$SCRIPT_DIR/validate_runtime_bundle.py" --runtime-dir "$INNER_APP/Contents/Resources/runtime" --backend cpu
   cleanup_mount
   trap - EXIT
 fi
