@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -100,6 +101,8 @@ def test_packaged_sidecar_smoke_uses_env_token_only():
 def test_windows_release_scripts_validate_signed_runtime_and_installed_package():
     sign_script = Path("desktop/installer/sign-installer.ps1").read_text(encoding="utf-8")
     validate_script = Path("desktop/installer/validate-release.ps1").read_text(encoding="utf-8")
+    cpu_installer = Path("desktop/runtime/install_cpu_backend.ps1").read_text(encoding="utf-8")
+    gpu_installer = Path("desktop/runtime/install_gpu_backend.ps1").read_text(encoding="utf-8")
 
     assert "uv\\uv.exe" in sign_script
     assert "uv.sha256" in sign_script
@@ -108,6 +111,9 @@ def test_windows_release_scripts_validate_signed_runtime_and_installed_package()
     assert "RequireInstallerSignature" in validate_script
     assert "validate_packaged_sidecar.py" in validate_script
     assert "install_cpu_backend.ps1" in validate_script
+    for script in (validate_script, cpu_installer, gpu_installer):
+        assert "${LASTEXITCODE}:" in script
+        assert "$LASTEXITCODE:" not in script
 
 
 def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
@@ -130,6 +136,28 @@ def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
     assert "dtolnay/rust-toolchain@1.88.0" in ci_workflow
     assert "tauri:release-build -- --bundles app -- --locked" in ci_workflow
     assert "tauri:release-build -- --bundles nsis -- --locked" in ci_workflow
+
+
+def test_tauri_lockfile_pins_release_compatible_family():
+    cargo_lock = Path("desktop/src-tauri/Cargo.lock").read_text(encoding="utf-8")
+
+    package_versions = {
+        name: version
+        for name, version in re.findall(
+            r'\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"',
+            cargo_lock,
+        )
+    }
+
+    assert package_versions["tauri"] == "2.2.0"
+    assert package_versions["tauri-build"] == "2.2.0"
+    assert package_versions["tauri-codegen"] == "2.2.0"
+    assert package_versions["tauri-macros"] == "2.2.0"
+    assert package_versions["tauri-plugin"] == "2.2.0"
+    assert package_versions["tauri-plugin-dialog"] == "2.2.0"
+    assert package_versions["tauri-plugin-fs"] == "2.2.0"
+    assert package_versions["tauri-runtime-wry"] == "2.3.0"
+    assert package_versions["tauri-utils"] == "2.4.0"
 
 
 def _make_runtime_bundle(root: Path) -> Path:
