@@ -257,6 +257,7 @@ jobs:
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
               --title "ProtCross Desktop ${DESKTOP_VERSION}" \
               --notes-file release-notes.md \
               --latest
