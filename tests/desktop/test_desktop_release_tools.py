@@ -113,6 +113,9 @@ def test_windows_release_scripts_validate_signed_runtime_and_installed_package()
 def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
     bundled_assets_script = Path("desktop/installer/prepare_bundled_assets.sh").read_text(encoding="utf-8")
     wheelhouse_script = Path("desktop/installer/prepare_runtime_wheelhouse.py").read_text(encoding="utf-8")
+    ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    cargo_toml = Path("desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8")
+    rust_toolchain = Path("rust-toolchain.toml").read_text(encoding="utf-8")
 
     assert "hashlib.sha256" in bundled_assets_script
     assert "sha256sum" not in bundled_assets_script
@@ -121,6 +124,12 @@ def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
     assert "--only-binary=:all:" not in wheelhouse_script
     assert "local_desktop_backend_wheel" in wheelhouse_script
     assert 'shutil.rmtree(package_dir / "build"' in wheelhouse_script
+    assert 'features = ["protocol-asset"]' in cargo_toml
+    assert 'channel = "1.88.0"' in rust_toolchain
+    assert "cargo +1.88.0 check --locked" in ci_workflow
+    assert "dtolnay/rust-toolchain@1.88.0" in ci_workflow
+    assert "tauri:release-build -- --bundles app -- --locked" in ci_workflow
+    assert "tauri:release-build -- --bundles nsis -- --locked" in ci_workflow
 
 
 def _make_runtime_bundle(root: Path) -> Path:
