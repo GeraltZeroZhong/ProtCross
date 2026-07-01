@@ -315,6 +315,9 @@ fn runtime_install_command(
             command.arg("-ProxyUrl").arg(proxy);
         }
         command.arg("-Wheelhouse").arg(runtime_dir.join("wheelhouse"));
+        if mode == "gpu" {
+            command.arg("-AllowOnlinePackageIndex");
+        }
         return Ok(command);
     }
     #[cfg(not(target_os = "windows"))]
@@ -329,6 +332,9 @@ fn runtime_install_command(
             command.arg("--proxy-url").arg(proxy);
         }
         command.arg("--wheelhouse").arg(runtime_dir.join("wheelhouse"));
+        if mode == "gpu" {
+            command.arg("--allow-online-package-index");
+        }
         Ok(command)
     }
 }

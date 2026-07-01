@@ -13,13 +13,19 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     repo_root = args.repo_root.resolve()
     _prepare_bundled_assets(repo_root)
-    _prepare_runtime_bundle(repo_root)
+    _prepare_runtime_bundle(repo_root, backend=args.runtime_backend)
     return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument(
+        "--runtime-backend",
+        choices=("cpu", "gpu", "all"),
+        default="cpu",
+        help="Runtime wheelhouse to prepare for packaging. Public installers bundle the CPU backend only.",
+    )
     return parser
 
 
@@ -48,10 +54,10 @@ def _prepare_bundled_assets(repo_root: Path) -> None:
         _run(["bash", str(prepare_script)])
 
 
-def _prepare_runtime_bundle(repo_root: Path) -> None:
+def _prepare_runtime_bundle(repo_root: Path, *, backend: str) -> None:
     runtime_dir = repo_root / "desktop" / "runtime"
     validator = repo_root / "desktop" / "installer" / "validate_runtime_bundle.py"
-    if _command_ok([sys.executable, str(validator), "--runtime-dir", str(runtime_dir), "--backend", "all"]):
+    if _command_ok([sys.executable, str(validator), "--runtime-dir", str(runtime_dir), "--backend", backend]):
         return
     wheel = _ensure_local_protcross_wheel(repo_root)
     _run(
@@ -61,12 +67,12 @@ def _prepare_runtime_bundle(repo_root: Path) -> None:
             "--runtime-dir",
             str(runtime_dir),
             "--backend",
-            "all",
+            backend,
             "--local-protcross-wheel",
             str(wheel),
         ]
     )
-    _run([sys.executable, str(validator), "--runtime-dir", str(runtime_dir), "--backend", "all"])
+    _run([sys.executable, str(validator), "--runtime-dir", str(runtime_dir), "--backend", backend])
 
 
 def _ensure_local_protcross_wheel(repo_root: Path) -> Path:

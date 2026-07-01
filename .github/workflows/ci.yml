@@ -227,9 +227,9 @@ jobs:
           wheel="$(ls dist/protcross-*.whl | head -n 1)"
           python desktop/installer/prepare_runtime_wheelhouse.py \
             --runtime-dir desktop/runtime \
-            --backend all \
+            --backend cpu \
             --local-protcross-wheel "$wheel"
-          python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend all
+          python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend cpu
 
       - name: Validate staged desktop sidecar resources
         shell: bash

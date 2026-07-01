@@ -2,9 +2,9 @@
 
 This directory contains the 0.2.0 desktop application scaffold for ProtCross
 Desktop. The first desktop release targets Windows 10/11 x64 and macOS 12+ on
-the architecture built by the release job. Separate Apple Silicon and Intel
-macOS artifacts require separate runtime wheelhouses. The app is focused on
-prediction workflows only.
+the architecture built by the release job. The public installer bundles the CPU
+runtime wheelhouse; accelerated GPU/MPS backends are installed on demand from
+fixed package versions. The app is focused on prediction workflows only.
 The desktop backend package is versioned as 0.2.0 and currently pins the core
 Python package to `protcross==0.1.3`.
 
@@ -55,11 +55,13 @@ release builds must provide a signed/hashed app-local Python bootstrapper such
 as `runtime/uv/uv` or `runtime/uv/uv.exe`; the scripts do not download or
 execute remote bootstrap installers.
 
-Release dependency installation must use a bundled wheelhouse plus
-`requirements-cpu.hashes` and `requirements-gpu.hashes`, generated for the
-target platform. Online package-index installation is available only for
-development by explicitly passing `--allow-online-package-index` or
-`-AllowOnlinePackageIndex`.
+Release dependency installation bundles a hash-locked CPU wheelhouse plus
+`requirements-cpu.hashes`, generated for the target platform. GPU acceleration
+is optional and downloads fixed PyTorch backend versions only after the user
+explicitly chooses GPU/MPS setup. CUDA wheels are not bundled in the public
+Windows installer because they make the NSIS package very large and unreliable
+to build. Full offline GPU wheelhouses can still be prepared for internal
+testing, but they are not the default public release path.
 
 ## Asset Policy
 
@@ -134,8 +136,10 @@ desktop/runtime/test_backend.sh --backend cpu
 
 Use `-ProxyUrl` on Windows or `--proxy-url` on macOS when installing behind a
 proxy.
-For local development without a release wheelhouse, pass
+For local development without a CPU release wheelhouse, pass
 `-AllowOnlinePackageIndex` or `--allow-online-package-index` intentionally.
+The desktop UI passes that online-install flag when the user explicitly starts
+GPU/MPS backend setup.
 
 Existing conda environments are read-only from ProtCross Desktop. The app tests
 imports and acceleration availability, but it does not install, remove, or
@@ -150,9 +154,9 @@ desktop/installer/prepare_bundled_assets.sh
 python -m build --wheel --outdir dist
 python desktop/installer/prepare_runtime_wheelhouse.py \
   --runtime-dir desktop/runtime \
-  --backend all \
+  --backend cpu \
   --local-protcross-wheel dist/protcross-0.1.3-py3-none-any.whl
-python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend all
+python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend cpu
 python desktop/installer/validate_packaged_sidecar.py \
   --resource-dir <packaged-or-staged-resource-dir>
 ```

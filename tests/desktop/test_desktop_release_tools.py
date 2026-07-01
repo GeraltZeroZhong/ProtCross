@@ -82,10 +82,14 @@ def test_validate_packaged_sidecar_accepts_resource_layout(tmp_path: Path):
 def test_frontend_release_build_prepares_generated_inputs():
     package_json = json.loads(Path("desktop/frontend/package.json").read_text(encoding="utf-8"))
     tauri_config = json.loads(Path("desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+    release_inputs = Path("desktop/installer/prepare_release_inputs.py").read_text(encoding="utf-8")
 
     assert "tauri:prepare-release" in package_json["scripts"]
     assert "prepare_release_inputs.py" in package_json["scripts"]["tauri:prepare-release"]
+    assert "validate_runtime_bundle.py --runtime-dir ../runtime --backend cpu" in package_json["scripts"]["tauri:preflight"]
     assert package_json["scripts"]["tauri:release-build"].startswith("npm run tauri:prepare-release")
+    assert 'default="cpu"' in release_inputs
+    assert "Public installers bundle the CPU backend only" in release_inputs
     assert "cd frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert "cd desktop/frontend" in tauri_config["build"]["beforeBuildCommand"]
     assert "cd ../frontend" in tauri_config["build"]["beforeBuildCommand"]
@@ -104,6 +108,7 @@ def test_windows_release_scripts_validate_signed_runtime_and_installed_package()
     validate_script = Path("desktop/installer/validate-release.ps1").read_text(encoding="utf-8")
     cpu_installer = Path("desktop/runtime/install_cpu_backend.ps1").read_text(encoding="utf-8")
     gpu_installer = Path("desktop/runtime/install_gpu_backend.ps1").read_text(encoding="utf-8")
+    tauri_main = Path("desktop/src-tauri/src/main.rs").read_text(encoding="utf-8")
 
     assert "uv\\uv.exe" in sign_script
     assert "uv.sha256" in sign_script
@@ -115,6 +120,8 @@ def test_windows_release_scripts_validate_signed_runtime_and_installed_package()
     for script in (validate_script, cpu_installer, gpu_installer):
         assert "${LASTEXITCODE}:" in script
         assert "$LASTEXITCODE:" not in script
+    assert '"-AllowOnlinePackageIndex"' in tauri_main
+    assert '"--allow-online-package-index"' in tauri_main
 
 
 def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
@@ -135,6 +142,7 @@ def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
     assert 'channel = "1.88.0"' in rust_toolchain
     assert "cargo +1.88.0 check --locked" in ci_workflow
     assert "dtolnay/rust-toolchain@1.88.0" in ci_workflow
+    assert "--backend cpu" in ci_workflow
     assert "tauri:release-build -- --bundles app -- --locked" in ci_workflow
     assert "tauri:release-build -- --bundles nsis -- --locked" in ci_workflow
 
