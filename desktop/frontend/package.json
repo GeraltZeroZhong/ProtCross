@@ -15,8 +15,8 @@
     "tauri:release-build": "npm run tauri:prepare-release && npm run tauri:preflight && cd ../src-tauri && tauri build"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.2.0",
-    "@tauri-apps/plugin-dialog": "2.2.0",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.1",
     "molstar": "4.11.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"
@@ -24,7 +24,7 @@
   "devDependencies": {
     "@types/react": "18.3.18",
     "@types/react-dom": "18.3.5",
-    "@tauri-apps/cli": "2.2.0",
+    "@tauri-apps/cli": "2.11.4",
     "@vitejs/plugin-react": "4.3.4",
     "typescript": "5.7.3",
     "vite": "6.4.3"

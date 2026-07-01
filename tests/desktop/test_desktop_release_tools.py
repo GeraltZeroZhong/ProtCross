@@ -140,6 +140,7 @@ def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
 
 def test_tauri_lockfile_pins_release_compatible_family():
     cargo_lock = Path("desktop/src-tauri/Cargo.lock").read_text(encoding="utf-8")
+    package_json = json.loads(Path("desktop/frontend/package.json").read_text(encoding="utf-8"))
 
     package_versions = {
         name: version
@@ -149,18 +150,21 @@ def test_tauri_lockfile_pins_release_compatible_family():
         )
     }
 
-    assert package_versions["tauri"] == "2.2.0"
-    assert package_versions["tauri-build"] == "2.2.0"
-    assert package_versions["tauri-codegen"] == "2.2.0"
-    assert package_versions["tauri-macros"] == "2.2.0"
-    assert package_versions["tauri-plugin"] == "2.2.0"
-    assert package_versions["tauri-plugin-dialog"] == "2.2.0"
-    assert package_versions["tauri-plugin-fs"] == "2.2.0"
-    assert package_versions["tauri-runtime"] == "2.6.0"
-    assert package_versions["tauri-runtime-wry"] == "2.6.0"
-    assert package_versions["tauri-utils"] == "2.4.0"
-    assert package_versions["time"] == "0.3.47"
-    assert package_versions["time-macros"] == "0.2.27"
+    assert package_versions["tauri"] == "2.11.4"
+    assert package_versions["tauri-build"] == "2.6.3"
+    assert package_versions["tauri-codegen"] == "2.6.3"
+    assert package_versions["tauri-macros"] == "2.6.3"
+    assert package_versions["tauri-plugin"] == "2.6.3"
+    assert package_versions["tauri-plugin-dialog"] == "2.7.1"
+    assert package_versions["tauri-plugin-fs"] == "2.5.1"
+    assert package_versions["tauri-runtime"] == "2.11.3"
+    assert package_versions["tauri-runtime-wry"] == "2.11.4"
+    assert package_versions["tauri-utils"] == "2.9.3"
+    assert package_versions["time"] == "0.3.51"
+    assert package_versions["time-macros"] == "0.2.30"
+    assert package_json["dependencies"]["@tauri-apps/api"] == "2.11.1"
+    assert package_json["dependencies"]["@tauri-apps/plugin-dialog"] == "2.7.1"
+    assert package_json["devDependencies"]["@tauri-apps/cli"] == "2.11.4"
 
 
 def _make_runtime_bundle(root: Path) -> Path:
