@@ -169,12 +169,18 @@ def test_tauri_lockfile_pins_release_compatible_family():
 
 
 def test_tauri_default_icon_exists_for_generate_context():
-    icon = Path("desktop/src-tauri/icons/icon.png")
+    png_icon = Path("desktop/src-tauri/icons/icon.png")
+    windows_icon = Path("desktop/src-tauri/icons/icon.ico")
 
-    assert icon.exists()
-    data = icon.read_bytes()
-    assert data.startswith(b"\x89PNG\r\n\x1a\n")
-    assert data[12:16] == b"IHDR"
+    assert png_icon.exists()
+    png_data = png_icon.read_bytes()
+    assert png_data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert png_data[12:16] == b"IHDR"
+
+    assert windows_icon.exists()
+    ico_data = windows_icon.read_bytes()
+    assert ico_data[:6] == b"\x00\x00\x01\x00\x01\x00"
+    assert ico_data[22:].startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def _make_runtime_bundle(root: Path) -> Path:
