@@ -170,9 +170,21 @@ jobs:
       - name: Validate packaged macOS sidecar resources
         shell: bash
         run: |
-          app_path="$(find desktop/src-tauri/target -path '*/bundle/macos/ProtCross Desktop.app' -print -quit)"
+          dmg_path="$(find desktop/src-tauri/target -path '*/bundle/dmg/*.dmg' -print -quit)"
+          if [[ -z "$dmg_path" ]]; then
+            echo "DMG not found after Tauri build." >&2
+            exit 1
+          fi
+          mount_dir="$(mktemp -d)"
+          cleanup_mount() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rmdir "$mount_dir" >/dev/null 2>&1 || true
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null
+          app_path="$(find "$mount_dir" -maxdepth 1 -name '*.app' -print -quit)"
           if [[ -z "$app_path" ]]; then
-            echo "Built .app bundle not found" >&2
+            echo "No .app bundle found inside DMG: $dmg_path" >&2
             exit 1
           fi
           python desktop/installer/validate_packaged_sidecar.py \

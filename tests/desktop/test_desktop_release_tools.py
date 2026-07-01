@@ -110,7 +110,8 @@ def test_readme_frontloads_desktop_download_links():
     assert "https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross%20Desktop_0.2.0_x64-setup.exe" in quick_start
     assert "https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_macos.dmg" in quick_start
     assert quick_start.index("### Recommended for new users: Desktop app") < quick_start.index("### Command line")
-    assert "These links become active when the `v0.2.0` desktop release is published" in quick_start
+    assert "official ProtCross release assets" in quick_start
+    assert "unsigned testing builds" in quick_start
 
 
 def test_packaged_sidecar_smoke_uses_env_token_only():

@@ -15,7 +15,7 @@ to improve robustness when transferring from PDB (source domain) to AF2 (target 
 
 ## Quick Start
 
-### Desktop app
+### Recommended for new users: Desktop app
 
 Download ProtCross Desktop from the GitHub release page:
 
