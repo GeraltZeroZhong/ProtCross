@@ -139,7 +139,7 @@ protcross predict input.pdb \
 ### 2.1 System Requirements
 
 - Linux (recommended) or WSL2
-- Python 3.10. The 0.1.3 wheel metadata is intentionally limited to Python
+- Python 3.10. The 0.2.0 wheel metadata is intentionally limited to Python
   3.10 because the release test matrix and PyTorch/Torch Geometric stack are
   locked there.
 - Conda (Miniconda or Anaconda)
@@ -593,6 +593,15 @@ ProtCross/
 ---
 
 ## 7. Changelog
+
+### 0.2.0
+
+Desktop and user-facing prediction release.
+
+- Adds ProtCross Desktop release assets for Windows and macOS with Mol* structure visualization, local prediction setup, batch-oriented workflow foundations, and diagnostics.
+- Keeps desktop ESM-C weights outside the installer; users must confirm the ESM-C license before downloading or importing weights.
+- Publishes unsigned desktop testing builds as official `v0.2.0` release assets and documents Windows SmartScreen/macOS Gatekeeper warnings.
+- Promotes the improved prediction result package and downstream metadata workflow to the `0.2.0` PyPI package.
 
 ### 0.1.3
 

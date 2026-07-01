@@ -6,7 +6,7 @@ the architecture built by the release job. The public installer bundles the CPU
 runtime wheelhouse; accelerated GPU/MPS backends are installed on demand from
 fixed package versions. The app is focused on prediction workflows only.
 The desktop backend package is versioned as 0.2.0 and currently pins the core
-Python package to `protcross==0.1.3`.
+Python package to `protcross==0.2.0`.
 
 ## Product Boundaries
 
@@ -155,7 +155,7 @@ python -m build --wheel --outdir dist
 python desktop/installer/prepare_runtime_wheelhouse.py \
   --runtime-dir desktop/runtime \
   --backend cpu \
-  --local-protcross-wheel dist/protcross-0.1.3-py3-none-any.whl
+  --local-protcross-wheel dist/protcross-0.2.0-py3-none-any.whl
 python desktop/installer/validate_runtime_bundle.py --runtime-dir desktop/runtime --backend cpu
 python desktop/installer/validate_packaged_sidecar.py \
   --resource-dir <packaged-or-staged-resource-dir>

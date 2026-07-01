@@ -222,9 +222,9 @@ def _make_runtime_bundle(root: Path) -> Path:
     uv_dir = runtime_dir / "uv"
     wheelhouse.mkdir(parents=True)
     uv_dir.mkdir(parents=True)
-    (runtime_dir / "requirements-common.lock").write_text("protcross==0.1.3\n", encoding="utf-8")
+    (runtime_dir / "requirements-common.lock").write_text("protcross==0.2.0\n", encoding="utf-8")
     wheels = {
-        "protcross": wheelhouse / "protcross-0.1.3-py3-none-any.whl",
+        "protcross": wheelhouse / "protcross-0.2.0-py3-none-any.whl",
         "protcross-desktop-backend": wheelhouse / "protcross_desktop_backend-0.2.0-py3-none-any.whl",
         "torch": wheelhouse / "torch-2.3.1-cp310-cp310-win_amd64.whl",
     }
@@ -234,7 +234,7 @@ def _make_runtime_bundle(root: Path) -> Path:
         (runtime_dir / f"requirements-{backend}.hashes").write_text(
             "\n".join(
                 [
-                    f"protcross==0.1.3 --hash=sha256:{_sha256(wheels['protcross'])}",
+                    f"protcross==0.2.0 --hash=sha256:{_sha256(wheels['protcross'])}",
                     (
                         "protcross-desktop-backend==0.2.0 "
                         f"--hash=sha256:{_sha256(wheels['protcross-desktop-backend'])}"
