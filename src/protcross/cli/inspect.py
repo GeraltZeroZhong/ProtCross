@@ -6,8 +6,8 @@ import argparse
 import json
 import sys
 
-from protcross.data.inspection import format_structure_inspection, inspect_structure
-from protcross.data.structure import MAX_ESM_RESIDUES
+
+MAX_ESM_RESIDUES = 1022
 
 
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
@@ -30,6 +30,8 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
     args = build_parser(prog=prog).parse_args(argv)
+    from protcross.data.inspection import format_structure_inspection, inspect_structure
+
     try:
         inspection = inspect_structure(args.input_structure, chain_id=args.chain_id, max_len=args.max_len)
     except Exception as exc:
