@@ -6,20 +6,76 @@ on:
       tag:
         description: "Release tag to create or update"
         required: true
-        default: "v0.2.0"
+        default: "v0.2.1"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.tag }}
+  cancel-in-progress: false
 
 env:
-  DESKTOP_VERSION: "0.2.0"
+  DESKTOP_VERSION: "0.2.1"
 
 jobs:
+  validate-input:
+    name: Validate release tag and versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require the canonical 0.2.1 tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          test "$RELEASE_TAG" = "v${DESKTOP_VERSION}" || {
+            echo "Expected release tag v${DESKTOP_VERSION}, got $RELEASE_TAG" >&2
+            exit 1
+          }
+          case "$WORKFLOW_REF" in
+            "refs/heads/$DEFAULT_BRANCH"|"refs/tags/$RELEASE_TAG") ;;
+            *)
+              echo "Release workflow must run from $DEFAULT_BRANCH or $RELEASE_TAG, got $WORKFLOW_REF" >&2
+              exit 1
+              ;;
+          esac
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "Checkout commit does not match workflow commit $GITHUB_SHA" >&2
+            exit 1
+          }
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+            test "$tag_commit" = "$GITHUB_SHA" || {
+              echo "Existing tag $RELEASE_TAG points to $tag_commit, not $GITHUB_SHA" >&2
+              exit 1
+            }
+          fi
+          python desktop/installer/validate_version_consistency.py --repo-root . --expected-version "$DESKTOP_VERSION"
+
   build-windows:
     name: Build unsigned Windows installer
     runs-on: windows-2022
+    needs: validate-input
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Windows build commit and existing tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -91,7 +147,6 @@ jobs:
           }
           .\desktop\installer\validate-release.ps1 `
             -InstallerPath $installer.FullName `
-            -AcceptEsmLicenseForCi `
             -ValidateInstalledPackage `
             -SkipLocalBackendTests
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
@@ -104,10 +159,26 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    name: Build unsigned macOS DMG
-    runs-on: macos-14
+    name: Build unsigned macOS Apple Silicon DMG
+    runs-on: macos-15
+    needs: validate-input
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify macOS build commit and existing tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
+          fi
+
+      - name: Assert Apple Silicon release runner
+        run: test "$(uname -m)" = "arm64"
 
       - uses: actions/setup-node@v4
         with:
@@ -190,7 +261,7 @@ jobs:
           python desktop/installer/validate_packaged_sidecar.py \
             --resource-dir "$app_path/Contents/Resources"
 
-      - name: Stage unsigned DMG
+      - name: Stage unsigned Apple Silicon DMG
         shell: bash
         run: |
           dmg_path="$(find desktop/src-tauri/target -path '*/bundle/dmg/*.dmg' -print -quit)"
@@ -199,7 +270,7 @@ jobs:
             exit 1
           fi
           mkdir -p release-assets
-          cp "$dmg_path" "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos.dmg"
+          cp "$dmg_path" "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos-aarch64.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -210,6 +281,8 @@ jobs:
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     needs:
       - build-windows
       - build-macos
@@ -218,6 +291,20 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify publish commit and existing tag
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+            test "$tag_commit" = "$GITHUB_SHA" || {
+              echo "Refusing to publish: $RELEASE_TAG points to $tag_commit, not $GITHUB_SHA" >&2
+              exit 1
+            }
+          fi
 
       - uses: actions/download-artifact@v4
         with:
@@ -228,29 +315,29 @@ jobs:
           mkdir -p release-assets
           find downloaded-assets -type f \( -name "*.exe" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
           test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_x64-setup.exe"
-          test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos.dmg"
+          test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos-aarch64.dmg"
           (cd release-assets && sha256sum * > SHA256SUMS.txt)
-          cat > release-notes.md <<'MD'
-          # ProtCross Desktop 0.2.0
+          cat > release-notes.txt <<'NOTES'
+          # ProtCross Desktop 0.2.1
 
-          **Unsigned testing build.** These Windows and macOS desktop artifacts are official ProtCross release assets for the 0.2.0 desktop workflow, but they are not code-signed or notarized. Windows SmartScreen and macOS Gatekeeper may warn that the publisher cannot be verified.
+          **Unsigned pre-release testing build.** These Windows and macOS desktop artifacts exercise the 0.2.1 desktop workflow, but they are not code-signed or notarized. Windows SmartScreen and macOS Gatekeeper may block or warn about them. Do not treat these artifacts as production installers.
 
           ## Downloads
 
-          - Windows 10/11 x64: `ProtCross_Desktop_0.2.0_x64-setup.exe`
-          - macOS 12+: `ProtCross_Desktop_0.2.0_macos.dmg`
+          - Windows 10/11 x64: `ProtCross_Desktop_0.2.1_x64-setup.exe`
+          - macOS 12+ on Apple Silicon (arm64): `ProtCross_Desktop_0.2.1_macos-aarch64.dmg`
           - Checksums: `SHA256SUMS.txt`
 
           ## What is included
 
           - Tauri + React desktop interface.
-          - Mol* protein viewer with pocket center and residue table support.
+          - Mol* protein viewer with predicted-residue cluster selection, score-weighted Cα centroids, and residue tables.
           - Local CPU prediction backend setup flow.
           - Optional GPU or existing conda backend detection path.
           - Bundled ProtCross checkpoint/PCA assets from the stable `0.1.2` asset bundle.
 
           ESM-C weights are not bundled. Users must confirm the ESM-C license in the app and then download or import the ESM-C weights separately.
-          MD
+          NOTES
           ls -lh release-assets
 
       - name: Create or update GitHub release
@@ -259,14 +346,24 @@ jobs:
             gh release edit "$RELEASE_TAG" \
               --target "$GITHUB_SHA" \
               --title "ProtCross Desktop ${DESKTOP_VERSION}" \
-              --notes-file release-notes.md \
-              --latest
+              --notes-file release-notes.txt \
+              --prerelease \
+              --latest=false
           else
             gh release create "$RELEASE_TAG" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "ProtCross Desktop ${DESKTOP_VERSION}" \
-              --notes-file release-notes.md \
-              --latest
+              --notes-file release-notes.txt \
+              --prerelease
             exit 0
           fi
           gh release upload "$RELEASE_TAG" release-assets/* --clobber
+
+      - name: Verify published tag target
+        run: |
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$tag_commit" = "$GITHUB_SHA" || {
+            echo "Published tag $RELEASE_TAG points to $tag_commit, not $GITHUB_SHA" >&2
+            exit 1
+          }

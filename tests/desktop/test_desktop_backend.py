@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import http.client
@@ -14,7 +15,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "desktop" / "backend"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "desktop" / "installer"))
 
-from protcross.assets import AssetSpec, sha256_file
+from protcross.assets import AssetSpec, DownloadCancelled, sha256_file
+from protcross import __version__
 import protcross_desktop.config as desktop_config
 import protcross_desktop.manifest as desktop_manifest
 import protcross_desktop.service as desktop_service
@@ -22,6 +24,47 @@ from protcross_desktop.config import DesktopPaths
 from protcross_desktop.server import create_server
 from protcross_desktop.service import DesktopBackend
 from validate_bundled_assets import validate_bundled_assets
+
+
+MINIMAL_PDB = (
+    "HEADER    TEST STRUCTURE\n"
+    "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 20.00           C  \n"
+    "END\n"
+)
+
+
+def test_desktop_manifest_recovers_corrupt_json(tmp_path):
+    manifest_path = tmp_path / "desktop-assets.json"
+    manifest_path.write_text("{truncated", encoding="utf-8")
+
+    manifest = desktop_manifest.DesktopManifest.load(manifest_path)
+
+    assert not manifest_path.exists()
+    quarantined = list(tmp_path.glob("desktop-assets.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert manifest.extra["recovered_corrupt_manifest"] == str(quarantined[0])
+
+
+def test_desktop_status_exposes_active_work_and_prunes_finished_history(tmp_path):
+    backend = DesktopBackend(root=tmp_path)
+    active = desktop_service.AssetDownloadJob("active", "esm.pth", 100, status="running")
+    backend._asset_downloads[active.id] = active
+    for index in range(desktop_service.MAX_RETAINED_FINISHED_JOBS + 5):
+        job = desktop_service.AssetDownloadJob(
+            f"done-{index}",
+            "esm.pth",
+            100,
+            status="completed",
+            completed_at=float(index),
+        )
+        backend._asset_downloads[job.id] = job
+
+    with backend._lock:
+        backend._prune_finished_jobs_locked(backend._asset_downloads)
+    status = backend.status()
+
+    assert len(backend._asset_downloads) == desktop_service.MAX_RETAINED_FINISHED_JOBS + 1
+    assert any(job["id"] == "active" for job in status["activity"]["asset_downloads"])
 
 
 class FakeResult:
@@ -46,7 +89,7 @@ class FakeResult:
 
     def to_summary_dict(self):
         return {
-            "schema_version": "protcross-summary-v1",
+            "schema_version": "protcross-summary-v2",
             "input_structure": self.input_path,
             "top_pocket": {
                 "center": [1.0, 2.0, 3.0],
@@ -59,7 +102,7 @@ class FakeResult:
 
     def to_pocket_dict(self):
         return {
-            "schema_version": "protcross-pocket-v1",
+            "schema_version": "protcross-pocket-v2",
             "clustered_pockets": [
                 {
                     "cluster_id": 1,
@@ -68,8 +111,20 @@ class FakeResult:
                     "score_mean": 0.75,
                     "score_max": 0.9,
                     "residues": [
-                        {"residue_id": "A_10", "chain_id": "A", "residue_number": 10, "probability": 0.9},
-                        {"residue_id": "A_11", "chain_id": "A", "residue_number": 11, "probability": 0.8},
+                        {
+                            "residue_id": "A_10",
+                            "chain_id": "A",
+                            "residue_number": 10,
+                            "score": 0.9,
+                            "probability": 0.9,
+                        },
+                        {
+                            "residue_id": "A_11",
+                            "chain_id": "A",
+                            "residue_number": 11,
+                            "score": 0.8,
+                            "probability": 0.8,
+                        },
                     ],
                 }
             ],
@@ -120,10 +175,21 @@ def _ready_backend(tmp_path, monkeypatch, predictor_factory=None):
     backend.manifest.backend_test_ok = True
     backend.manifest.backend_test_mode = "conda"
     backend.manifest.backend_test_python = sys.executable
+    backend.manifest.backend_test_package_version = __version__
     backend.manifest.save(backend.paths.manifest_path)
     input_pdb = tmp_path / "input.pdb"
-    input_pdb.write_text("HEADER\n", encoding="utf-8")
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
     return backend, input_pdb, factory_calls
+
+
+def _wait_for_asset_download(backend, job_id, terminal_statuses, timeout=3.0):
+    deadline = time.time() + timeout
+    status = backend.esm_download_status(job_id)
+    while status["status"] not in terminal_statuses and time.time() < deadline:
+        time.sleep(0.01)
+        status = backend.esm_download_status(job_id)
+    assert status["status"] in terminal_statuses, status
+    return status
 
 
 def test_esm_import_requires_license_confirmation(tmp_path):
@@ -141,12 +207,125 @@ def test_license_and_import_write_manifest(tmp_path):
     esm_path.write_bytes(b"esm")
 
     backend.confirm_esm_license()
+    backend.manifest.esm_expected_sha256 = sha256_file(esm_path)
     status = backend.import_esm_weights(esm_path)
 
     assert status["present"] is True
     assert backend.paths.manifest_path.exists()
     assert backend.manifest.esm_license_confirmed is True
     assert backend.manifest.esm_source == "imported"
+
+
+def test_async_esm_download_reports_progress_deduplicates_and_completes(tmp_path, monkeypatch):
+    payload = b"verified-esm-weights"
+    digest = hashlib.sha256(payload).hexdigest()
+    entered = threading.Event()
+    release = threading.Event()
+    original_assets = desktop_service.DEFAULT_ASSETS
+    monkeypatch.setattr(
+        desktop_service,
+        "DEFAULT_ASSETS",
+        (
+            AssetSpec("esm", desktop_service.ESM_FILENAME, "https://example.invalid/esm", digest, len(payload)),
+            *original_assets[1:],
+        ),
+    )
+    monkeypatch.setattr(desktop_service, "ESM_EXPECTED_SHA256", digest)
+
+    def fake_download(
+        spec,
+        output_path,
+        *,
+        force=False,
+        verify=True,
+        progress_callback=None,
+        cancel_event=None,
+    ):
+        assert spec.sha256 == digest
+        assert force is False
+        assert verify is True
+        assert cancel_event is not None
+        progress_callback(4, len(payload))
+        entered.set()
+        assert release.wait(timeout=2)
+        output_path.write_bytes(payload)
+        progress_callback(len(payload), len(payload))
+
+    monkeypatch.setattr(desktop_service, "download_asset", fake_download)
+    backend = DesktopBackend(root=tmp_path)
+    backend.manifest.esm_expected_sha256 = digest
+    backend.confirm_esm_license()
+
+    started = backend.start_esm_download()
+    assert entered.wait(timeout=2)
+    running = backend.esm_download_status(started["id"])
+    duplicate = backend.start_esm_download()
+
+    assert running["status"] == "running"
+    assert running["downloaded_bytes"] == 4
+    assert running["total_bytes"] == len(payload)
+    assert duplicate["id"] == started["id"]
+
+    release.set()
+    completed = _wait_for_asset_download(backend, started["id"], {"completed"})
+
+    assert completed["downloaded_bytes"] == len(payload)
+    assert completed["percent"] == 100.0
+    assert backend.paths.managed_esm_weights.read_bytes() == payload
+    assert backend.manifest.esm_source == "downloaded"
+    assert backend.manifest.esm_verified is True
+
+
+def test_async_esm_download_can_cancel_and_retains_partial_file(tmp_path, monkeypatch):
+    entered = threading.Event()
+    original_assets = desktop_service.DEFAULT_ASSETS
+    monkeypatch.setattr(
+        desktop_service,
+        "DEFAULT_ASSETS",
+        (
+            AssetSpec(
+                "esm",
+                desktop_service.ESM_FILENAME,
+                "https://example.invalid/esm",
+                "0" * 64,
+                12,
+            ),
+            *original_assets[1:],
+        ),
+    )
+
+    def cancellable_download(
+        spec,
+        output_path,
+        *,
+        force=False,
+        verify=True,
+        progress_callback=None,
+        cancel_event=None,
+    ):
+        partial = output_path.with_suffix(output_path.suffix + ".part")
+        partial.write_bytes(b"partial")
+        progress_callback(partial.stat().st_size, spec.size_bytes)
+        entered.set()
+        assert cancel_event.wait(timeout=2)
+        raise DownloadCancelled("cancelled for test")
+
+    monkeypatch.setattr(desktop_service, "download_asset", cancellable_download)
+    backend = DesktopBackend(root=tmp_path)
+    backend.confirm_esm_license()
+
+    started = backend.start_esm_download()
+    assert entered.wait(timeout=2)
+    cancelling = backend.cancel_esm_download(started["id"])
+    cancelled = _wait_for_asset_download(backend, started["id"], {"cancelled"})
+
+    assert cancelling["status"] == "cancelling"
+    assert cancelled["downloaded_bytes"] == len(b"partial")
+    assert cancelled["error"] is None
+    assert backend.paths.managed_esm_weights.exists() is False
+    assert backend.paths.managed_esm_weights.with_suffix(
+        backend.paths.managed_esm_weights.suffix + ".part"
+    ).read_bytes() == b"partial"
 
 
 def test_wrong_esm_hash_does_not_mark_assets_ready(tmp_path):
@@ -158,12 +337,13 @@ def test_wrong_esm_hash_does_not_mark_assets_ready(tmp_path):
     esm_path.write_bytes(b"not-the-release-weight")
 
     backend.confirm_esm_license()
-    backend.import_esm_weights(esm_path)
+    with pytest.raises(ValueError, match="SHA256"):
+        backend.import_esm_weights(esm_path)
     backend.configure_backend("cpu")
 
     status = backend.asset_status()
-    assert status["esm"]["present"] is True
-    assert status["esm"]["verified"] is False
+    assert status["esm"]["present"] is False
+    assert backend.manifest.esm_weights_path is None
     assert status["ready"] is False
 
 
@@ -271,11 +451,11 @@ def test_validate_bundled_assets_rejects_extra_weight_files(tmp_path):
         )
 
 
-def test_desktop_readme_uses_portable_test_command():
-    desktop_readme = Path("desktop/README.md").read_text(encoding="utf-8")
+def test_root_readme_uses_portable_desktop_test_command():
+    readme = Path("README.md").read_text(encoding="utf-8")
 
-    assert "conda run -n pyg5070" not in desktop_readme
-    assert "python -m pytest -q tests/desktop" in desktop_readme
+    assert "conda run -n pyg5070" not in readme
+    assert "python -m pytest -q tests/desktop" in readme
 
 
 def test_single_prediction_uses_desktop_output_package(tmp_path, monkeypatch):
@@ -333,7 +513,7 @@ def test_gpu_backend_uses_mps_device_on_macos(tmp_path, monkeypatch):
 def test_batch_prediction_reuses_one_predictor(tmp_path, monkeypatch):
     backend, input_pdb, factory_calls = _ready_backend(tmp_path, monkeypatch)
     second = tmp_path / "second.pdb"
-    second.write_text("HEADER\n", encoding="utf-8")
+    second.write_text(MINIMAL_PDB, encoding="utf-8")
 
     job = backend.submit_batch([input_pdb, second], output_dir=tmp_path / "batch")
     deadline = time.time() + 5
@@ -351,7 +531,7 @@ def test_batch_prediction_reuses_one_predictor(tmp_path, monkeypatch):
     assert "summary" not in status["items"][0]
     detail = backend.batch_item_result(job["id"], status["items"][0]["input_structure"])
     assert [residue["residue_id"] for residue in detail["top_pocket_residues"]] == ["A_10", "A_11"]
-    assert detail["pockets"]["schema_version"] == "protcross-pocket-v1"
+    assert detail["pockets"]["schema_version"] == "protcross-pocket-v2"
 
 
 def test_batch_rejects_second_active_job(tmp_path, monkeypatch):
@@ -364,7 +544,7 @@ def test_batch_rejects_second_active_job(tmp_path, monkeypatch):
 
     backend, input_pdb, _ = _ready_backend(tmp_path, monkeypatch, predictor_factory=lambda **kwargs: BlockingPredictor())
     second = tmp_path / "second.pdb"
-    second.write_text("HEADER\n", encoding="utf-8")
+    second.write_text(MINIMAL_PDB, encoding="utf-8")
 
     first = backend.submit_batch([input_pdb], output_dir=tmp_path / "batch")
     deadline = time.time() + 2
@@ -382,7 +562,7 @@ def test_batch_prediction_uses_unique_output_directories_for_same_stem(tmp_path,
     other_dir = tmp_path / "nested"
     other_dir.mkdir()
     second = other_dir / "input.pdb"
-    second.write_text("HEADER\n", encoding="utf-8")
+    second.write_text(MINIMAL_PDB, encoding="utf-8")
 
     job = backend.submit_batch([input_pdb, second], output_dir=tmp_path / "batch")
     deadline = time.time() + 5
@@ -462,6 +642,40 @@ def test_desktop_server_handles_cors_options(tmp_path):
         assert response.status == 204
         assert response.getheader("access-control-allow-origin") == "http://127.0.0.1:5173"
         assert "POST" in (response.getheader("access-control-allow-methods") or "")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.network
+def test_desktop_server_inspect_route_returns_structure_qc_without_ready_assets(tmp_path):
+    structure = tmp_path / "input.pdb"
+    structure.write_text(MINIMAL_PDB, encoding="utf-8")
+    server = create_server("127.0.0.1", 0, root=tmp_path, token="secret-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        payload = json.dumps({"input_structure": str(structure), "chain_id": "A"})
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        conn.request(
+            "POST",
+            "/inspect",
+            body=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-ProtCross-Desktop-Token": "secret-token",
+            },
+        )
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert body["schema_version"] == "protcross-structure-inspection-v1"
+        assert body["selected_chains"] == ["A"]
+        assert body["scorable_residue_count"] == 1
+        assert body["requires_truncation"] is False
+        assert body["input_interpretation"]["assembly"].startswith("coordinates_as_supplied")
     finally:
         server.shutdown()
         server.server_close()

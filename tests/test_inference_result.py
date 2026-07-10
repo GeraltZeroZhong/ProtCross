@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import json
 import pickle
 import re
@@ -42,8 +43,27 @@ def test_prediction_result_summary_and_thresholding():
     hits = result.binding_residues
 
     assert [hit.residue_id for hit in hits] == ["A_2"]
-    assert "Predicted binding residues: 1" in result.format_summary()
+    assert hits[0].score == hits[0].probability
+    assert np.shares_memory(result.scores, result.probabilities)
+    assert "Residues above threshold: 1" in result.format_summary()
     assert result.to_records()[0]["chain_id"] == "A"
+
+
+def test_prediction_result_ranks_blank_and_named_chains_independently():
+    result = PredictionResult(
+        input_pdb=Path("input.pdb"),
+        residue_ids=["_1", "_2", "A_1"],
+        probabilities=np.array([0.1, 0.8, 0.5]),
+        residue_metadata=[
+            {"residue_id": "_1", "chain_id": ""},
+            {"residue_id": "_2", "chain_id": ""},
+            {"residue_id": "A_1", "chain_id": "A"},
+        ],
+    )
+
+    assert result.chains_analyzed == ["", "A"]
+    assert [record["rank_within_chain"] for record in result.to_records()] == [2, 1, 1]
+    assert "Chains analyzed: <blank>, A" in result.format_summary()
 
 
 def test_prediction_result_reports_weighted_pocket_center_and_clusters():
@@ -65,9 +85,10 @@ def test_prediction_result_reports_weighted_pocket_center_and_clusters():
 
     payload = result.to_pocket_dict()
 
-    assert payload["schema_version"] == "protcross-pocket-v1"
+    assert payload["schema_version"] == "protcross-pocket-v2"
     assert payload["coordinate_units"] == "angstrom"
-    assert payload["center_type"] == "probability_weighted_ca_centroid"
+    assert payload["center_type"] == "score_weighted_ca_centroid"
+    assert payload["score_calibrated"] is False
     assert payload["selected_residue_count"] == 3
     np.testing.assert_allclose(payload["aggregate_pocket"]["center"], [17.2 / 2.3, 0.0, 0.0])
     np.testing.assert_allclose(payload["aggregate_pocket"]["center_unweighted"], [22.0 / 3.0, 0.0, 0.0])
@@ -95,6 +116,77 @@ def test_prediction_result_caches_records_pockets_and_summary():
     assert result.to_records() is result.to_records()
     assert result.to_pocket_dict() is result.to_pocket_dict()
     assert result.to_summary_dict() is result.to_summary_dict()
+
+
+def test_prediction_result_invalidates_derived_caches_when_threshold_changes():
+    result = PredictionResult(
+        input_pdb=Path("input.pdb"),
+        residue_ids=["A_1", "A_2"],
+        probabilities=np.array([0.6, 0.8]),
+        threshold=0.5,
+        ca_coords=np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+    )
+    original = result.to_summary_dict()
+
+    result.threshold = 0.7
+    updated = result.to_summary_dict()
+
+    assert updated is not original
+    assert updated["threshold"] == 0.7
+    assert updated["selected_residue_count"] == 1
+    assert [record["is_binding"] for record in result.to_records()] == [0, 1]
+
+
+def test_prediction_result_rejects_nonfinite_geometry_and_protects_score_array():
+    result = PredictionResult(
+        input_pdb=Path("input.pdb"),
+        residue_ids=["A_1"],
+        probabilities=np.array([0.6]),
+        ca_coords=np.array([[0.0, 0.0, 0.0]]),
+    )
+
+    with pytest.raises(ValueError, match="read-only"):
+        result.probabilities[0] = 0.1
+    with pytest.raises(ValueError, match="finite"):
+        result.cluster_cutoff = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        PredictionResult(
+            input_pdb=Path("input.pdb"),
+            residue_ids=["A_1"],
+            probabilities=np.array([0.6]),
+            ca_coords=np.array([[float("nan"), 0.0, 0.0]]),
+        )
+
+
+def test_prediction_result_writers_never_replace_the_input_structure(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    result = PredictionResult(
+        input_pdb=input_pdb,
+        residue_ids=["A_1"],
+        probabilities=np.array([0.6]),
+        ca_coords=np.array([[0.0, 0.0, 0.0]]),
+    )
+
+    for writer in (result.write_pdb, result.write_scores_tsv, result.write_pocket_json, result.write_summary_json):
+        with pytest.raises(ValueError, match="must not overwrite"):
+            writer(input_pdb)
+
+    assert input_pdb.read_text(encoding="utf-8") == MINIMAL_PDB
+
+
+def test_prediction_result_rejects_cross_format_annotated_structure(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    result = PredictionResult(
+        input_pdb=input_pdb,
+        residue_ids=["A_1"],
+        probabilities=np.array([0.6]),
+        ca_coords=np.array([[0.0, 0.0, 0.0]]),
+    )
+
+    with pytest.raises(ValueError, match="same PDB or mmCIF format"):
+        result.write_pdb(tmp_path / "converted.cif")
 
 
 def test_prediction_result_empty_pocket_json_shape():
@@ -197,6 +289,7 @@ def test_prediction_result_writes_enhanced_scores_tsv_and_pocket_json(tmp_path):
         "resname",
         "one_letter_code",
         "input_bfactor",
+        "model_score",
         "probability",
         "is_binding",
         "x",
@@ -207,7 +300,9 @@ def test_prediction_result_writes_enhanced_scores_tsv_and_pocket_json(tmp_path):
         "rank_global",
         "rank_within_chain",
     ]
-    assert lines[1].split("\t")[13:19] == ["20.000000", "0.700000", "1", "1.000000", "2.000000", "3.000000"]
+    assert lines[1].split("\t")[13:20] == [
+        "20.000000", "0.700000", "0.700000", "1", "1.000000", "2.000000", "3.000000"
+    ]
     assert lines[1].split("\t")[-3:] == ["1", "1", "1"]
     assert legacy_scores_path.read_text(encoding="utf-8").splitlines()[0].split("\t") == [
         "residue_id",
@@ -218,7 +313,8 @@ def test_prediction_result_writes_enhanced_scores_tsv_and_pocket_json(tmp_path):
     ]
     assert json.loads(pocket_path.read_text(encoding="utf-8"))["aggregate_pocket"]["residue_count"] == 1
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert summary["schema_version"] == "protcross-summary-v1"
+    assert summary["schema_version"] == "protcross-summary-v2"
+    assert summary["score_calibrated"] is False
     assert summary["asset_version"] == "0.1.2"
     assert summary["top_pocket"]["residue_count"] == 1
     assert summary["aggregate_pocket"]["residue_count"] == 1
@@ -387,10 +483,165 @@ def test_predict_pdb_invalid_options_do_not_resolve_assets(tmp_path, monkeypatch
         {"pocket_cluster_cutoff": 0},
         {"unscored_bfactor_policy": "drop"},
         {"max_len": 1023},
+        {"device": "definitely-invalid"},
     )
     for kwargs in invalid_calls:
         with pytest.raises(ValueError):
             predict_pdb(input_pdb, **kwargs)
+
+
+def test_predict_pdb_rejects_output_path_collisions_before_resolving_assets(tmp_path, monkeypatch):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    shared_output = tmp_path / "shared.out"
+
+    def fail_resolve_assets(*args, **kwargs):
+        raise AssertionError("asset resolution must not run for unsafe output paths")
+
+    monkeypatch.setattr("protcross.inference.predictor.resolve_prediction_assets", fail_resolve_assets)
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        predict_pdb(
+            input_pdb,
+            output_pdb=shared_output,
+            scores_tsv=shared_output,
+        )
+    with pytest.raises(ValueError, match="must not overwrite the input structure"):
+        predict_pdb(input_pdb, summary_json=input_pdb)
+    with pytest.raises(IsADirectoryError, match="directory"):
+        predict_pdb(input_pdb, summary_json=tmp_path)
+
+
+def test_predictor_rejects_unsafe_output_paths_before_featurizing(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    esm = _CountingESM()
+    pca = _CountingPCA()
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        esm_extractor=esm,
+        pca_reducer=pca,
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+    )
+    shared_output = tmp_path / "shared.out"
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        predictor.predict(
+            input_pdb,
+            output_pdb=shared_output,
+            scores_tsv=shared_output,
+        )
+    with pytest.raises(ValueError, match="must not overwrite the input structure"):
+        predictor.predict(input_pdb, summary_json=input_pdb)
+    with pytest.raises(IsADirectoryError, match="directory"):
+        predictor.predict(input_pdb, summary_json=tmp_path)
+
+    assert esm.calls == 0
+    assert pca.calls == 0
+
+
+def test_predictor_expands_user_output_paths(tmp_path, monkeypatch):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        esm_extractor=_FakeESM(),
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+    )
+
+    result = predictor.predict(input_pdb, summary_json="~/result.json")
+
+    assert (tmp_path / "result.json").exists()
+    assert not (Path.cwd() / "~" / "result.json").exists()
+    assert result.output_files["summary_json"] == str(tmp_path / "result.json")
+
+
+def test_from_default_assets_uses_verified_resolver(monkeypatch, tmp_path):
+    resolved = types.SimpleNamespace(
+        checkpoint=tmp_path / "model.ckpt",
+        esm_weights=tmp_path / "esm.pth",
+        pca=tmp_path / "pca.pkl",
+        asset_version="0.1.2",
+        asset_metadata={"all_assets_verified": True},
+    )
+    captured_resolve = {}
+    captured_files = {}
+    expected = object()
+
+    def fake_resolve(**kwargs):
+        captured_resolve.update(kwargs)
+        return resolved
+
+    def fake_from_files(**kwargs):
+        captured_files.update(kwargs)
+        return expected
+
+    monkeypatch.setattr("protcross.inference.predictor.resolve_prediction_assets", fake_resolve)
+    monkeypatch.setattr(
+        PredictorAssets,
+        "from_default_dir",
+        classmethod(
+            lambda cls, **kwargs: PredictorAssets(
+                checkpoint=tmp_path / "model.ckpt",
+                esm_weights=tmp_path / "esm.pth",
+                pca=tmp_path / "pca.pkl",
+                asset_version="0.1.2",
+            )
+        ),
+    )
+    monkeypatch.setattr(ProtCrossPredictor, "from_files", staticmethod(fake_from_files))
+
+    actual = ProtCrossPredictor.from_default_assets(
+        device="cpu",
+        accept_esm_license=False,
+    )
+
+    assert actual is expected
+    assert captured_resolve["auto_setup_assets"] is False
+    assert captured_resolve["offline"] is True
+    assert captured_resolve["require_esm_license_for_use"] is True
+    assert captured_resolve["ckpt_path"] == tmp_path / "model.ckpt"
+    assert captured_files["asset_metadata"] == {"all_assets_verified": True}
+    assert captured_files["accept_esm_license"] is True
+
+
+def test_predict_pdb_forwards_resolved_asset_metadata(tmp_path, monkeypatch):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    paths = {
+        "checkpoint": tmp_path / "model.ckpt",
+        "esm_weights": tmp_path / "esm.pth",
+        "pca": tmp_path / "pca.pkl",
+    }
+    metadata = {"asset_version": "custom", "checkpoint": {"actual_sha256": "abc"}}
+    resolved = types.SimpleNamespace(
+        **paths,
+        asset_version="custom",
+        asset_metadata=metadata,
+    )
+    captured = {}
+    expected_result = object()
+
+    class FakePredictor:
+        def predict(self, *args, **kwargs):
+            return expected_result
+
+    def fake_from_files(**kwargs):
+        captured.update(kwargs)
+        return FakePredictor()
+
+    monkeypatch.setattr("protcross.inference.predictor.resolve_prediction_assets", lambda *args, **kwargs: resolved)
+    monkeypatch.setattr(ProtCrossPredictor, "from_files", staticmethod(fake_from_files))
+
+    result = predict_pdb(input_pdb)
+
+    assert result is expected_result
+    assert captured["asset_version"] == "custom"
+    assert captured["asset_metadata"] is metadata
 
 
 def test_predictor_rejects_invalid_prediction_options_before_featurizing(tmp_path):
@@ -473,6 +724,36 @@ def test_predictor_from_files_requires_esm_license_acceptance(tmp_path, monkeypa
         ProtCrossPredictor.from_files(ckpt, esm, pca)
 
 
+def test_predictor_from_assets_builds_traceable_metadata(tmp_path, monkeypatch):
+    ckpt = tmp_path / "model.ckpt"
+    esm = tmp_path / "esm.pth"
+    pca = tmp_path / "pca.pkl"
+    for path, payload in ((ckpt, b"checkpoint"), (esm, b"esm"), (pca, b"pca")):
+        path.write_bytes(payload)
+    assets = PredictorAssets(ckpt, esm, pca, asset_version="custom")
+    captured = {}
+    expected_predictor = object()
+
+    def fake_from_files(**kwargs):
+        captured.update(kwargs)
+        return expected_predictor
+
+    monkeypatch.setattr(ProtCrossPredictor, "from_files", staticmethod(fake_from_files))
+
+    predictor = ProtCrossPredictor.from_assets(assets)
+
+    assert predictor is expected_predictor
+    metadata = captured["asset_metadata"]
+    assert metadata
+    assert metadata["asset_version"] == "custom"
+    assert metadata["contains_unverified_assets"] is True
+    for name, path in (("checkpoint", ckpt), ("esm_weights", esm), ("pca", pca)):
+        assert metadata[name]["path"] == str(path.resolve())
+        assert metadata[name]["actual_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert metadata[name]["verified"] is None
+        assert metadata[name]["source"] == "predictor_assets"
+
+
 def test_predictor_from_files_runs_offline_real_prediction_path(tmp_path, monkeypatch):
     _install_fake_esm_modules(monkeypatch)
     input_pdb = tmp_path / "input.pdb"
@@ -515,8 +796,22 @@ def test_predictor_from_files_runs_offline_real_prediction_path(tmp_path, monkey
     assert result.residue_ids == ["A_1", "A_2"]
     assert output_pdb.exists()
     assert scores_tsv.exists()
-    assert json.loads(pocket_json.read_text(encoding="utf-8"))["schema_version"] == "protcross-pocket-v1"
-    assert json.loads(summary_json.read_text(encoding="utf-8"))["schema_version"] == "protcross-summary-v1"
+    pocket_payload = json.loads(pocket_json.read_text(encoding="utf-8"))
+    summary_payload = json.loads(summary_json.read_text(encoding="utf-8"))
+    assert pocket_payload["schema_version"] == "protcross-pocket-v2"
+    assert summary_payload["schema_version"] == "protcross-summary-v2"
+    assert summary_payload["assets"] == pocket_payload["assets"]
+    assert summary_payload["input_file"]["sha256"] == hashlib.sha256(input_pdb.read_bytes()).hexdigest()
+    assert summary_payload["input_file"] == pocket_payload["input_file"]
+    assert summary_payload["runtime"]["python"]
+    assert summary_payload["runtime"]["torch"]
+    assert summary_payload["assets"]
+    for name, path in (("checkpoint", ckpt), ("esm_weights", esm), ("pca", pca)):
+        entry = summary_payload["assets"][name]
+        assert entry["path"] == str(path.resolve())
+        assert entry["actual_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert entry["verified"] is None
+        assert entry["source"] == "direct"
 
 
 def test_predictor_embedding_cache_reuses_reduced_features(tmp_path):
@@ -541,6 +836,43 @@ def test_predictor_embedding_cache_reuses_reduced_features(tmp_path):
     assert esm.calls == 1
     assert pca.calls == 1
     assert list((tmp_path / "feature-cache").glob("*.pt"))
+
+
+def test_predictor_rebuilds_corrupt_embedding_cache(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    cache_dir = tmp_path / "feature-cache"
+    esm = _CountingESM()
+    pca = _CountingPCA()
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        embedding_cache_dir=cache_dir,
+        esm_extractor=esm,
+        pca_reducer=pca,
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+        asset_version="test-assets",
+    )
+    predictor.predict(input_pdb)
+    cache_path = next(cache_dir.glob("*.pt"))
+    cache_path.write_bytes(b"truncated-cache")
+
+    predictor.predict(input_pdb)
+    predictor.predict(input_pdb)
+
+    assert esm.calls == 2
+    assert pca.calls == 2
+    assert not list(cache_dir.glob("*.part.pt"))
+
+
+def test_predictor_rejects_loaded_pca_dimension_mismatch(tmp_path):
+    pca_path = tmp_path / "pca.pkl"
+    with pca_path.open("wb") as handle:
+        pickle.dump(types.SimpleNamespace(n_components=2), handle)
+
+    with pytest.raises(ValueError, match="has 2 components"):
+        ProtCrossPredictor._load_pca(pca_path, 128)
 
 
 def test_predictor_embedding_cache_key_includes_asset_identity(tmp_path):
@@ -890,4 +1222,8 @@ def _install_fake_esm_modules(monkeypatch):
 
 def _trust_managed_asset_hashes(monkeypatch):
     expected_by_name = {spec.filename: spec.sha256 for spec in DEFAULT_ASSET_BUNDLE.assets}
-    monkeypatch.setattr("protcross.assets.sha256_file", lambda path: expected_by_name[Path(path).name])
+    monkeypatch.setattr(
+        "protcross.assets.sha256_file",
+        lambda path: expected_by_name.get(Path(path).name)
+        or hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+    )

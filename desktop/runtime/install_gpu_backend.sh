@@ -44,6 +44,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_DIR="$INSTALL_ROOT/runtime/gpu-env"
+PYTHON="$ENV_DIR/bin/python"
 COMMON_REQUIREMENTS="$SCRIPT_DIR/requirements-common.lock"
 BACKEND_HASH_REQUIREMENTS="$SCRIPT_DIR/requirements-gpu.hashes"
 BACKEND_PACKAGE="$DESKTOP_DIR/backend"
@@ -56,15 +57,44 @@ fi
 
 mkdir -p "$(dirname "$ENV_DIR")"
 
-bootstrap_uv() {
-  local uv_bin="${UV_BIN:-$SCRIPT_DIR/uv/uv}"
-  if [[ ! -x "$uv_bin" ]]; then
-    echo "Python 3.10 was not found and no bundled uv executable is available." >&2
-    echo "Release builds must ship a signed/hashed Python bootstrapper; development installs may pass --python." >&2
+resolve_uv_bin() {
+  RESOLVED_UV_BIN="${UV_BIN:-$SCRIPT_DIR/uv/uv}"
+  if [[ ! -x "$RESOLVED_UV_BIN" ]]; then
+    echo "A usable Python 3.10 environment with pip was not found, and no bundled uv executable is available." >&2
+    echo "Release builds must ship a signed/hashed Python bootstrapper; development installs may pass --python or --uv-bin." >&2
     exit 1
   fi
-  "$uv_bin" python install 3.10
-  "$uv_bin" venv --python 3.10 "$ENV_DIR"
+}
+
+bootstrap_uv() {
+  resolve_uv_bin
+  "$RESOLVED_UV_BIN" python install 3.10
+  "$RESOLVED_UV_BIN" venv --seed --allow-existing --python 3.10 "$ENV_DIR"
+}
+
+environment_python_works() {
+  [[ -x "$PYTHON" ]] && "$PYTHON" --version >/dev/null 2>&1
+}
+
+environment_pip_works() {
+  environment_python_works && "$PYTHON" -m pip --version >/dev/null 2>&1
+}
+
+repair_environment_pip() {
+  if environment_pip_works; then
+    return
+  fi
+  echo "[warn] Backend environment is missing pip; attempting an in-place repair: $ENV_DIR" >&2
+  "$PYTHON" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  if environment_pip_works; then
+    return
+  fi
+  resolve_uv_bin
+  "$RESOLVED_UV_BIN" venv --seed --allow-existing --python "$PYTHON" "$ENV_DIR"
+  if ! environment_pip_works; then
+    echo "Backend environment repair did not produce a working pip: $ENV_DIR" >&2
+    exit 1
+  fi
 }
 
 install_requirements() {
@@ -75,7 +105,7 @@ install_requirements() {
   if [[ "$ALLOW_ONLINE_PACKAGE_INDEX" == "1" ]]; then
     echo "[warn] Installing the optional GPU/MPS backend from fixed online package indexes." >&2
     "${PIP[@]}" install torch==2.3.1 torchvision==0.18.1
-    "${PIP[@]}" install -r "$COMMON_REQUIREMENTS"
+    "${PIP[@]}" install --find-links "$WHEELHOUSE" -r "$COMMON_REQUIREMENTS"
     "${PIP[@]}" install "$BACKEND_PACKAGE"
     return
   fi
@@ -84,15 +114,18 @@ install_requirements() {
   exit 1
 }
 
-if [[ ! -d "$ENV_DIR" ]]; then
+if ! environment_python_works; then
   if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    "$PYTHON_BIN" -m venv "$ENV_DIR"
+    if ! "$PYTHON_BIN" -m venv "$ENV_DIR"; then
+      echo "[warn] System Python could not create a complete environment; falling back to bundled uv." >&2
+      bootstrap_uv
+    fi
   else
     bootstrap_uv
   fi
 fi
 
-PYTHON="$ENV_DIR/bin/python"
+repair_environment_pip
 PIP=("$PYTHON" -m pip)
 
 install_requirements

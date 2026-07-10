@@ -62,6 +62,13 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                         self._json(self.backend.batch_status(parts[1], limit=limit, offset=offset))
                 else:
                     self._json({"error": "not found"}, status=404)
+            elif path.startswith("/asset-download/"):
+                self._require_auth(parsed_url)
+                parts = path.strip("/").split("/")
+                if len(parts) == 2:
+                    self._json(self.backend.esm_download_status(parts[1]))
+                else:
+                    self._json({"error": "not found"}, status=404)
             else:
                 self._json({"error": "not found"}, status=404)
         except Exception as exc:
@@ -85,15 +92,20 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 self._json(self.backend.import_checkpoint(**payload))
             elif path == "/assets/import-pca":
                 self._json(self.backend.import_pca(**payload))
-            elif path == "/assets/download-esm":
-                self._json(self.backend.download_esm_weights(**payload))
+            elif path == "/assets/download-esm/start":
+                self._json(self.backend.start_esm_download(**payload))
             elif path == "/predict":
                 self._json(self.backend.predict_single(**payload))
+            elif path == "/inspect":
+                self._json(self.backend.inspect_input_structure(**payload))
             elif path == "/batch":
                 self._json(self.backend.submit_batch(**payload))
             elif path.startswith("/batch/") and path.endswith("/cancel"):
                 job_id = path.split("/")[-2]
                 self._json(self.backend.cancel_batch(job_id))
+            elif path.startswith("/asset-download/") and path.endswith("/cancel"):
+                job_id = path.split("/")[-2]
+                self._json(self.backend.cancel_esm_download(job_id))
             elif path == "/diagnostics/export":
                 self._json({"path": self.backend.export_diagnostics(**payload)})
             else:
@@ -168,7 +180,7 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             status = 400
         else:
             status = 500
-        self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=status)
+        self._json({"ok": False, "error": str(exc), "error_type": type(exc).__name__}, status=status)
 
 
 def create_server(

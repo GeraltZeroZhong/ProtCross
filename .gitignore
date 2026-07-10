@@ -16,7 +16,6 @@ multiseed_raw_results.csv
 multiseed_summary_report.csv
 
 /data/
-RELEASE_NOTES_0.1.2.md
 scripts/internal_compare_checkpoint_curves.py
 
 *.egg-info/

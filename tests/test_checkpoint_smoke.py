@@ -32,8 +32,46 @@ def test_checkpoint_forward_cpu_on_publish_sample():
     with torch.no_grad():
         feats, _ = model.backbone(batch.x, batch.pos, batch.batch)
         logits = model.seg_head(feats)
+        scores = torch.softmax(logits, dim=1)[:, 1]
 
     assert logits.shape == (batch.x.shape[0], 2)
+    assert torch.isfinite(scores).all()
+    assert torch.all((scores >= 0) & (scores <= 1))
+    if os.environ.get("PROTCROSS_RELEASE_SYNTHETIC_SAMPLE") == "1":
+        expected_feature_prefix = torch.tensor(
+            [
+                -42.04204,
+                -31.53744,
+                155.18114,
+                0.30038,
+                27.11786,
+                -16.36558,
+                -41.44625,
+                -7.21677,
+                38.80212,
+                12.01224,
+            ]
+        )
+        torch.testing.assert_close(feats[0, :10], expected_feature_prefix, rtol=2e-3, atol=5e-2)
+        assert float(feats.mean()) == pytest.approx(1.78408, abs=5e-2)
+    else:
+        expected_prefix = torch.tensor(
+            [
+                0.24724323,
+                0.33811420,
+                0.20718010,
+                0.50588417,
+                0.47987068,
+                0.18985108,
+                0.55295146,
+                0.32932904,
+                0.36394376,
+                0.34797800,
+            ]
+        )
+        torch.testing.assert_close(scores[:10], expected_prefix, rtol=5e-4, atol=5e-4)
+        assert float(scores.mean()) == pytest.approx(0.30683029, abs=5e-4)
+        assert torch.nonzero(scores > 0.5, as_tuple=False).flatten().tolist() == [3, 6, 41]
 
 
 def _load_release_sample() -> dict[str, torch.Tensor]:

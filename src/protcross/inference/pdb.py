@@ -42,10 +42,10 @@ def write_bfactor_pdb(
     missing_value: float | None = 0.0,
     residue_metadata: Iterable[Mapping[str, object]] | None = None,
 ) -> None:
-    """Write residue probabilities into the B-factor column of a structure file.
+    """Write residue model scores into the B-factor column of a structure file.
 
-    By default scored protein residues receive ProtCross probabilities and
-    unscored atoms receive 0.0, keeping the B-factor column in probability
+    By default scored protein residues receive ProtCross model scores and
+    unscored atoms receive 0.0, keeping the B-factor column in model-score
     units for downstream tools. Pass ``missing_value=None`` to preserve
     original B-factors/pLDDT for unscored atoms.
     """
@@ -55,6 +55,16 @@ def write_bfactor_pdb(
 
     input_is_cif = input_structure.suffix.lower() in {".cif", ".mmcif"}
     output_is_cif = output_pdb.suffix.lower() in {".cif", ".mmcif"}
+    if not input_is_cif and not output_is_cif:
+        _write_bfactor_pdb_preserving_records(
+            input_structure,
+            output_pdb,
+            residue_ids,
+            probabilities,
+            missing_value=missing_value,
+            residue_metadata=residue_metadata,
+        )
+        return
     if input_is_cif and output_is_cif:
         if _write_bfactor_mmcif_preserving_atom_site(
             input_structure,
@@ -100,6 +110,83 @@ def write_bfactor_pdb(
     io = MMCIFIO() if output_pdb.suffix.lower() in {".cif", ".mmcif"} else PDBIO()
     io.set_structure(structure)
     io.save(str(output_pdb))
+
+
+def _write_bfactor_pdb_preserving_records(
+    input_pdb: Path,
+    output_pdb: Path,
+    residue_ids: Iterable[str],
+    probabilities: Iterable[float] | np.ndarray,
+    *,
+    missing_value: float | None,
+    residue_metadata: Iterable[Mapping[str, object]] | None,
+) -> None:
+    """Patch only PDB columns 61–66 and preserve every other input byte as text."""
+    scores = [float(score) for score in probabilities]
+    score_by_residue_id = dict(zip(residue_ids, scores))
+    score_by_key: dict[tuple[str, str, int, str, str], float] = {}
+    scored_models: set[str] = set()
+    if residue_metadata is not None:
+        for metadata, score in zip(residue_metadata, scores):
+            try:
+                model_id = str(metadata.get("model_id", 0))
+                chain_id = str(metadata.get("auth_asym_id") or metadata.get("chain_id") or " ")
+                residue_number = int(metadata.get("auth_seq_id") or metadata.get("residue_number"))
+            except (TypeError, ValueError):
+                continue
+            insertion_code = str(metadata.get("insertion_code") or "").strip()
+            resname = str(metadata.get("resname") or "").strip().upper()
+            score_by_key[(model_id, chain_id, residue_number, insertion_code, resname)] = score
+            scored_models.add(model_id)
+    allow_legacy_fallback = not score_by_key
+    if allow_legacy_fallback:
+        scored_models.add("0")
+
+    model_index = 0
+    saw_model = False
+    output_lines: list[str] = []
+    with input_pdb.open("r", encoding="utf-8", errors="surrogateescape", newline="") as input_file:
+        input_lines = input_file.read().splitlines(keepends=True)
+    for line in input_lines:
+        record = line[:6].strip().upper()
+        if record == "MODEL":
+            if saw_model:
+                model_index += 1
+            else:
+                model_index = 0
+                saw_model = True
+            output_lines.append(line)
+            continue
+        if record not in {"ATOM", "HETATM"}:
+            output_lines.append(line)
+            continue
+
+        body = line.rstrip("\r\n")
+        newline = line[len(body):]
+        padded = body.ljust(66)
+        chain_id = padded[21:22]
+        insertion_code = padded[26:27].strip()
+        resname = padded[17:20].strip().upper()
+        try:
+            residue_number = int(padded[22:26])
+        except ValueError:
+            output_lines.append(line)
+            continue
+        model_id = str(model_index)
+        score = score_by_key.get((model_id, chain_id, residue_number, insertion_code, resname))
+        if score is None and allow_legacy_fallback and model_index == 0 and record == "ATOM" and resname in STANDARD_AA:
+            residue_suffix = f"{residue_number}{insertion_code}" if insertion_code else str(residue_number)
+            score = score_by_residue_id.get(f"{chain_id}_{residue_suffix}")
+        if score is None:
+            if missing_value is None or model_id not in scored_models:
+                output_lines.append(line)
+                continue
+            score = missing_value
+        patched = f"{padded[:60]}{float(score):6.2f}{padded[66:]}{newline}"
+        output_lines.append(patched)
+
+    with output_pdb.open("w", encoding="utf-8", errors="surrogateescape", newline="") as output_file:
+        output_file.write("".join(output_lines))
 
 
 def _write_bfactor_mmcif_preserving_atom_site(

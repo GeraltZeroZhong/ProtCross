@@ -30,6 +30,7 @@ jobs:
       - name: CLI help smoke
         run: |
           protcross --help
+          protcross inspect --help
           protcross predict --help
           protcross setup-assets --help
           protcross preprocess --help
@@ -50,6 +51,7 @@ jobs:
           /tmp/protcross-smoke/bin/python -m pip install -c constraints/py310-ci.txt dist/*.whl
           /tmp/protcross-smoke/bin/python -c "import protcross; print(protcross.__version__)"
           /tmp/protcross-smoke/bin/protcross --help
+          /tmp/protcross-smoke/bin/protcross inspect --help
 
       - name: Clean predict-extra install smoke
         run: |
@@ -76,6 +78,7 @@ jobs:
       - name: CLI help without torch or Lightning
         run: |
           protcross --help
+          protcross inspect --help
           protcross predict --help
           protcross setup-assets --help
           protcross preprocess --help
@@ -162,10 +165,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, macos-14]
+        os: [windows-2022, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Assert Apple Silicon macOS runner
+        if: runner.os == 'macOS'
+        shell: bash
+        run: test "$(uname -m)" = "arm64"
 
       - uses: actions/setup-node@v4
         with:
@@ -282,7 +290,6 @@ jobs:
           }
           .\desktop\installer\validate-release.ps1 `
             -InstallerPath $installer.FullName `
-            -AcceptEsmLicenseForCi `
             -ValidateInstalledPackage `
             -SkipLocalBackendTests
 

@@ -159,6 +159,69 @@ def _metadata_chain_key(metadata: dict) -> tuple[str, str]:
     return (str(metadata.get("model_id", "")), str(metadata.get("chain_id", "")))
 
 
+def canonicalize_parsed_structure(parsed: Dict) -> Dict:
+    """Return residue-aligned fields in a stable polymer/identifier order.
+
+    The released PointNet sampling backend is deterministic for a fixed point
+    order but is not permutation invariant when neighborhoods are capped.
+    Normalizing structure-record order here makes equivalent PDB/mmCIF inputs
+    produce the same model input without changing the checkpoint or geometry
+    operations used for ordinary chain/residue-ordered files.
+    """
+    sequence = parsed.get("sequence", "")
+    metadata = parsed.get("residue_metadata") or []
+    if not sequence or len(metadata) != len(sequence):
+        return parsed
+
+    indices = sorted(range(len(metadata)), key=lambda index: (*_canonical_residue_key(metadata[index]), index))
+    if indices == list(range(len(indices))):
+        return parsed
+
+    out = dict(parsed)
+    out["sequence"] = "".join(sequence[index] for index in indices)
+    for key in ("coords", "raw_coords", "plddts", "labels"):
+        if key in out:
+            value = out[key]
+            out[key] = value[indices] if isinstance(value, np.ndarray) else [value[index] for index in indices]
+    for key in ("residue_ids", "residue_metadata"):
+        if key in out:
+            out[key] = [out[key][index] for index in indices]
+    return out
+
+
+def _canonical_residue_key(metadata: dict) -> tuple:
+    model = _numeric_then_text(metadata.get("model_id"))
+    chain_text = str(
+        metadata.get("auth_asym_id")
+        or metadata.get("chain_id")
+        or metadata.get("label_asym_id")
+        or ""
+    )
+    chain = (0, chain_text) if chain_text.strip() else (1, "")
+    if metadata.get("label_seq_id") is not None:
+        sequence_position = (0, *_numeric_then_text(metadata.get("label_seq_id")))
+    elif metadata.get("auth_seq_id") is not None:
+        sequence_position = (1, *_numeric_then_text(metadata.get("auth_seq_id")))
+    else:
+        sequence_position = (2, *_numeric_then_text(metadata.get("residue_number")))
+    return (
+        model,
+        chain,
+        sequence_position,
+        str(metadata.get("insertion_code") or ""),
+        str(metadata.get("label_asym_id") or ""),
+        str(metadata.get("resname") or ""),
+        str(metadata.get("residue_key") or metadata.get("residue_id") or ""),
+    )
+
+
+def _numeric_then_text(value: object) -> tuple[int, int | str]:
+    try:
+        return (0, int(str(value)))
+    except (TypeError, ValueError):
+        return (1, "" if value is None else str(value))
+
+
 class StructureParser:
     """Parse PDB/mmCIF files into residue-level point-cloud inputs."""
 
@@ -253,7 +316,7 @@ class StructureParser:
                     "input_bfactor": float(ca_atom.get_bfactor()),
                 }
                 if is_mmcif:
-                    model_num = self._mmcif_model_num(model.id)
+                    model_num = self._mmcif_model_num(model)
                     metadata.update(
                         mmcif_ca_metadata.get(
                             (model_num, chain.id, residue_number, insertion_code, res_name),
@@ -276,7 +339,7 @@ class StructureParser:
         raw_coords_np = np.asarray(coords, dtype=np.float32)
         coords_np = raw_coords_np - raw_coords_np.mean(axis=0)
 
-        return {
+        return canonicalize_parsed_structure({
             "coords": coords_np,
             "raw_coords": raw_coords_np,
             "sequence": "".join(seq_chars),
@@ -289,7 +352,7 @@ class StructureParser:
             "model_count": len(models),
             "models_scored": [str(model.id)],
             "structure_warnings": structure_warnings,
-        }
+        })
 
     @staticmethod
     def _residue_key(model_id, chain_id: str, residue_id: tuple, resname: str | None = None) -> str:
@@ -371,7 +434,11 @@ class StructureParser:
         return metadata_by_key
 
     @staticmethod
-    def _mmcif_model_num(model_id) -> str:
+    def _mmcif_model_num(model) -> str:
+        serial_num = getattr(model, "serial_num", None)
+        if serial_num is not None:
+            return str(serial_num)
+        model_id = getattr(model, "id", model)
         try:
             return str(int(model_id) + 1)
         except (TypeError, ValueError):

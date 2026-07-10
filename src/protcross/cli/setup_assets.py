@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from protcross.assets import (
+    ESM_LICENSE_URL,
     setup_assets,
 )
 
@@ -14,6 +16,13 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
         description="Download ProtCross checkpoint, PCA reducer, and ESM-C weights.",
+        epilog=(
+            "ESM-C download: about 2.14 GiB; keep at least 2.4 GiB free on the asset target "
+            "(about 5 GiB total if the Python environment shares that disk). Interrupted downloads "
+            "retain a .part file and resume on the next identical command.\n"
+            f"Review the ESM-C license before accepting: {ESM_LICENSE_URL}"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--output-dir",
@@ -24,8 +33,12 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--asset-version",
-        default="default",
-        help="default/latest (current packaged stable bundle, 0.1.2), 0.1.2, or 0.1.1-paper.",
+        default=os.environ.get("PROTCROSS_ASSET_VERSION", "default"),
+        choices=("default", "latest", "0.1.2", "0.1.1-paper"),
+        help=(
+            "Asset bundle version. Defaults to PROTCROSS_ASSET_VERSION when set, "
+            "otherwise the current 0.1.2 bundle."
+        ),
     )
     parser.add_argument("--esm-url")
     parser.add_argument("--checkpoint-url")
@@ -42,7 +55,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--accept-esm-license",
         action="store_true",
-        help="Confirm that you reviewed the upstream ESM-C license before downloading ESM-C weights.",
+        help="Confirm that you reviewed the upstream ESM-C license; acceptance is recorded in the asset manifest.",
     )
     return parser
 

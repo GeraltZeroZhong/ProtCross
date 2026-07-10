@@ -87,27 +87,17 @@ def test_evopoint_da_alias_import_matrix():
             assert module.__name__.startswith("protcross.")
 
 
-def test_readme_does_not_reference_old_package_or_unarchived_legacy_paths():
+def test_readme_separates_default_and_paper_reproduction_assets():
     readme = Path("README.md").read_text(encoding="utf-8")
 
     assert "evopoint_da" not in readme
     assert "python train.py" not in readme
     assert "scripts/preprocess_esm.py" not in readme
-    assert "0.1.0" not in readme
-    assert "0.1.1" not in readme
-    assert "0.1.1-paper" not in readme
-    assert "PDBbind" not in readme
-    assert "best-epoch=59.ckpt" not in readme
     assert "protcross-predict" not in readme
-    assert "run_Predict_ProtCross.py" not in readme
-    assert "python reproduction/legacy/" not in readme
-
-
-def test_legacy_readme_owns_original_reproducibility_details():
-    readme = Path("reproduction/legacy/README.md").read_text(encoding="utf-8")
-
+    assert "default `0.1.2` checkpoint" in readme
     assert "0.1.0" in readme
     assert "0.1.1-paper" in readme
     assert "PDBbind" in readme
     assert "best-epoch=59.ckpt" in readme
     assert "python reproduction/legacy/run_Predict_ProtCross.py" in readme
+    assert "was not evaluated in that paper workflow" in readme

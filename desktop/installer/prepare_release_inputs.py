@@ -8,10 +8,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+from validate_version_consistency import core_version
+
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     repo_root = args.repo_root.resolve()
+    _run(
+        [
+            sys.executable,
+            str(repo_root / "desktop" / "installer" / "validate_version_consistency.py"),
+            "--repo-root",
+            str(repo_root),
+        ]
+    )
     _prepare_bundled_assets(repo_root)
     _prepare_runtime_bundle(repo_root, backend=args.runtime_backend)
     return 0
@@ -76,15 +86,16 @@ def _prepare_runtime_bundle(repo_root: Path, *, backend: str) -> None:
 
 
 def _ensure_local_protcross_wheel(repo_root: Path) -> Path:
-    wheels = sorted((repo_root / "dist").glob("protcross-*.whl"))
+    expected_version = core_version(repo_root)
+    wheels = sorted((repo_root / "dist").glob(f"protcross-{expected_version}-*.whl"))
     if wheels:
         return wheels[-1]
     out_dir = repo_root / "dist"
     out_dir.mkdir(exist_ok=True)
     _run([sys.executable, "-m", "build", "--wheel", "--outdir", str(out_dir)], cwd=repo_root)
-    wheels = sorted(out_dir.glob("protcross-*.whl"))
+    wheels = sorted(out_dir.glob(f"protcross-{expected_version}-*.whl"))
     if not wheels:
-        raise RuntimeError("Local ProtCross wheel build did not produce a wheel.")
+        raise RuntimeError(f"Local ProtCross wheel build did not produce a {expected_version} wheel.")
     return wheels[-1]
 
 

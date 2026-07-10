@@ -1,5 +1,17 @@
 export type BackendMode = "cpu" | "gpu" | "conda";
 
+export interface AssetDownloadJob {
+  id: string;
+  filename: string;
+  status: "queued" | "running" | "cancelling" | "cancelled" | "failed" | "completed";
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+  percent?: number | null;
+  bytes_per_second?: number | null;
+  error?: string | null;
+  resumable: boolean;
+}
+
 export interface FileStatus {
   path: string | null;
   present: boolean;
@@ -39,12 +51,52 @@ export interface DesktopStatus {
     backend_tested_at?: string | null;
     backend_test_mode?: string | null;
     backend_test_python?: string | null;
+    backend_test_package_version?: string | null;
+    required_package_version?: string;
     proxy_url: string | null;
   };
   readiness?: {
     ready: boolean;
     issues: string[];
   };
+  activity?: {
+    batch_jobs: BatchJob[];
+    asset_downloads: AssetDownloadJob[];
+  };
+}
+
+export interface ChainInspection {
+  chain_id: string;
+  scorable_residue_count: number;
+  standard_residues_missing_ca: number;
+  modified_or_nonstandard_amino_acids: number;
+  alternate_ca_residues: number;
+  sequence_break_count: number;
+  numbering_gap_count: number;
+  exceeds_esm_context: boolean;
+  residues_over_context_limit: number;
+}
+
+export interface StructureInspection {
+  schema_version: string;
+  input_structure: string;
+  format: "PDB" | "mmCIF";
+  model_count: number;
+  available_chains: string[];
+  selected_chains: string[];
+  chain_summaries: ChainInspection[];
+  scorable_residue_count: number;
+  standard_residues_missing_ca: number;
+  modified_or_nonstandard_amino_acids: number;
+  alternate_ca_residues: number;
+  sequence_break_count: number;
+  numbering_gap_count: number;
+  longest_chain_context: number;
+  max_len: number;
+  requires_truncation: boolean;
+  warnings: string[];
+  parser_warnings: string[];
+  input_interpretation: Record<string, string>;
 }
 
 export interface PredictResponse {
@@ -80,9 +132,15 @@ export interface PocketSummary {
 
 export interface ResidueSummary {
   residue_id: string;
+  score?: number;
   probability: number;
   chain_id?: string;
   residue_number?: string | number;
+  auth_asym_id?: string;
+  label_asym_id?: string;
+  auth_seq_id?: string | number;
+  label_seq_id?: string | number;
+  insertion_code?: string;
   cluster_id?: number | null;
   [key: string]: unknown;
 }
