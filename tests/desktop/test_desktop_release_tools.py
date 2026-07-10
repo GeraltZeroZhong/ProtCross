@@ -241,6 +241,8 @@ def test_packaged_sidecar_smoke_uses_env_token_only():
     tauri_main = Path("desktop/src-tauri/src/main.rs").read_text(encoding="utf-8")
 
     assert "PROTCROSS_DESKTOP_TOKEN" in validator
+    assert "ProxyHandler({})" in validator
+    assert 'default=60.0' in validator
     assert '"--token"' not in validator
     assert 'command.env("PROTCROSS_DESKTOP_TOKEN", &token)' in tauri_main
     assert '.arg("--token")' not in tauri_main
