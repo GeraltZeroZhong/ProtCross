@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import hashlib
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
+import platform
 import time
 from typing import Optional
+import uuid
 
 import numpy as np
 import torch
 from torch_geometric.data import Data
 
-from protcross.assets import PredictorAssets, require_esm_license_acceptance, resolve_prediction_assets
+from protcross.assets import (
+    PredictorAssets,
+    build_prediction_asset_metadata,
+    require_esm_license_acceptance,
+    resolve_prediction_assets,
+)
 from protcross.data import (
     MAX_ESM_RESIDUES,
     PCAReducer,
@@ -34,6 +42,11 @@ class ResiduePrediction:
     residue_id: str
     probability: float
     is_binding: bool
+
+    @property
+    def score(self) -> float:
+        """Canonical uncalibrated model score; ``probability`` is a compatibility name."""
+        return self.probability
 
 
 @dataclass
@@ -56,15 +69,35 @@ class PredictionResult:
     unscored_bfactor_policy: str = "zero"
     elapsed_seconds: float | None = None
     warnings: list[str] | None = None
+    structure_summary: dict[str, object] | None = None
+    input_metadata: dict[str, object] | None = None
+    runtime_metadata: dict[str, str] | None = None
     _records_cache: list[dict[str, str | int | float | None]] | None = field(default=None, init=False, repr=False)
     _cluster_indices_cache: list[np.ndarray] | None = field(default=None, init=False, repr=False)
     _cluster_id_cache: np.ndarray | None = field(default=None, init=False, repr=False)
     _pocket_dict_cache: dict | None = field(default=None, init=False, repr=False)
     _summary_dict_cache: dict | None = field(default=None, init=False, repr=False)
 
+    def __setattr__(self, name: str, value) -> None:
+        if name == "threshold":
+            value = float(value)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError("Prediction threshold must be finite and in [0, 1].")
+        elif name == "cluster_cutoff":
+            value = float(value)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("Pocket cluster cutoff must be finite and greater than 0.")
+        object.__setattr__(self, name, value)
+        if not name.startswith("_") and "_records_cache" in self.__dict__:
+            object.__setattr__(self, "_records_cache", None)
+            object.__setattr__(self, "_cluster_indices_cache", None)
+            object.__setattr__(self, "_cluster_id_cache", None)
+            object.__setattr__(self, "_pocket_dict_cache", None)
+            object.__setattr__(self, "_summary_dict_cache", None)
+
     def __post_init__(self) -> None:
         self.input_pdb = Path(self.input_pdb)
-        self.probabilities = np.asarray(self.probabilities, dtype=float)
+        self.probabilities = np.array(self.probabilities, dtype=float, copy=True)
         if self.probabilities.ndim != 1:
             raise ValueError("Prediction probabilities must be a one-dimensional array.")
         if not np.all(np.isfinite(self.probabilities)):
@@ -78,19 +111,18 @@ class PredictionResult:
                 "Prediction residue_ids and probabilities must have the same length; "
                 f"got {len(self.residue_ids)} and {len(self.probabilities)}."
             )
-        if not 0.0 <= float(self.threshold) <= 1.0:
-            raise ValueError("Prediction threshold must be in [0, 1].")
-        if self.cluster_cutoff <= 0:
-            raise ValueError("Pocket cluster cutoff must be greater than 0.")
         if self.unscored_bfactor_policy not in {"keep", "zero"}:
             raise ValueError("unscored_bfactor_policy must be 'keep' or 'zero'.")
         if self.ca_coords is not None:
-            coords = np.asarray(self.ca_coords, dtype=float)
+            coords = np.array(self.ca_coords, dtype=float, copy=True)
             if coords.shape != (len(self.residue_ids), 3):
                 raise ValueError(
                     "Original CA coordinates must have shape "
                     f"({len(self.residue_ids)}, 3); got {coords.shape}."
                 )
+            if not np.all(np.isfinite(coords)):
+                raise ValueError("Original CA coordinates must be finite.")
+            coords.setflags(write=False)
             self.ca_coords = coords
         if self.residue_metadata is None:
             self.residue_metadata = [
@@ -108,6 +140,7 @@ class PredictionResult:
             self._normalize_metadata(metadata, residue_id, index)
             for index, (metadata, residue_id) in enumerate(zip(self.residue_metadata, self.residue_ids))
         ]
+        self.probabilities.setflags(write=False)
 
     @property
     def binding_residues(self) -> list[ResiduePrediction]:
@@ -116,6 +149,11 @@ class PredictionResult:
             for residue_id, probability in zip(self.residue_ids, self.probabilities)
             if probability > self.threshold
         ]
+
+    @property
+    def scores(self) -> np.ndarray:
+        """Canonical view of uncalibrated scores; ``probabilities`` remains API-compatible."""
+        return self.probabilities
 
     def write_pdb(
         self,
@@ -129,18 +167,44 @@ class PredictionResult:
             raise ValueError("unscored_bfactor_policy must be 'keep' or 'zero'.")
         if missing_value is None and policy == "zero":
             missing_value = 0.0
-        write_bfactor_pdb(
-            self.input_pdb,
-            output_pdb,
-            self.residue_ids,
-            self.probabilities,
-            missing_value=missing_value,
-            residue_metadata=self.residue_metadata,
-        )
+        final_path = Path(output_pdb).expanduser()
+        if self.input_metadata:
+            _assert_input_file_unchanged(self.input_pdb, self.input_metadata)
+        self._validate_single_output_path(final_path)
+        input_is_cif = self.input_pdb.suffix.lower() in {".cif", ".mmcif"}
+        output_is_cif = final_path.suffix.lower() in {".cif", ".mmcif"}
+        if input_is_cif != output_is_cif:
+            raise ValueError(
+                "Annotated structure output must use the same PDB or mmCIF format as the input; "
+                "use a dedicated structure converter separately."
+            )
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._temporary_output_path(final_path)
+        try:
+            write_bfactor_pdb(
+                self.input_pdb,
+                temporary_path,
+                self.residue_ids,
+                self.probabilities,
+                missing_value=missing_value,
+                residue_metadata=self.residue_metadata,
+            )
+            temporary_path.replace(final_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     def write_scores_tsv(self, output_tsv: str | Path, *, schema: str = "extended") -> None:
-        output_tsv = Path(output_tsv)
-        output_tsv.parent.mkdir(parents=True, exist_ok=True)
+        final_path = Path(output_tsv).expanduser()
+        self._validate_single_output_path(final_path)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._temporary_output_path(final_path)
+        try:
+            self._write_scores_tsv_file(temporary_path, schema=schema)
+            temporary_path.replace(final_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _write_scores_tsv_file(self, output_tsv: Path, *, schema: str) -> None:
         records = self.to_records()
         with output_tsv.open("w", encoding="utf-8") as file:
             if schema == "legacy":
@@ -156,7 +220,7 @@ class PredictionResult:
             file.write(
                 "residue_id\tresidue_key\tresidue_id_namespace\tmodel_id\tchain_id\tauth_asym_id\tlabel_asym_id\t"
                 "residue_number\tauth_seq_id\tlabel_seq_id\tinsertion_code\tresname\tone_letter_code\t"
-                "input_bfactor\tprobability\tis_binding\tx\ty\tz\tcluster_id\tis_scored\t"
+                "input_bfactor\tmodel_score\tprobability\tis_binding\tx\ty\tz\tcluster_id\tis_scored\t"
                 "rank_global\trank_within_chain\n"
             )
             for record in records:
@@ -175,7 +239,7 @@ class PredictionResult:
                     f"{self._format_optional_value(record['resname'])}\t"
                     f"{self._format_optional_value(record['one_letter_code'])}\t"
                     f"{self._format_optional_float(record['input_bfactor'])}\t"
-                    f"{record['probability']:.6f}\t{record['is_binding']}\t"
+                    f"{record['score']:.6f}\t{record['probability']:.6f}\t{record['is_binding']}\t"
                     f"{self._format_optional_float(record['x'])}\t"
                     f"{self._format_optional_float(record['y'])}\t"
                     f"{self._format_optional_float(record['z'])}\t{cluster_id}\t"
@@ -183,14 +247,33 @@ class PredictionResult:
                 )
 
     def write_pocket_json(self, output_json: str | Path) -> None:
-        output_json = Path(output_json)
-        output_json.parent.mkdir(parents=True, exist_ok=True)
-        output_json.write_text(json.dumps(self.to_pocket_dict(), indent=2), encoding="utf-8")
+        self._write_json_atomic(output_json, self.to_pocket_dict())
 
     def write_summary_json(self, output_json: str | Path) -> None:
-        output_json = Path(output_json)
-        output_json.parent.mkdir(parents=True, exist_ok=True)
-        output_json.write_text(json.dumps(self.to_summary_dict(), indent=2), encoding="utf-8")
+        self._write_json_atomic(output_json, self.to_summary_dict())
+
+    @staticmethod
+    def _temporary_output_path(final_path: Path) -> Path:
+        return final_path.with_name(
+            f".{final_path.stem}.{uuid.uuid4().hex}.part{final_path.suffix}"
+        )
+
+    def _write_json_atomic(self, output_json: str | Path, payload: dict) -> None:
+        final_path = Path(output_json).expanduser()
+        self._validate_single_output_path(final_path)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._temporary_output_path(final_path)
+        try:
+            temporary_path.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
+            temporary_path.replace(final_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _validate_single_output_path(self, path: Path) -> None:
+        if path.is_dir():
+            raise IsADirectoryError(f"Output path is a directory, not a file: {path}.")
+        if path.resolve(strict=False) == self.input_pdb.expanduser().resolve(strict=False):
+            raise ValueError(f"Output path must not overwrite the input structure: {path}.")
 
     def to_records(self) -> list[dict[str, str | int | float | None]]:
         if self._records_cache is not None:
@@ -219,6 +302,7 @@ class PredictionResult:
                     "resname": metadata.get("resname", ""),
                     "one_letter_code": metadata.get("one_letter_code", ""),
                     "input_bfactor": metadata.get("input_bfactor"),
+                    "score": float(probability),
                     "probability": float(probability),
                     "is_binding": int(probability > self.threshold),
                     "x": None if coord[0] is None else float(coord[0]),
@@ -241,18 +325,35 @@ class PredictionResult:
         clusters = self._cluster_indices()
         records = self.to_records()
         payload = {
-            "schema_version": "protcross-pocket-v1",
+            "schema_version": "protcross-pocket-v2",
             "protcross_version": self._protcross_version(),
             "asset_version": self.asset_version,
             "assets": self.asset_metadata or {},
             "input_structure": str(self.input_pdb),
+            "input_file": self.input_metadata or {},
+            "runtime": self.runtime_metadata or {},
             "threshold": float(self.threshold),
             "threshold_operator": ">",
-            "score_type": "softmax_probability",
+            "score_type": "softmax_class_score",
+            "score_calibrated": False,
+            "score_interpretation": (
+                "Relative ProtCross binding-site model score. It is not a calibrated probability "
+                "or a binding-affinity estimate."
+            ),
+            "compatibility_aliases": {"probability": "score"},
+            "geometry_backend": "deterministic-pytorch",
+            "scoring_procedure_version": "protcross-0.2.1-deterministic-pytorch",
+            "residue_ordering": "canonical_model_chain_polymer_order",
+            "rigid_rotation_invariant": False,
             "coordinate_frame": "input_structure",
             "coordinate_units": "angstrom",
             "atom_basis": "CA",
-            "center_type": "probability_weighted_ca_centroid",
+            "center_type": "score_weighted_ca_centroid",
+            "center_interpretation": (
+                "Centroid of predicted residue CA coordinates; not a ligand centroid, cavity center, "
+                "surface-accessible point, or validated docking-box center."
+            ),
+            "cluster_method": "single_linkage_connected_components_on_selected_ca_atoms",
             "cluster_cutoff": float(self.cluster_cutoff),
             "cluster_rank_basis": "residue_count_then_score_mean_then_score_max",
             "truncated": bool(self.truncated),
@@ -262,6 +363,7 @@ class PredictionResult:
             "chains_analyzed": self.chains_analyzed,
             "residue_id_namespaces": self.residue_id_namespaces,
             "warnings": self.warnings,
+            "structure_summary": self.structure_summary or {},
             "aggregate_pocket": (
                 self._pocket_from_indices(selected_indices, coords, records=records)
                 if len(selected_indices)
@@ -292,21 +394,39 @@ class PredictionResult:
                 "chain_id": record["chain_id"],
                 "residue_number": record["residue_number"],
                 "insertion_code": record["insertion_code"],
+                "score": record["score"],
                 "probability": record["probability"],
                 "rank_global": record["rank_global"],
             }
             for record in sorted(self.to_records(), key=lambda record: int(record["rank_global"]))[:10]
         ]
         payload = {
-            "schema_version": "protcross-summary-v1",
+            "schema_version": "protcross-summary-v2",
             "protcross_version": self._protcross_version(),
             "asset_version": self.asset_version,
             "assets": self.asset_metadata or {},
             "input_structure": str(self.input_pdb),
+            "input_file": self.input_metadata or {},
+            "runtime": self.runtime_metadata or {},
             "device": self.device,
             "threshold": float(self.threshold),
             "threshold_operator": ">",
-            "score_type": "softmax_probability",
+            "score_type": "softmax_class_score",
+            "score_calibrated": False,
+            "score_interpretation": (
+                "Relative ProtCross binding-site model score; not a calibrated probability or binding affinity."
+            ),
+            "compatibility_aliases": {
+                "probability": "score",
+                "probability_min": "score_min",
+                "probability_max": "score_max",
+                "probability_mean": "score_mean",
+            },
+            "geometry_backend": "deterministic-pytorch",
+            "scoring_procedure_version": "protcross-0.2.1-deterministic-pytorch",
+            "residue_ordering": "canonical_model_chain_polymer_order",
+            "rigid_rotation_invariant": False,
+            "threshold_origin": "user decision threshold; 0.5 is a neutral default, not an independently validated optimum",
             "cluster_cutoff": float(self.cluster_cutoff),
             "chains_analyzed": self.chains_analyzed,
             "residue_id_namespaces": self.residue_id_namespaces,
@@ -316,12 +436,23 @@ class PredictionResult:
             "selected_residue_fraction": (
                 float(len(self._selected_indices()) / len(self.residue_ids)) if self.residue_ids else 0.0
             ),
+            "score_min": float(self.probabilities.min()) if len(self.probabilities) else None,
+            "score_max": float(self.probabilities.max()) if len(self.probabilities) else None,
+            "score_mean": float(self.probabilities.mean()) if len(self.probabilities) else None,
             "probability_min": float(self.probabilities.min()) if len(self.probabilities) else None,
             "probability_max": float(self.probabilities.max()) if len(self.probabilities) else None,
             "probability_mean": float(self.probabilities.mean()) if len(self.probabilities) else None,
             "truncated": bool(self.truncated),
             "max_len": self.max_len,
             "unscored_bfactor_policy": self.unscored_bfactor_policy,
+            "annotated_structure_score_precision": (
+                "PDB B-factor fields round to two decimal places; mmCIF uses up to six significant digits. "
+                "Use scores.tsv or JSON for quantitative values."
+            ),
+            "annotated_structure_preservation": (
+                "PDB output preserves input records and patches only B-factor columns on ATOM/HETATM lines; "
+                "mmCIF output preserves data categories while reserializing text."
+            ),
             "elapsed_seconds": self.elapsed_seconds,
             "aggregate_pocket": (
                 {
@@ -349,6 +480,15 @@ class PredictionResult:
             "output_files": self.output_files or {},
             "output_format_warning": self.output_format_warning,
             "warnings": self.warnings,
+            "structure_summary": self.structure_summary or {},
+            "intended_use": "Hypothesis generation and residue ranking for small-molecule-adjacent site analysis.",
+            "limitations": [
+                "The 0.1.2 release checkpoint has not been established as a calibrated probability model.",
+                "Release labels use CA-within-6-Angstrom proximity to eligible hetero/nonstandard residue atoms after a name blacklist; they are not ligand-specific affinity labels.",
+                "The supplied coordinate assembly is used as-is; biological assembly operators are not applied.",
+                "Multiple selected chains share one geometry graph, and residue clusters can span chain interfaces.",
+                "Predicted-residue cluster centroids are not validated docking coordinates.",
+            ],
         }
         self._summary_dict_cache = payload
         return payload
@@ -360,16 +500,24 @@ class PredictionResult:
             f"Input: {self.input_pdb}",
             f"Asset version: {self.asset_version or 'unspecified'}",
             f"Device: {self.device or 'unspecified'}",
-            f"Chains analyzed: {', '.join(summary['chains_analyzed']) or 'none'}",
+            "Chains analyzed: "
+            + (
+                ", ".join(
+                    chain if str(chain).strip() else "<blank>"
+                    for chain in summary["chains_analyzed"]
+                )
+                or "none"
+            ),
             f"Residues scored: {summary['residues_scored']} / {summary['original_residue_count']}",
-            f"Threshold: {self.threshold:.2f} (binary calls, TSV is_binding, pocket selection, clustering, summary)",
+            f"Threshold: {self.threshold:.2f} (binary calls, TSV is_binding, residue selection, clustering, summary)",
             f"Cluster cutoff: {self.cluster_cutoff:.2f} A",
             f"Unscored B-factor policy: {summary['unscored_bfactor_policy']}",
-            f"Predicted binding residues: {len(hits)}",
+            "Score interpretation: uncalibrated softmax class score (not binding probability or affinity)",
+            f"Residues above threshold: {len(hits)}",
         ]
         if summary["probability_min"] is not None:
             lines.append(
-                "Probability range: "
+                "Model score range: "
                 f"{summary['probability_min']:.4f} - {summary['probability_max']:.4f} "
                 f"(mean {summary['probability_mean']:.4f})"
             )
@@ -393,9 +541,9 @@ class PredictionResult:
             lines.append(f"Top residues: {preview}")
         if summary["top_pocket"]:
             center = summary["top_pocket"]["center"]
-            lines.append(f"Pocket center: {center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}")
-            lines.append(f"Top pocket residues: {summary['top_pocket']['residue_count']}")
-            lines.append(f"Clustered pockets: {summary['cluster_count']}")
+            lines.append(f"Top cluster score-weighted CA centroid: {center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}")
+            lines.append(f"Top cluster residues: {summary['top_pocket']['residue_count']}")
+            lines.append(f"Predicted-residue clusters: {summary['cluster_count']}")
         if summary["output_files"]:
             for label, path in summary["output_files"].items():
                 lines.append(f"Wrote {label}: {path}")
@@ -407,7 +555,12 @@ class PredictionResult:
 
     @property
     def chains_analyzed(self) -> list[str]:
-        return sorted({str(metadata.get("chain_id", "")) for metadata in self.residue_metadata if metadata.get("chain_id")})
+        return sorted(
+            {
+                str(metadata.get("chain_id") or "")
+                for metadata in self.residue_metadata
+            }
+        )
 
     @property
     def residue_id_namespaces(self) -> list[str]:
@@ -490,6 +643,7 @@ class PredictionResult:
         bbox_min = pocket_coords.min(axis=0)
         bbox_max = pocket_coords.max(axis=0)
         radius = float(np.max(np.linalg.norm(pocket_coords - center, axis=1)))
+        diameter = _max_pairwise_distance(pocket_coords)
 
         pocket_records = []
         for index in indices:
@@ -511,6 +665,7 @@ class PredictionResult:
                     "resname": record["resname"],
                     "one_letter_code": record["one_letter_code"],
                     "input_bfactor": record["input_bfactor"],
+                    "score": record["score"],
                     "probability": record["probability"],
                     "coord": [float(coord[0]), float(coord[1]), float(coord[2])],
                 }
@@ -529,6 +684,8 @@ class PredictionResult:
             "bbox_min": [float(bbox_min[0]), float(bbox_min[1]), float(bbox_min[2])],
             "bbox_max": [float(bbox_max[0]), float(bbox_max[1]), float(bbox_max[2])],
             "radius": radius,
+            "max_pairwise_ca_distance": diameter,
+            "diffuse_single_linkage_cluster": bool(diameter > max(2.0 * self.cluster_cutoff, 16.0)),
             "residues": pocket_records,
         }
         if cluster_id is not None:
@@ -556,15 +713,18 @@ class PredictionResult:
 
     def _chain_ranks(self) -> np.ndarray:
         ranks = np.empty(len(self.probabilities), dtype=int)
-        chain_ids = self.chains_analyzed or [""]
+        chain_ids = sorted(
+            {
+                str(metadata.get("chain_id") or "")
+                for metadata in self.residue_metadata
+            }
+        )
         for chain_id in chain_ids:
             indices = [
                 index
                 for index, metadata in enumerate(self.residue_metadata)
-                if str(metadata.get("chain_id", "")) == chain_id
+                if str(metadata.get("chain_id") or "") == chain_id
             ]
-            if not indices:
-                indices = list(range(len(self.probabilities)))
             for rank, relative_index in enumerate(np.argsort(-self.probabilities[indices]), start=1):
                 ranks[indices[int(relative_index)]] = rank
         return ranks
@@ -651,10 +811,21 @@ class ProtCrossPredictor:
         self.pca_dim = pca_dim
         self.embedding_cache_dir = Path(embedding_cache_dir).expanduser() if embedding_cache_dir else None
         self.asset_version = asset_version
-        self.asset_metadata = asset_metadata
         esm_weights_path = self._optional_existing_path(esm_weights, "esm_weights") if esm_weights is not None else None
         pca_path_obj = self._optional_existing_path(pca_path, "pca_path") if pca_path is not None else None
         ckpt_path_obj = self._optional_existing_path(ckpt_path, "ckpt_path") if ckpt_path is not None else None
+        self.asset_metadata = asset_metadata
+        if self.asset_metadata is None and all(
+            path is not None for path in (ckpt_path_obj, esm_weights_path, pca_path_obj)
+        ):
+            self.asset_metadata = build_prediction_asset_metadata(
+                ckpt_path_obj,
+                esm_weights_path,
+                pca_path_obj,
+                asset_version=asset_version,
+                selected_bundle_version=asset_version,
+                sources={name: "direct" for name in ("checkpoint", "esm_weights", "pca")},
+            )
         self._embedding_cache_asset_identity = self._embedding_cache_asset_identity_for(
             esm_weights_path,
             pca_path_obj,
@@ -708,15 +879,24 @@ class ProtCrossPredictor:
         embedding_cache_dir: str | Path | None = None,
         accept_esm_license: bool = False,
     ) -> "ProtCrossPredictor":
+        resolved_device = cls._resolve_device(device)
+        asset_metadata = build_prediction_asset_metadata(
+            assets.checkpoint,
+            assets.esm_weights,
+            assets.pca,
+            asset_version=assets.asset_version,
+            selected_bundle_version=assets.asset_version,
+            sources={name: "predictor_assets" for name in ("checkpoint", "esm_weights", "pca")},
+        )
         return cls.from_files(
             ckpt_path=assets.checkpoint,
             esm_weights=assets.esm_weights,
             pca_path=assets.pca,
-            device=device,
+            device=resolved_device,
             pca_dim=pca_dim,
             max_len=max_len,
             asset_version=assets.asset_version,
-            asset_metadata=None,
+            asset_metadata=asset_metadata,
             embedding_cache_dir=embedding_cache_dir,
             accept_esm_license=accept_esm_license,
         )
@@ -730,14 +910,28 @@ class ProtCrossPredictor:
         max_len: int = MAX_ESM_RESIDUES,
         embedding_cache_dir: str | Path | None = None,
         accept_esm_license: bool = False,
+        trust_unverified_assets: bool = False,
     ) -> "ProtCrossPredictor":
-        return cls.from_assets(
-            PredictorAssets.from_env(),
-            device=device,
+        PredictorAssets.from_env()
+        resolved_device = cls._resolve_device(device)
+        resolved = resolve_prediction_assets(
+            auto_setup_assets=False,
+            offline=True,
+            accept_esm_license=accept_esm_license,
+            require_esm_license_for_use=True,
+            trust_unverified_assets=trust_unverified_assets,
+        )
+        return cls.from_files(
+            ckpt_path=resolved.checkpoint,
+            esm_weights=resolved.esm_weights,
+            pca_path=resolved.pca,
+            device=resolved_device,
             pca_dim=pca_dim,
             max_len=max_len,
+            asset_version=resolved.asset_version,
+            asset_metadata=resolved.asset_metadata,
             embedding_cache_dir=embedding_cache_dir,
-            accept_esm_license=accept_esm_license,
+            accept_esm_license=True,
         )
 
     @classmethod
@@ -751,13 +945,29 @@ class ProtCrossPredictor:
         embedding_cache_dir: str | Path | None = None,
         accept_esm_license: bool = False,
     ) -> "ProtCrossPredictor":
-        return cls.from_assets(
-            PredictorAssets.from_default_dir(asset_version=asset_version),
-            device=device,
+        resolved_device = cls._resolve_device(device)
+        default_assets = PredictorAssets.from_default_dir(asset_version=asset_version)
+        resolved = resolve_prediction_assets(
+            ckpt_path=default_assets.checkpoint,
+            esm_weights=default_assets.esm_weights,
+            pca_path=default_assets.pca,
+            auto_setup_assets=False,
+            asset_version=default_assets.asset_version,
+            offline=True,
+            accept_esm_license=accept_esm_license,
+            require_esm_license_for_use=True,
+        )
+        return cls.from_files(
+            ckpt_path=resolved.checkpoint,
+            esm_weights=resolved.esm_weights,
+            pca_path=resolved.pca,
+            device=resolved_device,
             pca_dim=pca_dim,
             max_len=max_len,
+            asset_version=resolved.asset_version,
+            asset_metadata=resolved.asset_metadata,
             embedding_cache_dir=embedding_cache_dir,
-            accept_esm_license=accept_esm_license,
+            accept_esm_license=True,
         )
 
     def predict(
@@ -780,9 +990,21 @@ class ProtCrossPredictor:
             max_len=self.max_len,
             unscored_bfactor_policy=unscored_bfactor_policy,
         )
-        pdb_file = Path(pdb_file)
+        pdb_file = Path(pdb_file).expanduser()
         if not pdb_file.exists():
             raise FileNotFoundError(f"Input structure not found: {pdb_file}")
+        output_pdb, scores_tsv, pocket_json, summary_json = (
+            _expanded_optional_path(path)
+            for path in (output_pdb, scores_tsv, pocket_json, summary_json)
+        )
+        _validate_output_paths(
+            pdb_file,
+            output_pdb,
+            scores_tsv,
+            pocket_json,
+            summary_json,
+        )
+        input_metadata = _input_file_metadata(pdb_file)
 
         parsed = self.structure_parser.parse_file_with_labels(pdb_file, chain_id=chain_id)
         if not parsed:
@@ -807,6 +1029,20 @@ class ProtCrossPredictor:
 
         probabilities = self._infer(data)
         elapsed_seconds = time.perf_counter() - start_time
+        inspection = None
+        try:
+            from protcross.data.inspection import inspect_structure
+
+            inspection = inspect_structure(pdb_file, chain_id=chain_id, max_len=self.max_len)
+        except Exception:
+            # Custom parsers remain supported; the prediction parser is authoritative here.
+            inspection = None
+        structure_warnings = list(parsed.get("structure_warnings", []))
+        if inspection:
+            structure_warnings.extend(str(item) for item in inspection.get("warnings", []))
+        structure_warnings = list(dict.fromkeys(structure_warnings))
+        _assert_input_file_unchanged(pdb_file, input_metadata)
+
         result = PredictionResult(
             input_pdb=pdb_file,
             residue_ids=list(parsed["residue_ids"]),
@@ -827,7 +1063,10 @@ class ProtCrossPredictor:
             output_format_warning=self._output_format_warning(pdb_file, output_pdb),
             unscored_bfactor_policy=unscored_bfactor_policy,
             elapsed_seconds=elapsed_seconds,
-            warnings=list(parsed.get("structure_warnings", [])),
+            warnings=structure_warnings,
+            structure_summary=inspection,
+            input_metadata=input_metadata,
+            runtime_metadata=_runtime_metadata(),
         )
 
         if output_pdb:
@@ -883,17 +1122,27 @@ class ProtCrossPredictor:
         cache_path = self._embedding_cache_path(sequence)
         if cache_path and cache_path.exists():
             try:
-                return torch.load(cache_path, map_location="cpu", weights_only=True).float()
-            except TypeError:
-                return torch.load(cache_path, map_location="cpu").float()
+                try:
+                    return torch.load(cache_path, map_location="cpu", weights_only=True).float()
+                except TypeError:
+                    return torch.load(cache_path, map_location="cpu").float()
+            except Exception:
+                # A killed writer or an older incompatible cache must not make
+                # the underlying structure permanently unscorable.
+                cache_path.unlink(missing_ok=True)
 
         raw_embeddings = self.esm_extractor.extract_residue_embeddings(sequence)
         reduced_embeddings = self.pca_reducer.transform(raw_embeddings)
         if cache_path:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.with_suffix(cache_path.suffix + ".part")
-            torch.save(reduced_embeddings.cpu(), tmp_path)
-            tmp_path.replace(cache_path)
+            tmp_path = cache_path.with_name(
+                f".{cache_path.stem}.{uuid.uuid4().hex}.part{cache_path.suffix}"
+            )
+            try:
+                torch.save(reduced_embeddings.cpu(), tmp_path)
+                tmp_path.replace(cache_path)
+            finally:
+                tmp_path.unlink(missing_ok=True)
         return reduced_embeddings.float()
 
     def _featurize_parsed(self, parsed: dict) -> torch.Tensor:
@@ -939,13 +1188,40 @@ class ProtCrossPredictor:
     def _load_pca(pca_path: Path, pca_dim: int) -> PCAReducer:
         reducer = PCAReducer(n_components=pca_dim)
         reducer.load(pca_path)
+        actual_dim = getattr(reducer.pca, "n_components_", getattr(reducer.pca, "n_components", None))
+        if actual_dim is not None and int(actual_dim) != pca_dim:
+            raise ValueError(
+                f"PCA reducer has {int(actual_dim)} components, but pca_dim={pca_dim} was requested. "
+                "Use the dimension recorded by the matching asset bundle."
+            )
         return reducer
 
     @staticmethod
     def _resolve_device(device: str | None) -> str:
         if device in (None, "auto"):
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        return device
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return "mps"
+            return "cpu"
+        normalized = str(device).strip().lower()
+        try:
+            parsed = torch.device(normalized)
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError("device must be auto, cpu, mps, cuda, or cuda:N") from exc
+        if parsed.type == "cuda":
+            if not torch.cuda.is_available():
+                raise ValueError("CUDA was requested but torch.cuda.is_available() is false; use --device cpu.")
+            if parsed.index is not None and parsed.index >= torch.cuda.device_count():
+                raise ValueError(
+                    f"CUDA device {parsed.index} was requested, but only {torch.cuda.device_count()} device(s) are available."
+                )
+        elif parsed.type == "mps":
+            if not hasattr(torch.backends, "mps") or not torch.backends.mps.is_available():
+                raise ValueError("MPS was requested but is unavailable; use --device cpu.")
+        elif parsed.type != "cpu":
+            raise ValueError("device must be auto, cpu, mps, cuda, or cuda:N")
+        return normalized
 
     @staticmethod
     def _optional_existing_path(value: str | Path, name: str) -> Path:
@@ -994,7 +1270,7 @@ def predict_pdb(
     summary_json: str | Path | None = None,
     pocket_cluster_cutoff: float = 8.0,
     auto_setup_assets: bool = True,
-    asset_version: str = "default",
+    asset_version: str | None = None,
     refresh_assets: bool = False,
     offline: bool = False,
     accept_esm_license: bool = False,
@@ -1004,7 +1280,7 @@ def predict_pdb(
     unscored_bfactor_policy: str = "zero",
     embedding_cache_dir: str | Path | None = None,
 ) -> PredictionResult:
-    pdb_file = Path(pdb_file)
+    pdb_file = Path(pdb_file).expanduser()
     if not pdb_file.exists():
         raise FileNotFoundError(f"Input structure not found: {pdb_file}")
     _validate_prediction_options(
@@ -1013,6 +1289,14 @@ def predict_pdb(
         max_len=max_len,
         unscored_bfactor_policy=unscored_bfactor_policy,
     )
+    _validate_output_paths(
+        pdb_file,
+        output_pdb,
+        scores_tsv,
+        pocket_json,
+        summary_json,
+    )
+    resolved_device = ProtCrossPredictor._resolve_device(device)
     _preflight_prediction_structure(
         pdb_file,
         chain_id=chain_id,
@@ -1036,9 +1320,10 @@ def predict_pdb(
         ckpt_path=resolved.checkpoint,
         esm_weights=resolved.esm_weights,
         pca_path=resolved.pca,
-        device=device,
+        device=resolved_device,
         max_len=max_len,
         asset_version=resolved.asset_version,
+        asset_metadata=resolved.asset_metadata,
         embedding_cache_dir=embedding_cache_dir,
         accept_esm_license=True,
     )
@@ -1063,7 +1348,7 @@ def _resolve_predict_pdb_assets(
     *,
     assets_dir: str | Path | None = None,
     auto_setup_assets: bool = True,
-    asset_version: str = "default",
+    asset_version: str | None = None,
     refresh_assets: bool = False,
     offline: bool = False,
     accept_esm_license: bool = False,
@@ -1101,6 +1386,100 @@ def _validate_prediction_options(
         raise ValueError(f"max_len must be between 1 and {MAX_ESM_RESIDUES}.")
     if unscored_bfactor_policy not in {"keep", "zero"}:
         raise ValueError("unscored_bfactor_policy must be 'keep' or 'zero'.")
+
+
+def _validate_output_paths(
+    input_structure: str | Path,
+    *output_paths: str | Path | None,
+) -> None:
+    input_path = Path(input_structure).expanduser()
+    resolved_input = input_path.resolve(strict=False)
+    if output_paths and output_paths[0] is not None:
+        structure_output = Path(output_paths[0]).expanduser()
+        input_is_cif = input_path.suffix.lower() in {".cif", ".mmcif"}
+        output_is_cif = structure_output.suffix.lower() in {".cif", ".mmcif"}
+        if input_is_cif != output_is_cif:
+            raise ValueError(
+                "Annotated structure output must use the same PDB or mmCIF format as the input."
+            )
+    seen: dict[Path, Path] = {}
+    for value in output_paths:
+        if value is None:
+            continue
+        path = Path(value).expanduser()
+        if path.is_dir():
+            raise IsADirectoryError(f"Output path is a directory, not a file: {path}.")
+        resolved = path.resolve(strict=False)
+        if resolved == resolved_input:
+            raise ValueError(f"Output path must not overwrite the input structure: {path}.")
+        if resolved in seen:
+            raise ValueError(
+                "Output paths must be distinct; "
+                f"{seen[resolved]} and {path} resolve to the same file."
+            )
+        seen[resolved] = path
+
+
+def _expanded_optional_path(value: str | Path | None) -> Path | None:
+    return Path(value).expanduser() if value is not None else None
+
+
+def _input_file_metadata(path: Path) -> dict[str, object]:
+    stat = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path.resolve()),
+        "sha256": digest.hexdigest(),
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _assert_input_file_unchanged(path: Path, expected: dict[str, object]) -> None:
+    current = _input_file_metadata(path)
+    if (
+        current["sha256"] != expected.get("sha256")
+        or current["size_bytes"] != expected.get("size_bytes")
+    ):
+        raise RuntimeError(
+            f"Input structure changed while prediction results were being prepared: {path}. "
+            "No annotated structure was written; rerun with a stable input file."
+        )
+
+
+def _runtime_metadata() -> dict[str, str]:
+    packages = {
+        "biopython": "biopython",
+        "esm": "esm",
+        "torch_geometric": "torch-geometric",
+    }
+    metadata = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "torch": str(torch.__version__),
+        "numpy": str(np.__version__),
+    }
+    for key, distribution in packages.items():
+        try:
+            metadata[key] = distribution_version(distribution)
+        except PackageNotFoundError:
+            metadata[key] = "unknown"
+    return metadata
+
+
+def _max_pairwise_distance(coords: np.ndarray) -> float:
+    """Return cluster diameter without allocating a full N-by-N distance matrix."""
+    if len(coords) < 2:
+        return 0.0
+    maximum = 0.0
+    for index in range(len(coords) - 1):
+        distances = np.linalg.norm(coords[index + 1 :] - coords[index], axis=1)
+        if len(distances):
+            maximum = max(maximum, float(distances.max()))
+    return maximum
 
 
 def _preflight_prediction_structure(

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import uuid
 
 from protcross.assets import sha256_file
 
@@ -38,6 +39,7 @@ class DesktopManifest:
     backend_tested_at: str | None = None
     backend_test_mode: str | None = None
     backend_test_python: str | None = None
+    backend_test_package_version: str | None = None
     proxy_url: str | None = None
     updated_at: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
@@ -47,7 +49,16 @@ class DesktopManifest:
         path = Path(path)
         if not path.exists():
             return cls()
-        data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("manifest root is not a JSON object")
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            quarantine = path.with_name(f"{path.name}.corrupt-{uuid.uuid4().hex}")
+            path.replace(quarantine)
+            manifest = cls()
+            manifest.extra["recovered_corrupt_manifest"] = str(quarantine)
+            return manifest
         known = {field.name for field in cls.__dataclass_fields__.values()}
         payload = {key: value for key, value in data.items() if key in known}
         extra = {key: value for key, value in data.items() if key not in known}
@@ -60,7 +71,12 @@ class DesktopManifest:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.updated_at = utc_now()
         payload = self.to_dict()
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -84,6 +100,7 @@ class DesktopManifest:
             "backend_tested_at": self.backend_tested_at,
             "backend_test_mode": self.backend_test_mode,
             "backend_test_python": self.backend_test_python,
+            "backend_test_package_version": self.backend_test_package_version,
             "proxy_url": self.proxy_url,
             "updated_at": self.updated_at,
         }

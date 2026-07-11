@@ -1,36 +1,54 @@
+import math
+
 import torch
 import torch.nn as nn
 from torch_geometric.nn import PointNetConv, global_max_pool, MLP
 
 
 try:
-    from torch_cluster import fps as cluster_fps
-    from torch_cluster import radius as cluster_radius
-    from torch_cluster import knn as cluster_knn
+    from torch_cluster import fps as cluster_fps  # noqa: F401 - exported for parity tests
+    from torch_cluster import radius as cluster_radius  # noqa: F401 - exported for parity tests
+    from torch_cluster import knn as cluster_knn  # noqa: F401 - exported for parity tests
     HAS_CLUSTER = True
 except (ImportError, OSError):
     HAS_CLUSTER = False
 
 
+# ProtCross 0.2.1 deliberately uses one deterministic geometry implementation
+# on every platform. torch_cluster's over-capacity radius subset is unspecified
+# and produced materially different predictions between optional-dependency
+# installs. The imported primitives remain available for parity tests only.
+GEOMETRY_BACKEND = "deterministic-pytorch"
+DISTANCE_TARGET_CHUNK_SIZE = 512
+
 
 def manual_fps(x, batch, ratio=0.5):
-    """Pure PyTorch farthest point sampling fallback."""
+    """Pure PyTorch deterministic FPS matching ``torch_cluster.fps``.
+
+    ``safe_fps`` requests ``random_start=False`` from ``torch_cluster``.  In
+    that mode each batch starts from its first point and samples
+    ``ceil(num_points * ratio)`` points.  Keep those details identical here:
+    PointNet++ checkpoints are sensitive to both the sampled count and the
+    initial centroid.
+    """
+    if x.size(0) == 0:
+        return torch.empty(0, dtype=torch.long, device=x.device)
+
     new_indices = []
 
-    batch_size = batch.max().item() + 1
+    batch_size = int(batch.max().item()) + 1
     for b_idx in range(batch_size):
         mask = batch == b_idx
         indices = torch.where(mask)[0]
+        if indices.numel() == 0:
+            continue
         pos_b = x[indices]
 
         num_points = indices.shape[0]
-        num_samples = int(num_points * ratio)
-        if num_samples == 0:
-            num_samples = 1
+        num_samples = max(1, math.ceil(num_points * float(ratio)))
 
-        dists = torch.ones(num_points, device=x.device) * 1e10
-        centered = pos_b - pos_b.mean(dim=0, keepdim=True)
-        farthest = torch.sum(centered * centered, dim=-1).argmax()
+        dists = torch.full((num_points,), torch.inf, dtype=x.dtype, device=x.device)
+        farthest = torch.zeros((), dtype=torch.long, device=x.device)
 
         sample_indices = []
         for _ in range(num_samples):
@@ -48,27 +66,45 @@ def manual_fps(x, batch, ratio=0.5):
     return torch.cat(new_indices)
 
 def manual_radius(x, y, r, batch_x, batch_y, max_num_neighbors=64):
-    """Radius search fallback returning (row=target, col=source)."""
+    """Radius search fallback returning ``(row=target, col=source)``.
+
+    ``torch_cluster.radius`` groups edges by target point and applies
+    ``max_num_neighbors`` independently to each target.  Its choice is
+    unspecified when a target has too many neighbors; this fallback makes that
+    choice deterministic by retaining qualifying sources in input order.
+    Applying the cap per source instead changes the PointNet++ graph (especially
+    for the 20/40 Angstrom layers).
+    """
+    if x.size(0) == 0 or y.size(0) == 0:
+        empty = torch.empty(0, dtype=torch.long, device=x.device)
+        return empty, empty
+
     row_list, col_list = [], []
-    batch_size = batch_x.max().item() + 1
+    batch_size = int(max(batch_x.max(), batch_y.max()).item()) + 1
 
     for b_idx in range(batch_size):
         idx_x = torch.where(batch_x == b_idx)[0]
         idx_y = torch.where(batch_y == b_idx)[0]
+        if idx_x.numel() == 0 or idx_y.numel() == 0:
+            continue
 
         pos_x = x[idx_x]  # Source
         pos_y = y[idx_y]  # Target
 
-        dist = torch.cdist(pos_x, pos_y)
-        mask = dist < r
+        for start in range(0, pos_y.shape[0], DISTANCE_TARGET_CHUNK_SIZE):
+            stop = min(start + DISTANCE_TARGET_CHUNK_SIZE, pos_y.shape[0])
+            within_radius = torch.cdist(pos_y[start:stop], pos_x) < r
 
-        for i in range(pos_x.shape[0]):
-            neighbors = torch.where(mask[i])[0]
-            if len(neighbors) > max_num_neighbors:
-                neighbors = neighbors[:max_num_neighbors]
+            for local_target_index in range(stop - start):
+                target_index = start + local_target_index
+                neighbors = torch.where(within_radius[local_target_index])[0]
+                if len(neighbors) > max_num_neighbors:
+                    neighbors = neighbors[:max_num_neighbors]
 
-            row_list.append(idx_y[neighbors])
-            col_list.append(torch.full_like(neighbors, idx_x[i]))
+                if neighbors.numel() == 0:
+                    continue
+                row_list.append(idx_y[target_index].expand(neighbors.numel()))
+                col_list.append(idx_x[neighbors])
 
     if len(row_list) == 0:
         return (torch.empty(0, dtype=torch.long, device=x.device),
@@ -82,6 +118,10 @@ def manual_knn(x, y, k, batch_x, batch_y):
     """KNN (Fallback): Finds for each element in y the k nearest points in x.
     Returns (row=y_idx, col=x_idx) to match torch_cluster.knn semantics.
     """
+    if x.size(0) == 0 or y.size(0) == 0:
+        empty = torch.empty(0, dtype=torch.long, device=x.device)
+        return empty, empty
+
     row_list, col_list = [], []
     batch_size = int(max(batch_x.max(), batch_y.max()).item()) + 1
 
@@ -95,15 +135,17 @@ def manual_knn(x, y, k, batch_x, batch_y):
         pos_y = y[idx_y]  # Target points
 
         k_val = min(k, pos_x.size(0))
-        # dist: [num_y, num_x] -> for each y find nearest in x
-        dist = torch.cdist(pos_y, pos_x)
-        _, nn_idx = dist.topk(k_val, dim=1, largest=False)
+        for start in range(0, pos_y.shape[0], DISTANCE_TARGET_CHUNK_SIZE):
+            stop = min(start + DISTANCE_TARGET_CHUNK_SIZE, pos_y.shape[0])
+            # torch_cluster orders neighbors by increasing distance and
+            # preserves source order for exact ties. ``topk`` is not stable.
+            dist = torch.cdist(pos_y[start:stop], pos_x)
+            nn_idx = torch.argsort(dist, dim=1, stable=True)[:, :k_val]
 
-        row = idx_y.repeat_interleave(k_val)          # y indices (targets)
-        col = idx_x[nn_idx.reshape(-1)]               # x indices (sources)
-
-        row_list.append(row)
-        col_list.append(col)
+            row = idx_y[start:stop].repeat_interleave(k_val)
+            col = idx_x[nn_idx.reshape(-1)]
+            row_list.append(row)
+            col_list.append(col)
 
     if len(row_list) == 0:
         dev = x.device
@@ -115,13 +157,9 @@ def manual_knn(x, y, k, batch_x, batch_y):
     return row, col
 
 def safe_fps(x, batch, ratio):
-    if HAS_CLUSTER:
-        return cluster_fps(x, batch, ratio=ratio, random_start=False)
     return manual_fps(x, batch, ratio)
 
 def safe_radius(x, y, r, batch_x, batch_y, max_num_neighbors):
-    if HAS_CLUSTER:
-        return cluster_radius(x, y, r, batch_x, batch_y, max_num_neighbors)
     return manual_radius(x, y, r, batch_x, batch_y, max_num_neighbors)
 
 def safe_knn_interpolate(x, pos_x, pos_y, batch_x, batch_y, k):
@@ -130,12 +168,7 @@ def safe_knn_interpolate(x, pos_x, pos_y, batch_x, batch_y, k):
     For each point in pos_y, find its k nearest neighbors in pos_x, then
     interpolate features from x (defined on pos_x) onto pos_y.
     """
-    if HAS_CLUSTER:
-        # torch_cluster.knn: for each y find k nearest in x -> returns (y_idx, x_idx)
-        y_idx, x_idx = cluster_knn(pos_x, pos_y, k, batch_x, batch_y)
-    else:
-        # Fallback: keep the same semantics as torch_cluster.knn
-        y_idx, x_idx = manual_knn(pos_x, pos_y, k, batch_x, batch_y)
+    y_idx, x_idx = manual_knn(pos_x, pos_y, k, batch_x, batch_y)
 
     # Correct indexing: x_idx indexes pos_x/x, y_idx indexes pos_y/out
     diff = pos_x[x_idx] - pos_y[y_idx]

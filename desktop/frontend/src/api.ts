@@ -1,4 +1,12 @@
-import type { BackendMode, BatchJob, BatchResultResponse, DesktopStatus, PredictResponse } from "./types";
+import type {
+  AssetDownloadJob,
+  BackendMode,
+  BatchJob,
+  BatchResultResponse,
+  DesktopStatus,
+  PredictResponse,
+  StructureInspection
+} from "./types";
 
 let baseUrl = "";
 let desktopToken = "";
@@ -95,10 +103,21 @@ export function importPca(path: string): Promise<Record<string, unknown>> {
   });
 }
 
-export function downloadEsm(force = false): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>("/assets/download-esm", {
+export function downloadEsm(force = false): Promise<AssetDownloadJob> {
+  return request<AssetDownloadJob>("/assets/download-esm/start", {
     method: "POST",
     body: JSON.stringify({ force })
+  });
+}
+
+export function getEsmDownload(jobId: string): Promise<AssetDownloadJob> {
+  return request<AssetDownloadJob>(`/asset-download/${jobId}`);
+}
+
+export function cancelEsmDownload(jobId: string): Promise<AssetDownloadJob> {
+  return request<AssetDownloadJob>(`/asset-download/${jobId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({})
   });
 }
 
@@ -113,6 +132,16 @@ export function runPrediction(payload: {
   return request<PredictResponse>("/predict", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export function inspectStructure(inputStructure: string, chainId?: string): Promise<StructureInspection> {
+  return request<StructureInspection>("/inspect", {
+    method: "POST",
+    body: JSON.stringify({
+      input_structure: inputStructure,
+      chain_id: chainId || undefined
+    })
   });
 }
 

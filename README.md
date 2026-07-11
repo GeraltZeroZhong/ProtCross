@@ -1,635 +1,931 @@
 # ProtCross
 
-ProtCross is a domain-adaptive protein point-cloud learning framework for binding-site prediction across experimentally solved **PDB** structures and predicted **AlphaFold2 (AF2)** structures. The model accepts structures from AlphaFold and can write per-residue binding probabilities to the **B-factor column** of a new PDB output file.
+ProtCross runs locally on PDB or mmCIF coordinate files, including AlphaFold
+models. It is a protein binding-site prediction tool that scores each scorable
+standard amino-acid residue and exports annotated coordinates, a residue-score
+table, predicted-residue clusters, and a reproducibility summary.
 
-**Published paper (JCIM):** Zhong, S., & Jiang, Y. (2026). ProtCross: Bridging the PDB-AlphaFold Gap for Binding Site Prediction with Protein Point Clouds. Journal of chemical information and modeling, 66(7), 3688-3701. https://doi.org/10.1021/acs.jcim.5c03224
+**Project citation:** Zhong, S., & Jiang, Y. (2026). “ProtCross: Bridging the
+PDB-AlphaFold Gap for Binding Site Prediction with Protein Point Clouds.”
+*Journal of Chemical Information and Modeling*, 66(7), 3688–3701.
+[https://doi.org/10.1021/acs.jcim.5c03224](https://doi.org/10.1021/acs.jcim.5c03224)
 
-The codebase combines:
-- residue-level structural geometry (C-alpha coordinates),
-- language-model residue embeddings (ESM-C), and
-- confidence-aware domain adaptation (pLDDT-weighted DANN)
+## Quick start
 
-to improve robustness when transferring from PDB (source domain) to AF2 (target domain).
+### Desktop
 
----
-
-## Quick Start
-
-### Recommended for new users: Desktop app
-
-Download ProtCross Desktop from the GitHub release page:
-
-- Windows 10/11 x64: [ProtCross Desktop 0.2.0 setup.exe](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_x64-setup.exe)
-- macOS 12+: [ProtCross Desktop 0.2.0 DMG](https://github.com/GeraltZeroZhong/ProtCross/releases/download/v0.2.0/ProtCross_Desktop_0.2.0_macos.dmg)
-- Release page: [ProtCross v0.2.0](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.0)
-
-The `v0.2.0` desktop artifacts are official ProtCross release assets, but the
-Windows and macOS installers are **unsigned testing builds**. Windows
-SmartScreen and macOS Gatekeeper may warn that the publisher cannot be verified.
-If a direct file link is unavailable, open the release page and download the
-Windows installer or macOS DMG from the Assets section.
-
-Desktop setup flow:
-
-1. Install and launch ProtCross Desktop.
-2. Confirm the ESM-C license prompt. ESM-C weights are not bundled in the app.
-3. In Setup, install the CPU backend or choose GPU/MPS acceleration if needed.
-4. Download or import ESM-C weights when prompted.
-5. Select a PDB/mmCIF file and run prediction. Results include the annotated
-   structure, scores TSV, pockets JSON, and summary JSON.
+Download the Windows x64 or macOS Apple Silicon testing build from
+[GitHub Releases](https://github.com/GeraltZeroZhong/ProtCross/releases). Open
+the app, install the recommended CPU backend, download the model weights after
+accepting the ESM-C license, select a structure, and choose **Run prediction**.
 
 ### Command line
 
+After following the platform-specific [installation instructions](#installation-and-assets),
+run:
+
 ```bash
-pip install "protcross[predict]"
-protcross predict input.pdb --accept-esm-license
+protcross inspect input.pdb
+protcross setup-assets --accept-esm-license
+protcross predict input.pdb --out-dir protcross-results
 ```
 
-By default this writes a complete result package next to the input:
-`input.protcross.pdb`, `input.protcross.scores.tsv`,
-`input.protcross.pockets.json`, and `input.protcross.summary.json`. For mmCIF
-input, the annotated structure output uses `.cif`.
+Review the [ESM-C license](https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement)
+before accepting it. Results are written to `protcross-results/`; use
+`input.protcross.scores.tsv` for residue-level scores.
 
-On the first prediction run, ProtCross can install runtime assets into
-`~/.cache/protcross/assets/v0.1.2` by default. Before downloading or using
-ESM-C weights, review the upstream ESM-C model license and pass
-`--accept-esm-license` once:
+## Contents
+
+- [Quick start](#quick-start)
+- [Inspect a structure](#inspect-a-structure)
+- [Understand the results](#understand-the-results)
+- [Scientific scope and limitations](#scientific-scope)
+- [Installation and assets](#installation-and-assets)
+- [Common workflows and Python API](#common-workflows-and-python-api)
+- [Troubleshooting and help](#troubleshooting-and-help)
+- [Maintainer guide](#maintainer-guide)
+- [Version history](#version-history)
+- [License, citation, and references](#license-citation-and-references)
+
+## Inspect a structure
+
+`protcross inspect` is read-only and needs no model assets. Start by inspecting
+each new coordinate file:
+
+```bash
+protcross inspect input.cif
+protcross inspect input.cif --chain A
+protcross inspect input.cif --json
+protcross inspect --help
+```
+
+Example:
 
 ```text
-protcross-0.1.2-binding-moad-final.ckpt    # recommended release checkpoint
-pca_esmc_128_binding_moad_0.1.2.pkl        # matching PCA reducer
-esmc_600m_2024_12_v0.pth                   # ESM-C weights from Hugging Face
+Input: examples/6fhu.pdb
+Format: PDB
+Models: 1 (ProtCross scores the first model)
+Chains: A
+Scorable residues: 52
+Longest chain context: 52 / 1022
+Assembly: supplied coordinates only (biological-assembly operators are not applied)
+  Chain A: 52 scorable; 0 missing CA; 0 modified/non-standard; 0 coordinate break(s); 0 numbering gap(s)
+Ready for prediction.
 ```
 
-PyPI packages ship code only. Use `protcross setup-assets` when you want to
-pre-download assets, install a specific asset bundle, or provide custom URLs:
+Use the report as follows:
+
+| Finding | Recommended action |
+| --- | --- |
+| Multiple models | Confirm that scoring the first coordinate model is appropriate |
+| Multiple chains | Confirm the supplied assembly, then keep all chains or select one with `--chain` |
+| Missing `CA` or modified residues | Check whether omitted residues affect the biological question |
+| Coordinate breaks or numbering gaps | Verify residue mapping against the source structure |
+| Parser warning | Repair malformed or duplicate coordinates before relying on the result |
+| Chain longer than 1,022 scorable residues | Split deliberately or opt into `--allow-truncation` |
+
+## Understand the results
+
+For `input.pdb`, the default package is:
+
+| File | Purpose | Quantitative use |
+| --- | --- | --- |
+| `input.protcross.pdb` | Annotated copy with scores in B-factor fields | Visualization; PDB scores round to two decimals |
+| `input.protcross.scores.tsv` | Per-residue identifiers, model scores, coordinates, calls, and ranks | Preferred residue-level table |
+| `input.protcross.pockets.json` | Thresholded predicted-residue clusters and geometry | Machine-readable cluster analysis |
+| `input.protcross.summary.json` | Run settings, warnings, assets, hashes, outputs, and top cluster | Provenance and run comparison |
+
+For mmCIF input, the annotated structure uses `.cif`. The `pockets.json`,
+`top_pocket`, and `probability` names are compatibility names: the contents are
+predicted-residue clusters and uncalibrated model scores, not physical pockets
+or probabilities.
+
+### Score and threshold
+
+- Treat the continuous `softmax(logits)[:, 1]` value as a residue-ranking score
+  within a run. It is not independently calibrated: `0.8` does not mean an 80%
+  binding probability, and score differences do not measure affinity.
+- Keep the checkpoint, principal-component analysis (PCA) reducer,
+  preprocessing, assembly, and software version fixed when comparing scores.
+  The model does not quantify epistemic,
+  conformational, or assay uncertainty.
+- The default call is strictly `score > 0.5`; exactly `0.5` is not selected.
+  This equal-logit threshold is a software default, not a biologically optimized
+  cutoff. Changing it updates calls, clusters, and centroids without changing
+  the continuous scores.
+
+### Annotated structure
+
+Every atom in a scored residue receives the same model score in the output
+B-factor field. These values are neither experimental B-factors nor pLDDT.
+PDB output preserves record order and text and changes only B-factor columns on
+`ATOM` and `HETATM` lines; use TSV or JSON for full precision. mmCIF categories
+are retained, but the text is reserialized. Annotated output keeps the input
+format; convert PDB/mmCIF separately if another format is needed.
+
+By default, unscored atoms in a scored model are written as `0.0`, so zero can
+mean _unscored_ rather than confidently negative. Fully unscored additional
+models retain their original values. `--unscored-bfactor-policy keep` preserves
+unscored input values but mixes different meanings in one field.
+
+### Output schemas
+
+- `scores.tsv` uses `model_score` as the canonical field. `probability` is an
+  equal-value compatibility alias.
+- `pockets.json` uses schema `protcross-pocket-v2`.
+- `summary.json` uses schema `protcross-summary-v2`.
+- Both JSON files record score semantics, input identity, asset provenance,
+  input interpretation, threshold, clustering, and truncation. `summary.json`
+  additionally records runtime versions, warnings, and output paths.
+- An empty result is valid:
+  `selected_residue_count: 0`, `top_pocket: null`,
+  `aggregate_pocket: null`, and `cluster_count: 0`.
+
+<a id="scientific-scope"></a>
+
+## Scientific scope and limitations
+
+### Model task and architecture
+
+ProtCross ranks residues by resemblance to the source-domain positive labels
+defined below. Use it to rank residues or compare regions within a run while
+keeping assets and settings fixed.
+
+The model combines centered Cα point clouds with per-chain ESM-C embeddings
+reduced to 128 dimensions by the paired PCA asset. Its PointNet++ spatial
+aggregation radii are 10, 20, and 40 Å. Training used adversarial domain
+adaptation from PDB to AlphaFold2 (AF2); normalized AF2 pLDDT weighted the
+target-domain adversarial loss as `sin((π/2) × normalized pLDDT)`. Input
+B-factors or pLDDT are not direct features of the inference segmentation head.
+
+### Model and asset versions
+
+| Component | Version or role |
+| --- | --- |
+| Software and output interface | `0.2.1` |
+| Default checkpoint | `0.1.2`, Binding MOAD-selected structures with heuristic hetero-residue-proximity labels |
+| Default PCA reducer | `0.1.2`, paired with the default checkpoint |
+| ESM-C backbone | `esmc-600m-2024-12` |
+| Published-paper assets | `0.1.1-paper`, PDBbind v2020 refined-set workflow |
+
+The published paper evaluated the `0.1.1-paper` assets. ProtCross `0.2.1`
+instead uses the default `0.1.2` checkpoint and paired PCA bundle; that model
+was not evaluated in that paper workflow. Keep each checkpoint paired with the
+PCA reducer from the same asset bundle.
+
+### Exact input interpretation
+
+| Input property | ProtCross behavior |
+| --- | --- |
+| Coordinate model | Scores the first model only |
+| Assembly | Uses coordinates exactly as supplied; applies no biological-assembly or crystallographic symmetry operators |
+| Scorable residues | The 20 standard polymer amino acids represented as `ATOM` residues and containing `CA` |
+| Geometry | Centers Cα coordinates; all selected chains form one point cloud |
+| Sequence | Builds each chain from coordinate-observed scorable residues, not `SEQRES` or `_entity_poly` alignment |
+| ESM-C context | Embeds chains separately, then concatenates their reduced features |
+| Chain selection | Uses all chains by default or one author chain ID with `--chain` |
+| Ligands and non-protein atoms | Not inference features |
+| Input B-factor or pLDDT | Retained as metadata but not passed to the prediction head |
+
+### Release-training label definition
+
+The default labels come from the generic structure parser at
+`src/protcross/data/structure.py`, not directly from curated Binding MOAD
+ligand-residue annotations. A protein residue receives label `1` when:
+
+1. it is one of the 20 standard polymer amino acids and contains `CA`;
+2. that `CA` lies within 6.0 Å of any atom in an eligible ligand-like residue;
+3. the ligand-like residue is not excluded by the default residue-name filter.
+
+This is a **protein Cα to ligand-residue atom** rule, not a
+protein-heavy-atom to ligand-heavy-atom distance. Explicit hydrogens are not
+removed before the neighbor search. A long side chain can contact a ligand
+while its Cα remains beyond 6 Å and is labeled negative.
+
+A neighboring residue is treated as ligand-like when its residue name is
+outside the 20 standard amino acids or Bio.PDB represents it with a nonblank
+hetero field. This broad rule can include cofactors, glycans, nucleic acids,
+modified residues, and unfiltered crystallization components; it is not a
+small-organic-ligand-only task.
+
+Default exclusions:
+
+| Category | Excluded residue names |
+| --- | --- |
+| Water-like | `HOH`, `WAT`, `H2O`, `DOD` |
+| Additives, buffers, solvents | `GOL`, `EDO`, `PEG`, `PE4`, `PG4`, `PGE`, `DMS`, `ACT`, `ACY`, `FMT`, `MES`, `TRS` |
+| Salt-like species | `SO4`, `PO4`, `NO3` |
+| Monatomic ions | `NA`, `CL`, `K`, `MG`, `CA`, `ZN`, `MN`, `FE`, `CU`, `CO`, `NI`, `CD`, `HG`, `CS`, `RB`, `LI`, `F`, `BR`, `I` |
+| Protein-like artifacts or caps | `MSE`, `ACE`, `NME` |
+
+These exclusions reduce common crystallization-artifact labels but also mean
+that a listed metal ion alone does not create a positive metal-binding label.
+Residue-name filters are a practical preprocessing rule; their biological
+relevance remains structure-specific.
+
+### Binding MOAD relationship and release training
+
+Binding MOAD metadata selected the release PDB cohort.[^2] Preprocessing then
+passed each complete coordinate file through the generic rule above; it did not
+restrict labels to the particular valid ligand instance or ligand ID listed by
+Binding MOAD. The release cohort is therefore described as **Binding
+MOAD-selected structures with heuristic hetero-residue-proximity labels**.
+
+The cohort records 41,409 selected PDB structures, 95,212 metadata entries
+marked as valid ligand instances, and 20,387 unique valid ligand IDs. The latter
+two counts describe the cohort; they are not counts of chemical entities
+isolated during label generation.
+
+| Domain | Candidate or preprocessed | Loaded for release training | Role |
+| --- | ---: | ---: | --- |
+| PDB source | 41,409 | 40,360 | Supervised segmentation and source-domain discrimination |
+| Matched AF2 target | 8,953 | 8,953 | Unlabeled, pLDDT-weighted target-domain discrimination |
+
+Repository provenance is retained in
+`data/binding_moad/binding_moad_summary.json` for cohort and download counts and
+`data/binding_moad/train_binding_moad_0.1.2.log` for loaded-sample counts and
+training completion.
+
+The source loader required at least one positive label. Training used
+`train_split=all`, `target_split=all`, `val_split=null`, ran for 150 epochs,
+and saved the final checkpoint. No held-out validation or test set was used for
+checkpoint selection, threshold selection, calibration, or an unbiased
+performance estimate.
+
+Bundled internal-comparison artifacts have substantial training overlap:
+
+- AF2 overlap: 1,114 of 1,178 accessions also occur in target training
+  (`94.6%`).
+- PDB overlap: 1,465 of 1,594 structure IDs occur in the source cohort
+  (`91.9%`).
+
+They are useful regression and debugging references rather than an independent
+external benchmark. For a new benchmark, remove overlap at least by PDB ID and
+UniProt accession, consider excluding close homologs, and choose the threshold
+on a separate validation set before evaluating the test set.
+
+### Geometric postprocessing
+
+Postprocessing uses Ångström coordinates in the supplied input frame:
+
+| Step | Exact behavior |
+| --- | --- |
+| Residue selection | Keep residues with `score > threshold` |
+| Clustering | Single-linkage connected components on selected Cα atoms |
+| Default edge cutoff | Cα–Cα distance ≤ 8.0 Å |
+| Cluster ranking | Descending residue count, descending mean score, descending maximum score, then earliest canonical residue index |
+| Cluster center | Score-weighted centroid of selected Cα coordinates |
+| Aggregate center | Score-weighted centroid across every selected residue |
+
+Single linkage is transitive: a chain of locally adjacent residues can form one
+cluster even when its endpoints are far apart. JSON reports the maximum
+pairwise Cα distance and sets `diffuse_single_linkage_cluster=true` when the
+diameter exceeds `max(2 × cluster_cutoff, 16 Å)`; the flag does not split or
+reject the cluster. All selected chains share one graph, so a cluster can span
+chains at an interface.
+
+The reported center is only a score-weighted Cα centroid, not a validated
+cavity or docking-box center. ProtCross does not model molecular surfaces,
+pocket volume, atom-level sterics, channels, or ligand reachability. Use an
+independent cavity or surface method before docking or simulation.
+
+### Structural interpretation limits
+
+| Situation | Behavior and consequence |
+| --- | --- |
+| Multiple coordinate models | Only the first is scored; ensemble variability is absent |
+| Multiple chains | Chains are analyzed jointly unless `--chain` is used; results depend on whether the file is an asymmetric unit, biological assembly, or custom complex |
+| Assembly operators | Not applied; assembly-created interfaces may be absent |
+| Modified amino acids | `MSE`, `SEC`, `PYL`, phosphoresidues, and other nonstandard residues are skipped |
+| Standard residue without `CA` | Skipped and not scored |
+| Coordinate gap | Observed residues on either side are still concatenated for ESM-C sequence context |
+| Author numbering gap | Reported as a mapping warning; it is not by itself proof of missing coordinates |
+| Malformed or duplicate content | Bio.PDB parser construction warnings are surfaced for review |
+| Alternate `CA` conformers | Bio.PDB's selected conformer is used |
+| Rigid coordinate rotation | The current PointNet++ backbone is not rotation invariant; rotating the supplied frame can change scores |
+| Chain longer than 1,022 scorable residues | Fails by default; `--allow-truncation` keeps only the leading 1,022 scorable residues of each long chain |
+| Ligand present in query input | Ligand coordinates are not features, although a holo conformation can still affect protein geometry |
+
+Insertion codes and mmCIF author/label identifiers are retained in extended
+outputs. Verify residue mapping before combining ProtCross results with
+sequence annotations.
+
+### Recommended uses
+
+- Rank candidate residues or regions for follow-up analysis.
+- Compare predicted-residue clusters within one run using fixed settings.
+- Generate hypotheses for standard-residue proteins resembling the training
+  domain.
+- Screen PDB or AF2 structures after checking assembly, chain, coverage, and
+  truncation warnings.
+- Supply candidates to independent conservation, cavity, docking,
+  mutagenesis, or experimental workflows.
+
+### Interpretation boundaries
+
+ProtCross is designed to nominate residue-level hypotheses. Use separate
+methods or evidence for:
+
+- Ligand identity, pose, selectivity, kinetics, thermodynamics, or druggability.
+- Site-class-specific predictions for metal, nucleic-acid, glycan,
+  protein-interface, or covalent sites.
+- Scores for modified residues or residues without Cα coordinates.
+- Biological-assembly inference, conformational ensembles, induced fit, or
+  dynamics.
+- Stand-alone evidence for high-stakes decisions or an independent benchmark
+  when evaluation structures overlap release training.
+
+### Reproducibility
+
+Default asset identities:
+
+| Asset | SHA256 |
+| --- | --- |
+| `protcross-0.1.2-binding-moad-final.ckpt` | `ccb56884b21402a027bfae9d4779f38c8f534513d980a96d7cd78c9931748b65` |
+| `pca_esmc_128_binding_moad_0.1.2.pkl` | `0f4e11806a622642c07dad539cec4216030220c1b5f3fc44c7926a2f6bca4d62` |
+| `esmc_600m_2024_12_v0.pth` | `8ef856e1a237ee3f995442df997a962e70057faadecf38fc0c8561bd3c2f4324` |
+
+ProtCross 0.2.1 fixes the geometry backend to deterministic pure-PyTorch
+farthest-point sampling (FPS), radius neighborhoods, and k-nearest neighbors
+(KNN), and uses stable chain/polymer ordering. The backbone is not
+rigid-rotation invariant, so keep the supplied coordinate frame unchanged for
+direct rerun comparisons. Exact bitwise equality across CPU, CUDA, and MPS is
+not guaranteed.
+
+For a reproducible report:
+
+1. Save `summary.json` and `pockets.json`; together they record the software,
+   runtime, asset hashes, input checksum, settings, and predictions.
+2. Record structure source/version, supplied assembly, selected chain,
+   threshold, cluster cutoff, truncation policy, and the overlap-removal
+   procedure for benchmark studies.
+3. Use checkpoint and PCA assets from the same bundle (`0.1.2` or
+   `0.1.1-paper`).
+4. Re-run `protcross inspect` after any structure-file change.
+
+Implementation traceability:
+
+- Label construction: `src/protcross/data/structure.py`
+- Input inspection: `src/protcross/data/inspection.py`
+- Preprocessing: `src/protcross/data/preprocess.py`
+- Training data loading: `src/protcross/data/dataset.py`
+- Domain-adaptive model: `src/protcross/models/module.py`
+- Confidence weighting: `src/protcross/models/domain_weights.py`
+- Point-cloud backbone: `src/protcross/models/backbones/pointnet2.py`
+- Prediction and postprocessing: `src/protcross/inference/predictor.py`
+
+## Installation and assets
+
+This README describes the `0.2.1` source tree. Run `protcross --version` before
+following version-specific commands, especially when another installation may
+already be on `PATH`.
+
+### Requirements
+
+| Use | Requirements |
+| --- | --- |
+| CLI or Python prediction | Python 3.10; Windows x64, Linux x86-64/WSL2, or macOS Apple Silicon; CPU supported |
+| Desktop prediction | Windows 10/11 x64 or macOS 12+ Apple Silicon |
+| Development or training | Python 3.10; Conda recommended; NVIDIA CUDA strongly recommended for large preprocessing/training |
+| Desktop development | Node.js 20, Rust 1.88, and the Tauri v2 operating-system prerequisites |
+
+Conda is not required for ordinary CLI prediction. CPU is the supported and
+recommended default for one-structure prediction; training and large batches
+are substantially slower without a compatible accelerator.
+
+### Desktop installation
+
+Download the following files from [GitHub Releases](https://github.com/GeraltZeroZhong/ProtCross/releases)
+when available:
+
+```text
+ProtCross_Desktop_0.2.1_x64-setup.exe
+ProtCross_Desktop_0.2.1_macos-aarch64.dmg
+SHA256SUMS.txt
+```
+
+The `0.2.1` Desktop artifacts are unsigned and unnotarized prerelease testing
+builds, so Windows SmartScreen or macOS Gatekeeper may warn or block them. The
+macOS build supports Apple Silicon only; there is no Intel build.
+Before opening an installer, compare its SHA256 with the corresponding entry in
+`SHA256SUMS.txt`: use `shasum -a 256 <file>` on macOS or
+`Get-FileHash <file> -Algorithm SHA256` in PowerShell.
+
+On first launch:
+
+1. Install the recommended CPU backend.
+2. Review and accept the ESM-C license.
+3. Download the ESM-C weights, or import an existing copy.
+4. Select a `.pdb`, `.cif`, or `.mmcif` structure and review the inspection.
+5. Choose the chains to score, then run the prediction.
+
+The app performs prediction locally. Its Desktop assets are separate from the
+CLI cache described below.
+
+For any CLI platform, download and extract the `0.2.1` source archive from
+[GitHub Releases](https://github.com/GeraltZeroZhong/ProtCross/releases), then
+open the extracted repository root.
+
+### CLI installation on Linux
+
+From the checked-out repository root, using Python 3.10:
 
 ```bash
-protcross setup-assets --accept-esm-license \
-  --checkpoint-url https://example.org/protcross-0.1.2-binding-moad-final.ckpt \
-  --pca-url https://example.org/pca_esmc_128_binding_moad_0.1.2.pkl
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install \
+  torch==2.3.1+cpu torchvision==0.18.1+cpu \
+  --index-url https://download.pytorch.org/whl/cpu
+python -m pip install ".[predict]"
+protcross --version
 ```
 
-Use the `0.1.2` release checkpoint for practical binding-site prediction and when reporting ProtCross as a benchmark method. If ProtCross is used as a benchmark, report the probability threshold used for the final predictions.
+### CLI installation on macOS Apple Silicon
 
-Training a new release-style model uses the modern `protcross train`,
-`protcross preprocess`, `protcross download-af2`, and `protcross map-labels`
-commands. Paper-reproduction notes are documented in
-`reproduction/legacy/README.md`.
-
-CLI assets and Desktop assets are configured separately: CLI commands use the
-ProtCross cache or explicit `--checkpoint/--esm-weights/--pca` paths, while
-Desktop stores its manifest and user-selected assets under the app data folder.
-Running `protcross setup-assets` does not by itself make the Desktop app ready.
-
-If your system already has ESM-C weights, skip that large download and pass the path at prediction time:
+From the checked-out repository root, using Python 3.10:
 
 ```bash
-protcross setup-assets --skip-esm
-protcross predict input.pdb \
-  --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
-  --out-dir protcross-results
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install ".[predict]"
+protcross --version
 ```
 
-## Table of Contents
-- [Quick Start](#quick-start)
-- [1. Project Overview](#1-project-overview)
-- [2. Installation](#2-installation)
-  - [2.1 System Requirements](#21-system-requirements)
-  - [2.2 Create Environment](#22-create-environment)
-  - [2.3 Runtime Assets](#23-runtime-assets)
-  - [2.4 Verify Installation](#24-verify-installation)
-- [3. Usage](#3-usage)
-  - [3.1 Apply ProtCross (Inference with Existing Model)](#31-apply-protcross-inference-with-existing-model)
-    - [3.1.1 Single-structure Prediction](#311-single-structure-prediction)
-    - [3.1.2 Batch Prediction (Multiple Structures)](#312-batch-prediction-multiple-structures)
-  - [3.2 Retrain Release Workflow](#32-retrain-release-workflow)
-    - [3.2.1 Data Preparation](#321-data-preparation)
-    - [3.2.2 Preprocess Source (PDB) with PCA Fit](#322-preprocess-source-pdb-with-pca-fit)
-    - [3.2.3 Preprocess Target (AF2) with Shared PCA](#323-preprocess-target-af2-with-shared-pca)
-    - [3.2.4 Map Labels from PDB to AF2](#324-map-labels-from-pdb-to-af2)
-    - [3.2.5 Train](#325-train)
-- [4. Configuration Guide (Hydra)](#4-configuration-guide-hydra)
-- [5. Repository Layout](#5-repository-layout)
-- [6. Troubleshooting](#6-troubleshooting)
-- [7. Changelog](#7-changelog)
-- [8. License](#8-license)
+Do not use the Linux CPU wheel index on macOS; PyTorch supplies the Apple
+Silicon wheel through the normal Python package index.
 
----
+### CLI installation on Windows PowerShell
 
-## 1. Project Overview
+From the checked-out repository root, using 64-bit Python 3.10:
 
-### Core capabilities
-- **Binding-site segmentation on protein point clouds** with PointNet++.
-- **Domain adaptation (DANN-style)** via gradient reversal and domain discriminator.
-- **AF2 confidence-aware weighting** based on pLDDT.
-- **ESM-C embeddings + PCA reduction** for residue features.
-- **Hydra-driven experiment control** with easy command-line overrides.
-
-### Primary stack
-- PyTorch + PyTorch Lightning
-- Torch Geometric
-- Hydra
-- ESM (EvolutionaryScale)
-
----
-
-## 2. Installation
-
-### 2.1 System Requirements
-
-- Linux (recommended) or WSL2
-- Python 3.10. The 0.2.0 wheel metadata is intentionally limited to Python
-  3.10 because the release test matrix and PyTorch/Torch Geometric stack are
-  locked there.
-- Conda (Miniconda or Anaconda)
-- NVIDIA GPU + CUDA 12.1 (recommended for training and ESM-C preprocessing)
-
-> CPU-only runs are possible for debugging/small tests but will be significantly slower.
-
-### 2.2 Create Environment
-
-For development or training:
-
-```bash
-conda env create -f environment.yml
-conda activate protcross
-pip install -e ".[test,esm]"
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install `
+  torch==2.3.1+cpu torchvision==0.18.1+cpu `
+  --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python.exe -m pip install ".[predict]"
+.\.venv\Scripts\protcross.exe --version
 ```
 
-For the lightweight prediction interface from PyPI:
+The explicit `.exe` path works without activating the environment. Use the
+same prefix for the Quick start commands, or activate `.venv` first.
 
-```bash
-pip install "protcross[predict]"
-protcross predict input.pdb --accept-esm-license --output input.protcross.pdb
-```
+### Managed runtime assets
 
-The provided environment includes:
-- `pytorch==2.3.x`
-- `pytorch-cuda==12.1`
-- Torch Geometric and companion packages
-- `esm>=3.1.0` for ESM-C APIs
-
-#### CPU-only notes
-If you do not have a CUDA-capable GPU:
-1. Remove/replace `pytorch-cuda=12.1` in `environment.yml`.
-2. Install CPU-compatible PyTorch/Torch Geometric wheels.
-3. Run preprocessing/training with `--device cpu` or CPU trainer settings.
-
-### 2.3 Runtime Assets
-
-ProtCross separates code and large runtime assets. PyPI distributions include the Python package and command-line tools, while the pretrained checkpoint, PCA reducer, and ESM-C weights are downloaded after installation.
-
-Recommended setup:
+The Python package contains code only; runtime assets are installed separately.
+The default managed command is:
 
 ```bash
 protcross setup-assets --accept-esm-license
 ```
 
-Manual setup is optional for standard prediction because `protcross predict`
-can automatically download missing default assets. Downloading or using ESM-C weights
-requires `--accept-esm-license` or `PROTCROSS_ACCEPT_ESM_LICENSE=1`. By default
-asset setup downloads:
-- ESM-C 600M weights from https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
-- `protcross-0.1.2-binding-moad-final.ckpt` from the ProtCross `v0.1.2` GitHub release
-- `pca_esmc_128_binding_moad_0.1.2.pkl` from the ProtCross `v0.1.2` GitHub release
+The first setup downloads about 2.14 GiB of ESM-C weights and resumes a valid
+partial download if interrupted.
 
-The default asset version is fixed by the installed package for reproducibility.
-`default` and `latest` both mean the current packaged stable bundle, currently
-`0.1.2`; they do not query a floating remote latest release. The concrete bundle
-version is recorded in `protcross-assets.json`. The default install location is
-`~/.cache/protcross/assets/v0.1.2`. You can override it with
-`PROTCROSS_ASSETS_DIR` or `--output-dir`:
+It installs:
 
-```bash
-PROTCROSS_ASSETS_DIR=/data/protcross-assets protcross setup-assets --accept-esm-license
-protcross setup-assets --accept-esm-license --output-dir /data/protcross-assets
+```text
+protcross-0.1.2-binding-moad-final.ckpt
+pca_esmc_128_binding_moad_0.1.2.pkl
+esmc_600m_2024_12_v0.pth
+protcross-assets.json
 ```
 
-After setup, prediction can discover assets automatically:
+The default directory is `~/.cache/protcross/assets/v0.1.2`. `default` and
+`latest` both mean the stable bundle pinned by the installed package, currently
+`0.1.2`; they do not query a floating remote release. Override the location:
 
 ```bash
-protcross predict input.pdb --accept-esm-license --out-dir protcross-results
+PROTCROSS_ASSETS_DIR=/data/protcross-assets \
+  protcross setup-assets --accept-esm-license
+
+protcross setup-assets \
+  --output-dir /data/protcross-assets \
+  --accept-esm-license
 ```
 
-To disable automatic asset setup during prediction, pass `--no-auto-assets` or
-`--offline`. To repair a stale cache, pass `--refresh-assets`.
+Use `--refresh-assets` to repair and reverify a managed cache. Use
+`--no-auto-assets` or `--offline` to forbid automatic downloads during
+prediction.
 
-For source checkouts or custom releases, explicit paths are still supported:
+CLI and Desktop assets are configured separately. CLI uses the cache or
+explicit command-line paths; Desktop stores its manifest and selected assets in
+the operating-system app-data directory. Running CLI setup does not make the
+Desktop app ready.
+
+### Existing or custom assets
+
+If ESM-C is already available:
 
 ```bash
+protcross setup-assets --skip-esm --accept-esm-license
 protcross predict input.pdb \
-  --checkpoint checkpoints/protcross-0.1.2-binding-moad-final.ckpt \
   --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
-  --pca data/pca_esmc_128_binding_moad_0.1.2.pkl \
   --accept-esm-license \
   --out-dir protcross-results
 ```
 
-Explicit local checkpoint, PCA, and ESM-C files are treated as trusted local
-inputs only when their SHA256 matches the selected release bundle. For custom
-or experimental assets, pass `--trust-unverified-assets` after verifying the
-files came from a source you trust; checkpoint, PCA pickle, and torch weight
-loading can execute code through their underlying serialization formats.
+Explicit release assets are verified against the selected bundle's SHA256. For
+custom experimental files, `--trust-unverified-assets` records the local-file
+override alongside their real hashes and verification status in output JSON.
+Checkpoint, PCA pickle, and PyTorch weight deserialization can execute code, so
+load custom files only from a trusted source.
 
-#### What is ESM-C?
-**ESM-C** is EvolutionaryScale's protein language model family for extracting residue-level sequence representations. In ProtCross, ESM-C embeddings are used as per-residue features.
-
-Recommended checkpoint for this project:
-- **ESM-C 600M (2024-12)**: https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
-
-The ESM-C model repository uses upstream model terms that are separate from
-ProtCross's MIT code license. Review the model terms before downloading or
-using ESM-C weights. ProtCross release checkpoint/PCA assets are distributed as
-ProtCross runtime assets and do not bundle ESM-C model weights; review both
-ProtCross and upstream model terms before redistributing custom assets derived
-from ESM-C embeddings.
-
-#### Manual ESM-C download fallback
-
-If the automatic downloader is unavailable in your environment, you can download the model weights from Hugging Face in either of the following ways.
-
-**Option A - Git LFS clone**
 ```bash
-# 1) Install Git LFS once (if needed)
-git lfs install
-
-# 2) Clone the model repository
-git clone https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12
+protcross predict input.pdb \
+  --checkpoint /trusted/custom/model.ckpt \
+  --esm-weights /trusted/custom/esmc.pth \
+  --pca /trusted/custom/reducer.pkl \
+  --trust-unverified-assets \
+  --accept-esm-license
 ```
 
-**Option B - Hugging Face CLI**
-```bash
-# 1) Install CLI
-pip install -U "huggingface_hub[cli]"
+ESM-C weights remain governed by EvolutionaryScale's model terms, separate from
+ProtCross's MIT code license.[^1] The official model repository provides Git
+LFS and Hugging Face CLI download options.[^3] After a manual download, pass the
+absolute file path with `--esm-weights`.
 
-# 2) Download repository files to a local directory
-huggingface-cli download EvolutionaryScale/esmc-600m-2024-12 \
-  --local-dir ./esmc-600m-2024-12
-```
+## Common workflows and Python API
 
-After downloading, locate `data/weights/esmc_600m_2024_12_v0.pth` and pass its absolute path to `--esm-weights`.
-
-Example:
-```bash
-protcross preprocess \
-  --data-dir data/raw_pdb \
-  --output-dir data/processed_pdb \
-  --fit-pca \
-  --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
-  --pca artifacts/protcross-pca-128.pkl
-```
-
-Important details:
-- `--esm-weights` is treated as a local file path.
-- The script truncates sequences to length 1022 for ESM-C context compatibility.
-
-### 2.4 Verify Installation
+### Single chain, explicit outputs, and overwrite
 
 ```bash
-python -c "import torch; import torch_geometric; import pytorch_lightning; import hydra; import esm; print('OK')"
-pytest -q
-```
-
----
-
-## 3. Usage
-
-This section is split into two maintained workflows:
-- **Apply 0.1.2 release model**: use the released checkpoint for inference.
-- **Retrain release workflow**: rebuild datasets/features and train with modern CLI commands.
-
-For most users, the `0.1.2` release checkpoint is the recommended model. It was trained as a release model for external generalization evaluation using Binding MOAD-derived source structures and matched AF2 target structures. If you use ProtCross as a benchmark, use the release checkpoint and report the threshold used for evaluation.
-
-Paper-reproduction notes are kept under `reproduction/legacy/`.
-
-### 3.1 Apply ProtCross (Inference with Existing Model)
-
-### 3.1.1 Single-structure Prediction
-
-You can directly run inference on one PDB/mmCIF structure and write a complete
-prediction package.
-
-The recommended 0.1.2 path for PyPI users is:
-
-```bash
-protcross predict examples/6fhu.pdb --accept-esm-license --out-dir examples/protcross-results
-```
-
-This writes:
-- `6fhu.protcross.pdb`: annotated structure with scored protein-residue B-factors set to ProtCross probabilities.
-- `6fhu.protcross.scores.tsv`: residue-level table for downstream scripts.
-- `6fhu.protcross.pockets.json`: pocket center, residues, scores, residue count, and clustered pockets.
-- `6fhu.protcross.summary.json`: machine-readable run summary.
-
-Use `--summary-only` to restore the old behavior and print a summary without
-creating default output files. Individual paths can still override the defaults:
-
-```bash
-protcross predict examples/6fhu.pdb \
-  --accept-esm-license \
-  --output examples/6fhu.protcross.pdb \
-  --scores-tsv examples/6fhu.scores.tsv \
-  --pocket-json examples/6fhu.pockets.json \
-  --summary-json examples/6fhu.summary.json \
+protcross predict input.cif \
+  --chain A \
+  --output results/input.protcross.cif \
+  --scores-tsv results/input.protcross.scores.tsv \
+  --pocket-json results/input.protcross.pockets.json \
+  --summary-json results/input.protcross.summary.json \
   --threshold 0.5
 ```
 
-Prediction output semantics:
-- `--threshold` uses a strict `probability > threshold` rule for binary calls, TSV `is_binding`, pocket selection, clustering, and summaries.
-- The annotated structure B-factor column stores continuous ProtCross probabilities in the `0..1` range for scored protein residues. It is not an experimental B-factor. By default, unscored atoms in scored model(s) are written as `0.0` so downstream scripts do not mix ProtCross probabilities with original B-factors or pLDDT. Fully unscored models in multi-model structures keep their original values and are reported in warnings. Use `--unscored-bfactor-policy keep` only when you explicitly want to preserve original values for unscored atoms in scored model(s).
-- Pocket coordinates are in the input structure coordinate frame, in Angstrom, using C-alpha atoms.
-- `summary.top_pocket.center` and terminal `Pocket center` refer to the highest-ranked clustered pocket, not the aggregate of all selected residues. `aggregate_pocket.center` is reported separately for all selected residues.
-- Clustered pockets are connected components from selected residues using the default 8 Angstrom C-alpha cutoff.
-- CLI and Python API prediction fail on structures longer than `--max-len` by default. Pass `--allow-truncation` or `allow_truncation=True` to explicitly score only the leading ESM-C context window.
+ProtCross refuses to overwrite existing outputs unless `--overwrite` is
+provided. See `protcross predict --help` for all options.
 
-Extended TSV columns:
-
-```text
-residue_id, residue_key, residue_id_namespace, model_id, chain_id,
-auth_asym_id, label_asym_id, residue_number, auth_seq_id, label_seq_id,
-insertion_code, resname, one_letter_code, input_bfactor, probability,
-is_binding, x, y, z, cluster_id, is_scored, rank_global, rank_within_chain
-```
-
-Output schema contract:
-- `scores.tsv`: tab-separated UTF-8; probabilities are floats in `0..1`; coordinates are Angstrom C-alpha coordinates in input frame; nullable fields are empty strings.
-- `pockets.json`: `schema_version` is `protcross-pocket-v1`; includes `asset_version`, threshold metadata, coordinate units, `residue_id_namespaces`, `aggregate_pocket`, and `clustered_pockets`. If no residue is selected, `aggregate_pocket` is `null` and `clustered_pockets` is empty.
-- `summary.json`: `schema_version` is `protcross-summary-v1`; includes input path, device, asset version, threshold, cluster cutoff, scored/original residue counts, truncation flag, `unscored_bfactor_policy`, `top_pocket`, `aggregate_pocket`, top residues, and output paths.
-- Empty-pocket example: `selected_residue_count: 0`, `top_pocket: null`, `aggregate_pocket: null`, `cluster_count: 0`.
-
-You can also keep model assets in an explicit directory:
-
-```bash
-protcross predict examples/6fhu.pdb \
-  --assets-dir /path/to/protcross-assets \
-  --out-dir examples/protcross-results
-```
-
-The asset directory should contain `protcross-assets.json` plus
-`protcross-0.1.2-binding-moad-final.ckpt`, `esmc_600m_2024_12_v0.pth`, and
-`pca_esmc_128_binding_moad_0.1.2.pkl`. Alternatively, set
-`PROTCROSS_CHECKPOINT`, `PROTCROSS_ESM_WEIGHTS`, and `PROTCROSS_PCA`.
-
-Python API:
+### Python API
 
 ```python
-from protcross.inference import ProtCrossPredictor, predict_pdb
-
-# Missing default runtime assets are installed automatically unless
-# auto_setup_assets=False is passed.
-result = predict_pdb(
-    "examples/6fhu.pdb",
-    accept_esm_license=True,
-    output_pdb="examples/6fhu.protcross.pdb",
-    scores_tsv="examples/6fhu.protcross.scores.tsv",
-    pocket_json="examples/6fhu.protcross.pockets.json",
-    summary_json="examples/6fhu.protcross.summary.json",
-)
-print(result.format_summary())
-
-predictor = ProtCrossPredictor.from_default_assets(
-    embedding_cache_dir=".protcross-feature-cache",
-    accept_esm_license=True,
-)
-result = predictor.predict("examples/6fhu.pdb", pocket_json="examples/6fhu.protcross.pockets.json")
+from protcross.inference import predict_pdb
 
 result = predict_pdb(
-    "examples/6fhu.pdb",
-    ckpt_path="checkpoints/protcross-0.1.2-binding-moad-final.ckpt",
-    esm_weights="/absolute/path/to/esmc_600m_2024_12_v0.pth",
-    pca_path="data/pca_esmc_128_binding_moad_0.1.2.pkl",
-    output_pdb="examples/6fhu.protcross.pdb",
+    "input.pdb",
+    device="cpu",
+    accept_esm_license=True,
+    output_pdb="results/input.protcross.pdb",
+    scores_tsv="results/input.protcross.scores.tsv",
+    pocket_json="results/input.protcross.pockets.json",
+    summary_json="results/input.protcross.summary.json",
 )
 print(result.format_summary())
 ```
 
-### 3.1.2 Batch Prediction (Multiple Structures)
-
-`protcross predict` predicts one structure each run. For a few files, iterate in
-a shell loop and optionally reuse a feature cache across invocations:
-
-```bash
-protcross setup-assets --accept-esm-license
-mkdir -p batch_outputs
-for pdb in /path/to/pdb_dir/*.pdb; do
-  base="$(basename "${pdb}" .pdb)"
-  protcross predict "${pdb}" \
-    --accept-esm-license \
-    --out-dir batch_outputs \
-    --embedding-cache-dir .protcross-feature-cache \
-    --threshold 0.5
-done
-```
-
-For larger batches, prefer the Python API so ESM, PCA, and the segmentation model
-are loaded once:
+For repeated predictions, load one `ProtCrossPredictor` and give each structure
+unique output paths. This example writes a batch safely while loading the
+models only once:
 
 ```python
 from pathlib import Path
 from protcross.inference import ProtCrossPredictor
+from uuid import uuid4
 
+inputs = sorted(Path("structures").glob("*.pdb"))
+output_dir = Path("batch-results") / f"run-{uuid4().hex}"
+output_dir.mkdir(parents=True, exist_ok=False)
+
+# Run `protcross setup-assets --accept-esm-license` first.
 predictor = ProtCrossPredictor.from_default_assets(
-    device="auto",
+    device="cpu",
     embedding_cache_dir=".protcross-feature-cache",
     accept_esm_license=True,
 )
-results = predictor.predict_many(
-    sorted(Path("/path/to/pdb_dir").glob("*.pdb")),
-    threshold=0.5,
-    allow_truncation=False,
-)
+
+for structure in inputs:
+    stem = structure.stem
+    predictor.predict(
+        structure,
+        output_pdb=output_dir / f"{stem}.protcross.pdb",
+        scores_tsv=output_dir / f"{stem}.protcross.scores.tsv",
+        pocket_json=output_dir / f"{stem}.protcross.pockets.json",
+        summary_json=output_dir / f"{stem}.protcross.summary.json",
+    )
 ```
 
-### 3.2 Retrain Release Workflow
+### Device selection
 
-### 3.2.1 Data Preparation
-
-Expected layout:
-
-```text
-data/
-|--- raw_pdb/          # input PDB/CIF structures (source)
-|--- raw_af2/          # input AF2 PDB structures (target)
-|--- processed_pdb/    # generated .pt files for source
-`--- processed_af2/    # generated .pt files for target
+```bash
+protcross predict input.pdb --device cpu
+protcross predict input.pdb --device cuda
+protcross predict input.pdb --device cuda:1
+protcross predict input.pdb --device mps
+protcross predict input.pdb --device auto
 ```
 
-Optional AF2 retrieval helper:
+`auto` selects CUDA, then Apple MPS, then CPU. Use CPU as the comparison
+baseline when device-dependent numerical differences matter.
+
+## Troubleshooting and help
+
+### Wrong Python version
+
+The release wheel supports Python `>=3.10,<3.11`. Verify with
+`python --version`; create a Python 3.10 environment rather than forcing the
+package into 3.11 or newer.
+
+### License confirmation required
+
+Review the ESM-C terms, then run:
+
+```bash
+protcross setup-assets --accept-esm-license
+```
+
+If an older managed manifest lacks confirmation, repeat that command. Explicit
+ESM paths may still require `--accept-esm-license` for the current run.
+
+### Interrupted or incomplete asset download
+
+Repeat the same setup command. ProtCross retains and resumes `.part` data.
+Keep at least 2.4 GiB free on the asset target, and plan for roughly 5 GiB total
+when the Python environment is installed on the same disk. Use
+`--refresh-assets` when a completed file fails verification.
+
+### Existing outputs
+
+ProtCross refuses silent replacement. Select a new `--out-dir` or pass
+`--overwrite` intentionally.
+
+### CUDA or MPS unavailable
+
+Run with `--device cpu`. Use `--device auto` only when automatic acceleration
+selection is desired. MPS is experimental.
+
+### Structure rejected
+
+Run `protcross inspect input.pdb --json`. Review chain choice, missing Cα,
+modified residues, parser warnings, and the 1,022-residue context limit before
+using `--allow-truncation`.
+
+### Command help
+
+```bash
+protcross --help
+protcross COMMAND --help
+```
+
+Report reproducible bugs at the
+[ProtCross issue tracker](https://github.com/GeraltZeroZhong/ProtCross/issues)
+with `summary.json`, the exact command, platform, Python/PyTorch versions, and
+sanitized diagnostics. Do not attach confidential structures or paths.
+
+## Maintainer guide
+
+### Maintained training workflow
+
+This is the current maintained workflow, not the exact `0.1.2` release-training
+invocation. The default configuration uses `train`/`train`/`val` splits and 70
+epochs. Create the full development environment:
+
+```bash
+conda env create -f environment.yml
+conda activate protcross
+python -m pip install -e ".[dev,esm]"
+```
+
+The maintained pipeline is:
 
 ```bash
 protcross download-af2 \
   --raw-pdb-dir data/raw_pdb \
   --output-dir data/raw_af2 \
   --mapping-file artifacts/pdb_uniprot_mapping.json
-```
 
-### 3.2.2 Preprocess Source (PDB) with PCA Fit
-
-```bash
 protcross preprocess \
   --data-dir data/raw_pdb \
   --output-dir data/processed_pdb \
   --fit-pca \
   --esm-weights ~/.cache/protcross/assets/v0.1.2/esmc_600m_2024_12_v0.pth \
   --pca artifacts/protcross-pca-128.pkl \
-  --pca-dim 128
-```
+  --pca-dim 128 \
+  --accept-esm-license
 
-### 3.2.3 Preprocess Target (AF2) with Shared PCA
-
-```bash
 protcross preprocess \
   --data-dir data/raw_af2 \
   --output-dir data/processed_af2 \
   --esm-weights ~/.cache/protcross/assets/v0.1.2/esmc_600m_2024_12_v0.pth \
   --pca artifacts/protcross-pca-128.pkl \
-  --is-af2
-```
+  --is-af2 \
+  --accept-esm-license
 
-### 3.2.4 Map Labels from PDB to AF2
-
-```bash
 protcross map-labels \
   --processed-pdb-dir data/processed_pdb \
   --processed-af2-dir data/processed_af2 \
   --raw-pdb-dir data/raw_pdb \
   --raw-af2-dir data/raw_af2 \
   --mapping-file artifacts/pdb_uniprot_mapping.json
-```
 
-### 3.2.5 Train
-
-Default training:
-
-```bash
 protcross train
 ```
 
-Common Hydra overrides:
+To match the recorded `0.1.2` split and epoch settings, use:
 
 ```bash
-# Disable domain adaptation
+protcross train \
+  data.train_split=all \
+  data.target_split=all \
+  data.val_split=null \
+  trainer.max_epochs=150
+```
+
+Hydra overrides can change any configured value:
+
+```bash
 protcross train model.use_da=False
-
-# Disable ESM features
-protcross train model.use_esm=False
-
-# Short debugging run
-protcross train trainer.max_epochs=5
-
-# Custom data directories
+protcross train model.use_esm=False trainer.max_epochs=5
 protcross train \
   data.data_dir_pdb=/abs/path/to/processed_pdb \
   data.data_dir_af2=/abs/path/to/processed_af2
 ```
 
-Evaluation helpers, multi-seed benchmark scripts, and paper-reproduction notes
-are documented in `reproduction/legacy/README.md`.
+Main configuration files are `configs/train.yaml`,
+`configs/data/protein_seg.yaml`, `configs/model/da_module.yaml`, and
+`configs/trainer/default.yaml`.
 
----
+### Published-paper reproduction
 
-## 4. Configuration Guide (Hydra)
-
-Main configuration files:
-- `configs/train.yaml`: global defaults and run-level settings.
-- `configs/data/protein_seg.yaml`: data module paths and loading parameters.
-- `configs/model/da_module.yaml`: architecture and adaptation hyperparameters.
-- `configs/trainer/default.yaml`: PyTorch Lightning trainer options.
-
-Hydra override syntax:
+The archived paper workflow uses PDBbind v2020 refined-set assets rather than
+the default `0.1.2` release model:
 
 ```bash
-protcross train key1=value1 key2=value2
+protcross setup-assets \
+  --asset-version 0.1.1-paper \
+  --accept-esm-license
 ```
 
-Tip: keep all experiment commands in shell scripts to ensure reproducibility.
+That bundle contains `best-epoch=59.ckpt` and `pca_esmc_128.pkl`. Historical
+wrappers remain under `reproduction/legacy/`; maintained users should prefer
+the unified `protcross` commands. An archived wrapper example is:
 
----
+```bash
+python reproduction/legacy/run_Predict_ProtCross.py \
+  --pdb_file examples/6fhu.pdb \
+  --asset-version 0.1.1-paper \
+  --accept-esm-license
+```
 
-## 5. Repository Layout
+### Test the repository
+
+```bash
+python -m pytest -q
+ruff check src tests desktop/backend desktop/installer
+
+cd desktop/frontend
+npm ci
+npm run build
+```
+
+Desktop backend tests from the repository root:
+
+```bash
+python -m pytest -q tests/desktop
+```
+
+### Desktop architecture and development
+
+The local Desktop path is:
 
 ```text
-ProtCross/
-|--- configs/
-|   |--- data/protein_seg.yaml
-|   |--- model/da_module.yaml
-|   |--- trainer/default.yaml
-|   `--- train.yaml
-|--- data/
-|   |--- raw_pdb/
-|   |--- raw_af2/
-|   |--- processed_pdb/
-|   `--- processed_af2/
-|--- reproduction/
-|   `--- legacy/                # historical reproduction scripts and notes
-|--- src/protcross/
-|   |--- cli/                   # installed command entry points
-|   |--- data/
-|   |--- experiments/           # reproduction benchmark workflows
-|   |--- evaluation/
-|   |--- inference/             # lightweight predictor API
-|   `--- models/
-`--- environment.yml
+Tauri/React UI
+  -> authenticated dynamic http://127.0.0.1:<port>
+  -> protcross_desktop.server
+  -> ProtCross Python API
 ```
 
----
+The app never mutates a user-selected Conda environment. CPU and GPU/MPS
+environments are separate so an acceleration failure cannot break CPU.
+Before running Tauri, install Node.js 20, Rust 1.88, and the native packages in
+the official Tauri v2 prerequisites guide; on Linux these include the GTK/WebKit
+development stack.[^4]
 
-## 6. Troubleshooting
+```bash
+python -m pip install -e ".[predict]"
+python -m pip install -e desktop/backend
+cd desktop/frontend
+npm ci
+export PROTCROSS_DESKTOP_BACKEND_PATH="../backend"
+export PROTCROSS_DESKTOP_PYTHON="python"
+npm run tauri:dev
+```
 
-- **`FileNotFoundError` for ESM-C weights**
-  - Run `protcross setup-assets --accept-esm-license`, or ensure `--esm-weights` points to an existing local `.pth` checkpoint file.
-- **ESM-C license confirmation is required**
-  - Review the upstream ESM-C terms, then pass `--accept-esm-license` or set `PROTCROSS_ACCEPT_ESM_LICENSE=1` before downloading or using ESM-C weights.
-- **Explicit custom assets are rejected**
-  - Use the managed 0.1.2 assets when possible. For experimental local assets, pass `--trust-unverified-assets` only after verifying the files are trusted.
-- **`protcross setup-assets` cannot find GitHub release assets**
-  - Attach `protcross-0.1.2-binding-moad-final.ckpt` and `pca_esmc_128_binding_moad_0.1.2.pkl` to the `v0.1.2` GitHub release, or pass `--checkpoint-url` and `--pca-url`.
-- **Torch Geometric install issues**
-  - Verify that your torch version and wheel index URL match the environment (torch 2.3.x + cu121).
-- **OOM during preprocessing/training**
-  - Reduce batch size, use shorter runs, or switch to a smaller subset first.
+PowerShell:
 
----
+```powershell
+python -m pip install -e ".[predict]"
+python -m pip install -e desktop\backend
+cd desktop\frontend
+npm ci
+$env:PROTCROSS_DESKTOP_BACKEND_PATH = "..\backend"
+$env:PROTCROSS_DESKTOP_PYTHON = "python"
+npm run tauri:dev
+```
 
-## 7. Changelog
+Release preparation validates bundled assets, locked wheelhouses, package
+versions, and native artifacts:
+
+```bash
+desktop/installer/prepare_bundled_assets.sh
+python -m build --wheel --outdir dist
+python desktop/installer/prepare_runtime_wheelhouse.py \
+  --runtime-dir desktop/runtime \
+  --backend cpu \
+  --local-protcross-wheel dist/protcross-0.2.1-py3-none-any.whl
+python desktop/installer/validate_runtime_bundle.py \
+  --runtime-dir desktop/runtime \
+  --backend cpu
+python desktop/installer/validate_version_consistency.py
+```
+
+Formal public installers require Windows code signing and macOS app/DMG signing
+plus notarization. Unsigned artifacts must remain prerelease testing builds.
+Clean-machine release acceptance should cover Windows 10/11 CPU, compatible and
+incompatible CUDA systems, macOS Apple Silicon CPU/MPS, no-Conda machines, and
+working or incomplete user-managed Conda environments.
+
+## Version history
+
+### 0.2.1
+
+- Adds `protcross inspect` and matching Desktop structure checks before model
+  loading.
+- Makes asset setup resumable and verifiable, with progress, disk checks,
+  locking, SHA256 validation, and persistent ESM-C license confirmation.
+- Defaults to CPU, uses deterministic pure-PyTorch geometry, canonicalizes
+  residue order, and chunks large distance searches without changing neighbor
+  semantics.
+- Defines v2 result/provenance schemas, preserves PDB records while annotating
+  B-factors, retains mmCIF model identifiers, and prevents silent overwrite.
+- Hardens Desktop setup and local API handling, restores interrupted work, and
+  serializes Mol* structure and selection updates.
+- Publishes unsigned Windows x64 and macOS Apple Silicon artifacts only as
+  prerelease testing builds and consolidates scientific and release guidance in
+  this README.
 
 ### 0.2.0
 
-Desktop and user-facing prediction release.
-
-- Adds ProtCross Desktop release assets for Windows and macOS with Mol* structure visualization, local prediction setup, batch-oriented workflow foundations, and diagnostics.
-- Keeps desktop ESM-C weights outside the installer; users must confirm the ESM-C license before downloading or importing weights.
-- Publishes unsigned desktop testing builds as official `v0.2.0` release assets and documents Windows SmartScreen/macOS Gatekeeper warnings.
-- Promotes the improved prediction result package and downstream metadata workflow to the `0.2.0` PyPI package.
+- Introduced the local Desktop workflow, Mol* visualization, backend setup,
+  batch foundations, and diagnostics.
+- Kept ESM-C weights outside installers and behind explicit license review.
+- Promoted the complete annotated-structure, TSV, cluster JSON, and summary
+  JSON result package.
 
 ### 0.1.3
 
-Preparation release for user-facing prediction outputs and package cleanup.
-
-- Makes `protcross predict` write a default result package with annotated structure, extended scores TSV, pocket JSON, and summary JSON.
-- Reports clustered pocket centers, residue lists, probabilities, residue counts, truncation metadata, asset version, and output files for docking/MD downstream workflows.
-- Renames the canonical source package to `protcross` while keeping a deprecated import alias for 0.1.x compatibility.
-- Moves historical paper-reproduction scripts and notes under `reproduction/legacy/`.
-- Keeps the default runtime asset bundle fixed at the stable `0.1.2` checkpoint/PCA unless the user explicitly selects another asset version.
+- Added default result-package generation and clustered-residue metadata.
+- Consolidated maintained commands under the `protcross` CLI.
+- Archived paper-era wrappers under `reproduction/legacy/`.
 
 ### 0.1.2
 
-Release checkpoint update for external prediction and benchmark use.
+- Added the default `0.1.2` checkpoint and paired PCA assets.
+- Added the default HETATM/additive/ion exclusions documented above.
+- Trained on all loaded source and target structures without a held-out release
+  validation/test split.
 
-- Adds the `0.1.2` Binding MOAD-trained release checkpoint and matching PCA reducer as the default runtime assets. This release checkpoint was trained on Binding MOAD-derived labels from 41,409 PDB source structures spanning 20,387 unique ligand IDs, with 8,953 matched AF2 target structures. 
-- Filters common crystallization additives, salts, ions, and caps from default ligand-adjacent residue labeling.
+### 0.1.1 and 0.1.0
 
-Earlier release notes and archived command references are maintained in
-`reproduction/legacy/README.md`.
+- Added the original paper checkpoint/PCA, installable CLI, reusable
+  preprocessing, domain-adaptation, evaluation, and model components.
+- Established the initial PDB-to-AF2 point-cloud framework.
 
----
+## License, citation, and references
 
-## 8. License
+ProtCross code is distributed under the
+[MIT License](https://github.com/GeraltZeroZhong/ProtCross/blob/main/LICENSE).
+ESM-C weights are not part of that code license and remain governed by
+EvolutionaryScale's model terms.[^1] ProtCross checkpoint/PCA assets do not bundle ESM-C weights;
+review applicable terms before redistributing custom ESM-derived assets.
 
-ProtCross code is licensed under the MIT License. See [LICENSE](LICENSE) for
-details. ESM-C weights are not part of the ProtCross code license and remain
-governed by EvolutionaryScale's upstream model terms. The release
-checkpoint/PCA assets do not include ESM-C weights; custom redistribution of
-ESM-C-derived model assets should be reviewed against the applicable upstream
-and ProtCross terms.
+If ProtCross supports your work, cite:
+
+```bibtex
+@article{zhong2026protcross,
+  title = {{ProtCross}: Bridging the {PDB}-{AlphaFold} Gap for Binding Site Prediction with Protein Point Clouds},
+  author = {Zhong, Shuyu and Jiang, Yuying},
+  journal = {Journal of Chemical Information and Modeling},
+  year = {2026},
+  volume = {66},
+  number = {7},
+  pages = {3688--3701},
+  doi = {10.1021/acs.jcim.5c03224}
+}
+```
+
+[^1]: EvolutionaryScale. [Cambrian Non-Commercial License Agreement](https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement).
+
+[^2]: [Binding MOAD archive, Zenodo record 13375913](https://zenodo.org/records/13375913).
+
+[^3]: EvolutionaryScale. [ESM-C 600M 2024-12 model repository](https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12).
+
+[^4]: Tauri. [Prerequisites](https://v2.tauri.app/start/prerequisites/).

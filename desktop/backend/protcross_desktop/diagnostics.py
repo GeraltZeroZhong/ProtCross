@@ -18,11 +18,17 @@ from urllib.parse import urlsplit, urlunsplit
 
 IMPORT_CHECK = r"""
 import json
+from importlib import metadata
 payload = {}
 for name in ("torch", "torch_geometric", "esm", "protcross", "protcross_desktop"):
     try:
         mod = __import__(name)
         payload[name] = {"ok": True, "version": getattr(mod, "__version__", None)}
+        distribution = "protcross-desktop-backend" if name == "protcross_desktop" else name
+        try:
+            payload[name]["distribution_version"] = metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            payload[name]["distribution_version"] = None
     except Exception as exc:
         payload[name] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 try:

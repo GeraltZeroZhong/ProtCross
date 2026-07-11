@@ -1,7 +1,9 @@
 from pathlib import Path
+import hashlib
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -83,6 +85,7 @@ def test_predict_cli_accepts_new_and_legacy_arguments():
     assert args.accept_esm_license is True
     assert args.trust_unverified_assets is True
     assert args.auto_assets is True
+    assert args.device == "cpu"
 
 
 def test_predict_cli_accepts_assets_dir():
@@ -98,6 +101,63 @@ def test_predict_cli_can_disable_auto_assets():
     args = parser.parse_args(["input.pdb", "--no-auto-assets"])
 
     assert args.auto_assets is False
+
+
+def test_predict_cli_rejects_refresh_when_auto_assets_are_disabled(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="2"):
+        predict_main([str(input_pdb), "--no-auto-assets", "--refresh-assets"])
+
+
+def test_predict_cli_rejects_cross_format_output_before_assets(tmp_path, monkeypatch, capsys):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    monkeypatch.setattr(
+        "protcross.cli.predict._resolve_prediction_asset_paths",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("assets must not be resolved")),
+    )
+
+    exit_code = predict_main(
+        [str(input_pdb), "--output", str(tmp_path / "converted.cif"), "--summary-only"]
+    )
+
+    assert exit_code == 1
+    assert "same PDB or mmCIF format" in capsys.readouterr().err
+
+
+def test_predict_cli_forwards_resolved_asset_metadata(tmp_path, monkeypatch):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    metadata = {
+        "asset_version": "0.1.2",
+        "checkpoint": {"actual_sha256": "checkpoint-hash", "verified": True},
+    }
+    captured = {}
+
+    def fake_resolve(args, *, auto_setup):
+        args.ckpt_path = str(tmp_path / "model.ckpt")
+        args.esm_weights = str(tmp_path / "esm.pth")
+        args.pca_path = str(tmp_path / "pca.pkl")
+        return SimpleNamespace(asset_version="0.1.2", asset_metadata=metadata)
+
+    class FakePredictor:
+        def predict(self, *args, **kwargs):
+            return object()
+
+    def fake_from_files(**kwargs):
+        captured.update(kwargs)
+        return FakePredictor()
+
+    monkeypatch.setattr("protcross.cli.predict._resolve_prediction_asset_paths", fake_resolve)
+    monkeypatch.setattr("protcross.inference.ProtCrossPredictor.from_files", staticmethod(fake_from_files))
+
+    exit_code = predict_main([str(input_pdb), "--summary-only", "--quiet"])
+
+    assert exit_code == 0
+    assert captured["asset_version"] == "0.1.2"
+    assert captured["asset_metadata"] is metadata
 
 
 def test_predict_cli_accepts_offline_and_summary_only():
@@ -374,6 +434,14 @@ def test_setup_assets_parser_allows_env_default():
     assert args.asset_version == "0.1.1-paper"
 
 
+def test_setup_assets_parser_uses_environment_asset_version(monkeypatch):
+    monkeypatch.setenv("PROTCROSS_ASSET_VERSION", "0.1.1-paper")
+
+    args = setup_assets.build_parser().parse_args([])
+
+    assert args.asset_version == "0.1.1-paper"
+
+
 def test_predict_discovers_default_asset_directory(tmp_path, monkeypatch):
     _trust_managed_asset_hashes(monkeypatch)
     for filename in (DEFAULT_CHECKPOINT_FILENAME, "esmc_600m_2024_12_v0.pth", DEFAULT_PCA_FILENAME):
@@ -614,12 +682,12 @@ def test_predict_main_writes_default_result_package(tmp_path, monkeypatch, capsy
     assert (output_dir / "input.protcross.scores.tsv").exists()
     assert (output_dir / "input.protcross.pockets.json").exists()
     summary = json.loads((output_dir / "input.protcross.summary.json").read_text(encoding="utf-8"))
-    assert summary["schema_version"] == "protcross-summary-v1"
+    assert summary["schema_version"] == "protcross-summary-v2"
     assert summary["top_pocket"]["residue_count"] == 1
     assert summary["unscored_bfactor_policy"] == "zero"
     stdout = capsys.readouterr().out
     assert "Wrote structure:" in stdout
-    assert "Pocket center:" in stdout
+    assert "Top cluster score-weighted CA centroid:" in stdout
 
 
 def test_predict_main_summary_only_does_not_create_defaults(tmp_path, monkeypatch, capsys):
@@ -635,7 +703,148 @@ def test_predict_main_summary_only_does_not_create_defaults(tmp_path, monkeypatc
     assert predict_main([str(input_pdb), "--summary-only", "--device", "cpu", "--accept-esm-license"]) == 0
 
     assert not (tmp_path / "input.protcross.pdb").exists()
-    assert "Predicted binding residues: 1" in capsys.readouterr().out
+    assert "Residues above threshold: 1" in capsys.readouterr().out
+
+
+def test_predict_rejects_unavailable_cuda_before_resolving_assets(tmp_path, monkeypatch, capsys):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        "protcross.cli.predict._resolve_prediction_asset_paths",
+        lambda *args, **kwargs: pytest.fail("assets must not be resolved for an unavailable explicit device"),
+    )
+
+    assert predict_main([str(input_pdb), "--summary-only", "--device", "cuda"]) == 1
+    assert "CUDA was requested but" in capsys.readouterr().err
+
+
+def test_summary_only_explicit_output_refuses_overwrite_before_assets(tmp_path, monkeypatch, capsys):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    output_pdb = tmp_path / "existing.pdb"
+    output_pdb.write_text("do not replace\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "protcross.cli.predict._resolve_prediction_asset_paths",
+        lambda *args, **kwargs: pytest.fail("assets must not be resolved when output preflight fails"),
+    )
+
+    assert predict_main(
+        [str(input_pdb), "--summary-only", "--output", str(output_pdb), "--device", "cpu"]
+    ) == 1
+    assert output_pdb.read_text(encoding="utf-8") == "do not replace\n"
+    assert "already exist" in capsys.readouterr().err
+
+
+def test_predict_rejects_colliding_outputs_before_assets(tmp_path, monkeypatch, capsys):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    shared_output = tmp_path / "shared.out"
+    monkeypatch.setattr(
+        "protcross.cli.predict._resolve_prediction_asset_paths",
+        lambda *args, **kwargs: pytest.fail("assets must not be resolved for colliding outputs"),
+    )
+
+    assert (
+        predict_main(
+            [
+                str(input_pdb),
+                "--summary-only",
+                "--output",
+                str(shared_output),
+                "--scores-tsv",
+                str(shared_output),
+            ]
+        )
+        == 1
+    )
+    assert "must be distinct" in capsys.readouterr().err
+    assert input_pdb.read_text(encoding="utf-8") == MINIMAL_PDB
+
+
+def test_predict_rejects_input_as_output_even_with_overwrite(tmp_path, monkeypatch, capsys):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    monkeypatch.setattr(
+        "protcross.cli.predict._resolve_prediction_asset_paths",
+        lambda *args, **kwargs: pytest.fail("assets must not be resolved when an output aliases input"),
+    )
+
+    assert (
+        predict_main(
+            [
+                str(input_pdb),
+                "--summary-only",
+                "--summary-json",
+                str(input_pdb),
+                "--overwrite",
+            ]
+        )
+        == 1
+    )
+    assert "must not overwrite the input structure" in capsys.readouterr().err
+    assert input_pdb.read_text(encoding="utf-8") == MINIMAL_PDB
+
+
+def test_predict_rejects_directory_output_before_assets(tmp_path, monkeypatch, capsys):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    monkeypatch.setattr(
+        "protcross.cli.predict._resolve_prediction_asset_paths",
+        lambda *args, **kwargs: pytest.fail("assets must not be resolved for a directory output"),
+    )
+
+    assert (
+        predict_main(
+            [
+                str(input_pdb),
+                "--summary-only",
+                "--summary-json",
+                str(tmp_path),
+                "--overwrite",
+            ]
+        )
+        == 1
+    )
+    assert "directory, not a file" in capsys.readouterr().err
+
+
+def test_predict_expands_user_output_path_before_prediction(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    for filename in (
+        DEFAULT_CHECKPOINT_FILENAME,
+        "esmc_600m_2024_12_v0.pth",
+        DEFAULT_PCA_FILENAME,
+    ):
+        (assets_dir / filename).write_bytes(b"asset")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PROTCROSS_ASSETS_DIR", str(assets_dir))
+    _trust_managed_asset_hashes(monkeypatch)
+    _patch_fake_predictor(monkeypatch)
+
+    assert (
+        predict_main(
+            [
+                str(input_pdb),
+                "--summary-only",
+                "--summary-json",
+                "~/result.json",
+                "--accept-esm-license",
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+
+    assert (home / "result.json").exists()
+    assert not (Path.cwd() / "~" / "result.json").exists()
 
 
 def test_pyproject_exposes_setup_assets_entry_point():
@@ -776,4 +985,8 @@ def _patch_fake_predictor(monkeypatch):
 
 def _trust_managed_asset_hashes(monkeypatch):
     expected_by_name = {spec.filename: spec.sha256 for spec in DEFAULT_ASSET_BUNDLE.assets}
-    monkeypatch.setattr("protcross.assets.sha256_file", lambda path: expected_by_name[Path(path).name])
+    monkeypatch.setattr(
+        "protcross.assets.sha256_file",
+        lambda path: expected_by_name.get(Path(path).name)
+        or hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+    )

@@ -35,4 +35,10 @@ class PCAReducer:
     def load(self, path: str | Path) -> None:
         with Path(path).open("rb") as file:
             self.pca = pickle.load(file)
+        actual_components = getattr(
+            self.pca,
+            "n_components_",
+            getattr(self.pca, "n_components", self.n_components),
+        )
+        self.n_components = int(actual_components)
         self.is_fitted = True

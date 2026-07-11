@@ -37,7 +37,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resource-dir", type=Path, required=True)
     parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--no-start", action="store_true", help="Only validate resource layout.")
     return parser
 
@@ -103,6 +103,7 @@ def _start_and_probe_sidecar(resource_dir: Path, python: str, timeout: float) ->
 def _wait_for_json(url_or_request, *, timeout: float, process: subprocess.Popen) -> None:
     deadline = time.time() + timeout
     last_error: Exception | None = None
+    local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while time.time() < deadline:
         if process.poll() is not None:
             stdout, stderr = process.communicate(timeout=1)
@@ -111,7 +112,7 @@ def _wait_for_json(url_or_request, *, timeout: float, process: subprocess.Popen)
                 f"(code {process.returncode}). stdout={stdout!r} stderr={stderr!r}"
             )
         try:
-            with urllib.request.urlopen(url_or_request, timeout=2) as response:
+            with local_opener.open(url_or_request, timeout=2) as response:
                 if response.status == 200:
                     response.read()
                     return

@@ -49,6 +49,18 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"Desktop backend package not found: {desktop_backend_dir}")
     with tempfile.TemporaryDirectory(prefix="protcross-desktop-backend-wheel-") as shared_tmp:
         desktop_backend_wheel = _build_local_wheel(desktop_backend_dir, Path(shared_tmp))
+        expected_version = (
+            _wheel_name_version(local_wheel)[1]
+            if local_wheel is not None
+            else _locked_protcross_version(runtime_dir / "requirements-common.lock")
+        )
+        desktop_backend_version = _wheel_name_version(desktop_backend_wheel)[1]
+        if desktop_backend_version != expected_version:
+            raise RuntimeError(
+                "Desktop backend wheel version does not match the ProtCross runtime version: "
+                f"{desktop_backend_version} != {expected_version}"
+            )
+        _remove_stale_release_wheels(wheelhouse, expected_version)
         for backend in backends:
             _prepare_backend(
                 runtime_dir=runtime_dir,
@@ -219,6 +231,27 @@ def _wheel_name_version(wheel: Path) -> tuple[str, str]:
     if len(parts) < 5:
         raise ValueError(f"Invalid wheel filename: {wheel.name}")
     return parts[0].replace("_", "-").lower(), parts[1]
+
+
+def _locked_protcross_version(requirements_lock: Path) -> str:
+    matches = []
+    for line in requirements_lock.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("protcross=="):
+            matches.append(stripped.split("==", 1)[1])
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected one exact protcross pin in {requirements_lock}, found {len(matches)}."
+        )
+    return matches[0]
+
+
+def _remove_stale_release_wheels(wheelhouse: Path, expected_version: str) -> None:
+    for wheel in wheelhouse.glob("*.whl"):
+        name, version = _wheel_name_version(wheel)
+        if name in {"protcross", "protcross-desktop-backend"} and version != expected_version:
+            print(f"Removing stale release wheel: {wheel}")
+            wheel.unlink()
 
 
 def _copy_uv(runtime_dir: Path, uv_bin: Path | None) -> Path | None:

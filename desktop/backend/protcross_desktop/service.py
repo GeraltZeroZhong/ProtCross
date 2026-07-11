@@ -10,12 +10,13 @@ import sys
 import threading
 import traceback
 import uuid
+import time
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
 from typing import Any, Callable
 
-from protcross.assets import AssetSpec, DEFAULT_ASSETS, download_asset, sha256_file
+from protcross.assets import DownloadCancelled, AssetSpec, DEFAULT_ASSETS, download_asset, sha256_file
 
 from .config import (
     DesktopPaths,
@@ -30,6 +31,7 @@ from .manifest import DesktopManifest
 
 PredictorFactory = Callable[..., Any]
 DEFAULT_BATCH_STATUS_LIMIT = 500
+MAX_RETAINED_FINISHED_JOBS = 20
 
 
 @dataclass
@@ -81,6 +83,39 @@ class BatchJob:
         }
 
 
+@dataclass
+class AssetDownloadJob:
+    id: str
+    filename: str
+    expected_size_bytes: int | None
+    status: str = "queued"
+    downloaded_bytes: int = 0
+    total_bytes: int | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    error: str | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        total = self.total_bytes or self.expected_size_bytes
+        end_time = self.completed_at or time.time()
+        elapsed = max(0.0, end_time - self.started_at) if self.started_at else 0.0
+        speed = self.downloaded_bytes / elapsed if elapsed > 0 else None
+        return {
+            "id": self.id,
+            "filename": self.filename,
+            "status": self.status,
+            "downloaded_bytes": self.downloaded_bytes,
+            "total_bytes": total,
+            "percent": (100.0 * self.downloaded_bytes / total) if total else None,
+            "bytes_per_second": speed,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "error": self.error,
+            "resumable": True,
+        }
+
+
 class DesktopBackend:
     """Desktop state manager for assets, diagnostics, prediction, and batch jobs."""
 
@@ -93,37 +128,46 @@ class DesktopBackend:
         self.paths = DesktopPaths.discover(root)
         self.paths.ensure()
         self.manifest = DesktopManifest.load(self.paths.manifest_path)
-        self.manifest.checkpoint_path = self.manifest.checkpoint_path or str(self.paths.default_checkpoint)
-        self.manifest.pca_path = self.manifest.pca_path or str(self.paths.default_pca)
+        self.manifest.checkpoint_path = _migrate_bundled_asset_path(
+            self.manifest.checkpoint_path, self.paths.default_checkpoint
+        )
+        self.manifest.pca_path = _migrate_bundled_asset_path(self.manifest.pca_path, self.paths.default_pca)
         self.manifest.save(self.paths.manifest_path)
         self._predictor_factory = predictor_factory
         self._predictor: Any | None = None
         self._predictor_key: tuple[str, str, str, str] | None = None
         self._jobs: dict[str, BatchJob] = {}
+        self._asset_downloads: dict[str, AssetDownloadJob] = {}
         self._readable_output_files: set[Path] = set()
         self._file_status_cache: dict[tuple[str, int, int, str | None], dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._predict_lock = threading.Lock()
 
     def status(self) -> dict[str, Any]:
-        assets = self.asset_status()
-        issues = self.readiness_issues(assets)
-        return {
-            "paths": {
-                "root": str(self.paths.root),
-                "assets_dir": str(self.paths.assets_dir),
-                "runtime_dir": str(self.paths.runtime_dir),
-                "outputs_dir": str(self.paths.outputs_dir),
-                "manifest": str(self.paths.manifest_path),
-            },
-            "manifest": self.manifest.to_dict(),
-            "assets": assets,
-            "backend": self.backend_status(),
-            "readiness": {
-                "ready": len(issues) == 0,
-                "issues": issues,
-            },
-        }
+        with self._lock:
+            assets = self.asset_status()
+            issues = self.readiness_issues(assets)
+            activity = {
+                "batch_jobs": [job.to_dict(limit=0) for job in self._jobs.values()],
+                "asset_downloads": [job.to_dict() for job in self._asset_downloads.values()],
+            }
+            return {
+                "paths": {
+                    "root": str(self.paths.root),
+                    "assets_dir": str(self.paths.assets_dir),
+                    "runtime_dir": str(self.paths.runtime_dir),
+                    "outputs_dir": str(self.paths.outputs_dir),
+                    "manifest": str(self.paths.manifest_path),
+                },
+                "manifest": self.manifest.to_dict(),
+                "assets": assets,
+                "backend": self.backend_status(),
+                "readiness": {
+                    "ready": len(issues) == 0,
+                    "issues": issues,
+                },
+                "activity": activity,
+            }
 
     def confirm_esm_license(
         self,
@@ -131,9 +175,10 @@ class DesktopBackend:
         license_url: str = ESM_LICENSE_URL,
         model_url: str = ESM_MODEL_URL,
     ) -> dict[str, Any]:
-        self.manifest.confirm_esm_license(license_url=license_url, model_url=model_url)
-        self.manifest.save(self.paths.manifest_path)
-        return self.manifest.to_dict()
+        with self._lock:
+            self.manifest.confirm_esm_license(license_url=license_url, model_url=model_url)
+            self.manifest.save(self.paths.manifest_path)
+            return self.manifest.to_dict()
 
     def configure_backend(
         self,
@@ -146,16 +191,18 @@ class DesktopBackend:
             raise ValueError("backend mode must be one of: cpu, gpu, conda")
         if mode == "conda" and not conda_python:
             raise ValueError("conda_python is required for conda backend mode")
-        self.manifest.backend_mode = mode
-        self.manifest.conda_python = str(Path(conda_python).expanduser()) if conda_python else None
-        self.manifest.backend_test_ok = None
-        self.manifest.backend_tested_at = None
-        self.manifest.backend_test_mode = None
-        self.manifest.backend_test_python = None
-        self.manifest.proxy_url = proxy_url
-        self.manifest.save(self.paths.manifest_path)
-        self._predictor = None
-        self._predictor_key = None
+        with self._lock:
+            self.manifest.backend_mode = mode
+            self.manifest.conda_python = str(Path(conda_python).expanduser()) if conda_python else None
+            self.manifest.backend_test_ok = None
+            self.manifest.backend_tested_at = None
+            self.manifest.backend_test_mode = None
+            self.manifest.backend_test_python = None
+            self.manifest.backend_test_package_version = None
+            self.manifest.proxy_url = proxy_url
+            self.manifest.save(self.paths.manifest_path)
+            self._predictor = None
+            self._predictor_key = None
         return self.backend_status()
 
     def import_esm_weights(self, path: str | Path, *, copy_to_cache: bool = False) -> dict[str, Any]:
@@ -163,54 +210,144 @@ class DesktopBackend:
         source_path = Path(path).expanduser()
         if not source_path.exists():
             raise FileNotFoundError(f"ESM-C weights not found: {source_path}")
+        _verify_import_source(source_path, self.manifest.esm_expected_sha256, "ESM-C weights")
         target = self.paths.managed_esm_weights if copy_to_cache else source_path
         if copy_to_cache and source_path.resolve() != target.resolve():
             target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix(target.suffix + ".part")
-            shutil.copyfile(source_path, tmp)
-            tmp.replace(target)
-        self.manifest.set_esm_weights(target, source="imported")
-        self.manifest.save(self.paths.manifest_path)
-        self._invalidate_predictor()
-        return self.manifest.esm_status()
+            _copy_atomic(source_path, target)
+        with self._lock:
+            self.manifest.set_esm_weights(target, source="imported")
+            self.manifest.save(self.paths.manifest_path)
+            self._invalidate_predictor()
+            return self.manifest.esm_status()
 
     def import_checkpoint(self, path: str | Path) -> dict[str, Any]:
         source_path = Path(path).expanduser()
         if not source_path.exists():
             raise FileNotFoundError(f"ProtCross checkpoint not found: {source_path}")
+        _verify_import_source(source_path, DEFAULT_ASSETS[1].sha256, "ProtCross checkpoint")
         target = self.paths.assets_dir / DEFAULT_ASSETS[1].filename
         _copy_atomic(source_path, target)
-        self.manifest.checkpoint_path = str(target)
-        self.manifest.save(self.paths.manifest_path)
-        self._invalidate_predictor()
+        with self._lock:
+            self.manifest.checkpoint_path = str(target)
+            self.manifest.save(self.paths.manifest_path)
+            self._invalidate_predictor()
         return self.asset_status()["checkpoint"]
 
     def import_pca(self, path: str | Path) -> dict[str, Any]:
         source_path = Path(path).expanduser()
         if not source_path.exists():
             raise FileNotFoundError(f"ProtCross PCA asset not found: {source_path}")
+        _verify_import_source(source_path, DEFAULT_ASSETS[2].sha256, "ProtCross PCA reducer")
         target = self.paths.assets_dir / DEFAULT_ASSETS[2].filename
         _copy_atomic(source_path, target)
-        self.manifest.pca_path = str(target)
-        self.manifest.save(self.paths.manifest_path)
-        self._invalidate_predictor()
+        with self._lock:
+            self.manifest.pca_path = str(target)
+            self.manifest.save(self.paths.manifest_path)
+            self._invalidate_predictor()
         return self.asset_status()["pca"]
 
-    def download_esm_weights(self, *, url: str = ESM_MODEL_URL, force: bool = False) -> dict[str, Any]:
+    def download_esm_weights(
+        self,
+        *,
+        url: str = ESM_MODEL_URL,
+        force: bool = False,
+        _progress_callback: Callable[[int, int | None], None] | None = None,
+        _cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         self._require_license()
         spec = AssetSpec(
             name="ESM-C 600M weights",
             filename=ESM_FILENAME,
             url=url,
             sha256=ESM_EXPECTED_SHA256,
+            size_bytes=DEFAULT_ASSETS[0].size_bytes,
         )
         with _temporary_proxy_env(self.manifest.proxy_url):
-            download_asset(spec, self.paths.managed_esm_weights, force=force, verify=True)
-        self.manifest.set_esm_weights(self.paths.managed_esm_weights, source="downloaded")
-        self.manifest.esm_model_url = url
-        self.manifest.save(self.paths.manifest_path)
-        self._invalidate_predictor()
-        return self.manifest.esm_status()
+            download_asset(
+                spec,
+                self.paths.managed_esm_weights,
+                force=force,
+                verify=True,
+                progress_callback=_progress_callback,
+                cancel_event=_cancel_event,
+            )
+        with self._lock:
+            self.manifest.set_esm_weights(self.paths.managed_esm_weights, source="downloaded")
+            self.manifest.esm_model_url = url
+            self.manifest.save(self.paths.manifest_path)
+            self._invalidate_predictor()
+            return self.manifest.esm_status()
+
+    def start_esm_download(self, *, force: bool = False) -> dict[str, Any]:
+        """Start the large ESM-C download without blocking the desktop API."""
+        self._require_license()
+        with self._lock:
+            self._prune_finished_jobs_locked(self._asset_downloads)
+            running = next(
+                (job for job in self._asset_downloads.values() if job.status in {"queued", "running", "cancelling"}),
+                None,
+            )
+            if running is not None:
+                return running.to_dict()
+            job = AssetDownloadJob(
+                id=str(uuid.uuid4()),
+                filename=ESM_FILENAME,
+                expected_size_bytes=DEFAULT_ASSETS[0].size_bytes,
+            )
+            self._asset_downloads[job.id] = job
+        threading.Thread(target=self._run_esm_download, args=(job.id, force), daemon=True).start()
+        return job.to_dict()
+
+    def esm_download_status(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            if job_id not in self._asset_downloads:
+                raise KeyError(f"Unknown asset download: {job_id}")
+            return self._asset_downloads[job_id].to_dict()
+
+    def cancel_esm_download(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            if job_id not in self._asset_downloads:
+                raise KeyError(f"Unknown asset download: {job_id}")
+            job = self._asset_downloads[job_id]
+            if job.status in {"queued", "running"}:
+                job.status = "cancelling"
+                job.cancel_event.set()
+            return job.to_dict()
+
+    def _run_esm_download(self, job_id: str, force: bool) -> None:
+        with self._lock:
+            job = self._asset_downloads[job_id]
+            job.status = "running"
+            job.started_at = time.time()
+
+        def progress(downloaded: int, total: int | None) -> None:
+            with self._lock:
+                job.downloaded_bytes = int(downloaded)
+                if total:
+                    job.total_bytes = int(total)
+
+        try:
+            self.download_esm_weights(
+                force=force,
+                _progress_callback=progress,
+                _cancel_event=job.cancel_event,
+            )
+        except DownloadCancelled:
+            with self._lock:
+                job.status = "cancelled"
+                job.error = None
+                job.completed_at = time.time()
+            return
+        except Exception as exc:
+            with self._lock:
+                job.status = "failed"
+                job.error = str(exc)
+                job.completed_at = time.time()
+            return
+        with self._lock:
+            job.status = "completed"
+            job.completed_at = time.time()
 
     def asset_status(self) -> dict[str, Any]:
         checkpoint = Path(self.manifest.checkpoint_path).expanduser() if self.manifest.checkpoint_path else None
@@ -234,6 +371,7 @@ class DesktopBackend:
         }
 
     def backend_status(self) -> dict[str, Any]:
+        package_version = _required_package_version()
         mode = self.manifest.backend_mode
         python = self._configured_python()
         sidecar_python = Path(sys.executable).resolve()
@@ -248,10 +386,13 @@ class DesktopBackend:
             "backend_tested_at": self.manifest.backend_tested_at,
             "backend_test_mode": self.manifest.backend_test_mode,
             "backend_test_python": self.manifest.backend_test_python,
+            "backend_test_package_version": self.manifest.backend_test_package_version,
+            "required_package_version": package_version,
             "proxy_url": self.manifest.proxy_url,
         }
 
     def readiness_issues(self, status: dict[str, Any] | None = None) -> list[str]:
+        package_version = _required_package_version()
         status = status or self.asset_status()
         issues: list[str] = []
         if not status["esm"]["license_confirmed"]:
@@ -269,6 +410,11 @@ class DesktopBackend:
                 or self.manifest.backend_test_python != backend["python"]
             ):
                 issues.append("Backend configuration changed; run the environment test again.")
+            elif self.manifest.backend_test_package_version != package_version:
+                installed = self.manifest.backend_test_package_version or "an older/unknown version"
+                issues.append(
+                    f"Backend was tested with ProtCross {installed}; install or test the {package_version} backend."
+                )
             if backend["python_present"] and not backend["runtime_matches_config"]:
                 issues.append("Restart the desktop backend so prediction runs inside the selected environment.")
         if not status["checkpoint"]["present"]:
@@ -293,14 +439,24 @@ class DesktopBackend:
         if python is None:
             raise ValueError("Choose a conda environment Python before testing the conda backend.")
         result = test_python_env(python, backend=selected).to_dict()
+        package_version = _required_package_version()
+        installed_version = result.get("checks", {}).get("protcross", {}).get("distribution_version")
+        if result["ok"] and installed_version != package_version:
+            result["ok"] = False
+            result["error"] = (
+                f"Backend has ProtCross {installed_version or 'unknown'}, but Desktop requires {package_version}. "
+                "Reinstall this backend to upgrade it."
+            )
         if selected == self.manifest.backend_mode:
             from .manifest import utc_now
 
-            self.manifest.backend_test_ok = bool(result["ok"])
-            self.manifest.backend_tested_at = utc_now()
-            self.manifest.backend_test_mode = selected
-            self.manifest.backend_test_python = str(python)
-            self.manifest.save(self.paths.manifest_path)
+            with self._lock:
+                self.manifest.backend_test_ok = bool(result["ok"])
+                self.manifest.backend_tested_at = utc_now()
+                self.manifest.backend_test_mode = selected
+                self.manifest.backend_test_python = str(python)
+                self.manifest.backend_test_package_version = installed_version
+                self.manifest.save(self.paths.manifest_path)
         return result
 
     def predict_single(
@@ -319,8 +475,11 @@ class DesktopBackend:
         self._require_ready()
         if output_dir is None:
             output_dir = self.paths.outputs_dir / input_path.stem
-        output_paths = _desktop_output_paths(input_path, output_dir)
         with self._predict_lock:
+            output_paths = _desktop_output_paths(input_path, output_dir)
+            if any(path.exists() for path in output_paths.values()):
+                output_dir = _next_available_run_dir(Path(output_dir).expanduser())
+                output_paths = _desktop_output_paths(input_path, output_dir)
             predictor = self._get_predictor(device=device)
             result = predictor.predict(
                 input_path,
@@ -344,6 +503,18 @@ class DesktopBackend:
             "output_files": {key: str(path) for key, path in output_paths.items()},
         }
 
+    def inspect_input_structure(
+        self,
+        input_structure: str | Path,
+        *,
+        chain_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Inspect an input without loading model assets or requiring prediction readiness."""
+        from protcross.data import inspect_structure
+
+        input_path = _validate_structure_path(input_structure)
+        return inspect_structure(input_path, chain_id=chain_id)
+
     def submit_batch(
         self,
         structures: list[str | Path],
@@ -358,6 +529,25 @@ class DesktopBackend:
             raise ValueError("Batch requires at least one input structure.")
         input_paths = [_validate_structure_path(path) for path in structures]
         _validate_prediction_options(threshold, pocket_cluster_cutoff)
+        from protcross.data import inspect_structure
+
+        input_errors = []
+        for path in input_paths:
+            try:
+                report = inspect_structure(path)
+                if report["requires_truncation"] and not allow_truncation:
+                    input_errors.append(
+                        f"{path}: longest chain has {report['longest_chain_context']} scorable residues "
+                        f"(limit {report['max_len']}); enable truncation or remove this input"
+                    )
+            except Exception as exc:
+                input_errors.append(f"{path}: {exc}")
+        if input_errors:
+            shown = input_errors[:20]
+            suffix = f"\n- … and {len(input_errors) - len(shown)} more" if len(input_errors) > len(shown) else ""
+            raise ValueError(
+                "Batch structure check failed before model loading:\n- " + "\n- ".join(shown) + suffix
+            )
         self._require_ready()
         import time
 
@@ -367,6 +557,7 @@ class DesktopBackend:
             created_at=time.time(),
         )
         with self._lock:
+            self._prune_finished_jobs_locked(self._jobs)
             active = [existing.id for existing in self._jobs.values() if existing.status in {"queued", "running"}]
             if active:
                 raise RuntimeError(f"Batch job already running: {active[0]}")
@@ -489,7 +680,10 @@ class DesktopBackend:
                 paths = _desktop_output_paths(input_path, item_output)
                 try:
                     with self._predict_lock:
-                        result = predictor.predict(
+                        if any(path.exists() for path in paths.values()):
+                            item_output = _next_available_run_dir(item_output)
+                            paths = _desktop_output_paths(input_path, item_output)
+                        predictor.predict(
                             input_path,
                             threshold=threshold,
                             pocket_cluster_cutoff=pocket_cluster_cutoff,
@@ -560,6 +754,22 @@ class DesktopBackend:
             self._predictor_key = None
             self._file_status_cache.clear()
 
+    @staticmethod
+    def _prune_finished_jobs_locked(jobs: dict[str, Any]) -> None:
+        active_statuses = {"queued", "running", "cancelling"}
+        finished = [job for job in jobs.values() if job.status not in active_statuses]
+        finished.sort(
+            key=lambda job: float(
+                getattr(job, "completed_at", None)
+                or getattr(job, "created_at", None)
+                or getattr(job, "started_at", None)
+                or 0.0
+            ),
+            reverse=True,
+        )
+        for job in finished[MAX_RETAINED_FINISHED_JOBS:]:
+            jobs.pop(job.id, None)
+
     def _cached_file_status(self, path: Path | None, expected_sha256: str | None) -> dict[str, Any]:
         if not path or not path.exists():
             return _file_status(path, expected_sha256)
@@ -618,6 +828,23 @@ def _default_predictor_factory(**kwargs: Any) -> Any:
     return ProtCrossPredictor.from_files(**kwargs)
 
 
+def _migrate_bundled_asset_path(current: str | None, bundled_default: Path) -> str:
+    if not current:
+        return str(bundled_default)
+    current_path = Path(current).expanduser()
+    if current_path.exists():
+        return str(current_path)
+    if bundled_default.exists() and current_path.name == bundled_default.name:
+        return str(bundled_default)
+    return str(current_path)
+
+
+def _required_package_version() -> str:
+    from protcross import __version__ as package_version
+
+    return os.environ.get("PROTCROSS_DESKTOP_VERSION", package_version)
+
+
 def _file_status(path: Path | None, expected_sha256: str | None) -> dict[str, Any]:
     present = bool(path and path.exists())
     actual = sha256_file(path) if present and path else None
@@ -661,6 +888,19 @@ def _unique_batch_output_dir(root: str | Path, input_path: Path) -> Path:
     return Path(root).expanduser() / f"{safe_stem}-{digest}"
 
 
+def _next_available_run_dir(root: Path) -> Path:
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    for index in range(1000):
+        suffix = "" if index == 0 else f"-{index + 1}"
+        candidate = root / f"run-{stamp}{suffix}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        return candidate
+    raise RuntimeError(f"Could not allocate a unique result directory under {root}")
+
+
 def _resolve_existing_path(path: Path | None) -> Path | None:
     if path is None or not path.exists():
         return None
@@ -669,9 +909,20 @@ def _resolve_existing_path(path: Path | None) -> Path | None:
 
 def _copy_atomic(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".part")
-    shutil.copyfile(source, tmp)
-    tmp.replace(target)
+    tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
+    try:
+        shutil.copyfile(source, tmp)
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _verify_import_source(source: Path, expected_sha256: str | None, label: str) -> None:
+    if not expected_sha256:
+        return
+    actual = sha256_file(source)
+    if actual != expected_sha256:
+        raise ValueError(f"{label} failed SHA256 verification: expected {expected_sha256}, got {actual}")
 
 
 def _file_identity(path: Path) -> str:

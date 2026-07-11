@@ -28,8 +28,10 @@ def test_legacy_archive_contains_reproducibility_scripts():
     }
 
     assert {path.name for path in LEGACY_DIR.glob("*.py")} == expected
-    assert (LEGACY_DIR / "README.md").exists()
+    assert not (LEGACY_DIR / "README.md").exists()
     assert (LEGACY_DIR / "pdb_uniprot_mapping.json").exists()
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "python reproduction/legacy/run_Predict_ProtCross.py" in readme
 
 
 def test_old_top_level_legacy_entrypoints_are_not_exposed():

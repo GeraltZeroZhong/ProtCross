@@ -4,7 +4,7 @@ import numpy as np
 from Bio.PDB import MMCIFParser, PDBParser
 from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 
-from protcross.data import StructureParser
+from protcross.data import StructureParser, canonicalize_parsed_structure
 from protcross.inference.pdb import write_bfactor_pdb
 
 from conftest import PUBLISH_RAW_PDB, require_file
@@ -470,3 +470,82 @@ END
     assert parsed["model_count"] == 2
     assert parsed["models_scored"] == ["0"]
     assert "only model 0" in parsed["structure_warnings"][0]
+
+
+def test_canonicalize_parsed_structure_reorders_every_residue_field_together():
+    metadata = [
+        {"model_id": "0", "chain_id": "B", "auth_asym_id": "B", "auth_seq_id": 2, "residue_id": "B_2"},
+        {"model_id": "0", "chain_id": "A", "auth_asym_id": "A", "auth_seq_id": 2, "residue_id": "A_2"},
+        {"model_id": "0", "chain_id": "A", "auth_asym_id": "A", "auth_seq_id": 1, "residue_id": "A_1"},
+    ]
+    parsed = {
+        "sequence": "KGA",
+        "coords": np.asarray([[3, 0, 0], [2, 0, 0], [1, 0, 0]], dtype=np.float32),
+        "raw_coords": np.asarray([[30, 0, 0], [20, 0, 0], [10, 0, 0]], dtype=np.float32),
+        "plddts": np.asarray([30, 20, 10], dtype=np.float32),
+        "labels": np.asarray([0, 1, 0], dtype=np.float32),
+        "residue_ids": ["B_2", "A_2", "A_1"],
+        "residue_metadata": metadata,
+    }
+
+    canonical = canonicalize_parsed_structure(parsed)
+
+    assert canonical["sequence"] == "AGK"
+    assert canonical["residue_ids"] == ["A_1", "A_2", "B_2"]
+    assert canonical["coords"][:, 0].tolist() == [1.0, 2.0, 3.0]
+    assert canonical["raw_coords"][:, 0].tolist() == [10.0, 20.0, 30.0]
+    assert canonical["plddts"].tolist() == [10.0, 20.0, 30.0]
+    assert canonical["labels"].tolist() == [0.0, 1.0, 0.0]
+    assert parsed["sequence"] == "KGA"
+
+
+def test_mmcif_nondefault_model_number_is_preserved_when_writing_scores(tmp_path: Path):
+    input_cif = tmp_path / "model-five.cif"
+    output_cif = tmp_path / "model-five.out.cif"
+    input_cif.write_text(
+        """\
+data_test
+#
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1 N N . ALA X 1 1 ? 0.000 0.000 0.000 1.00 41.00 ? 1 ALA A N 5
+ATOM 2 C CA . ALA X 1 1 ? 1.000 0.000 0.000 1.00 42.00 ? 1 ALA A CA 5
+ATOM 3 C C . ALA X 1 1 ? 2.000 0.000 0.000 1.00 43.00 ? 1 ALA A C 5
+#
+""",
+        encoding="utf-8",
+    )
+
+    parsed = StructureParser().parse_file_with_labels(input_cif)
+
+    assert parsed is not None
+    assert parsed["residue_metadata"][0]["mmcif_model_num"] == "5"
+    write_bfactor_pdb(
+        input_cif,
+        output_cif,
+        parsed["residue_ids"],
+        np.asarray([0.876]),
+        residue_metadata=parsed["residue_metadata"],
+    )
+    out = MMCIF2Dict(str(output_cif))
+    assert [float(value) for value in out["_atom_site.B_iso_or_equiv"]] == [0.876, 0.876, 0.876]

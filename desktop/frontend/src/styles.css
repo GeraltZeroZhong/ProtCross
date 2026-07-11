@@ -33,6 +33,18 @@ button:hover:not(:disabled) {
   color: #0f5964;
 }
 
+button.primary-action {
+  background: #0f6570;
+  border-color: #0f6570;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+button.primary-action:hover:not(:disabled) {
+  background: #0a525b;
+  color: #ffffff;
+}
+
 button:focus-visible,
 input:focus-visible {
   outline: 3px solid rgba(57, 122, 133, 0.28);
@@ -189,6 +201,60 @@ nav button:hover {
   margin: 12px 0;
 }
 
+.field-help {
+  margin: -4px 0 12px;
+  color: #64747b;
+  font-size: 12px;
+}
+
+.structure-check {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #9ccbd2;
+  border-radius: 8px;
+  background: #f4fafb;
+}
+
+.structure-check-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 14px;
+}
+
+.structure-check-heading > div,
+.structure-check-heading label {
+  display: grid;
+  gap: 4px;
+}
+
+.structure-check-heading span {
+  color: #64747b;
+  font-size: 12px;
+}
+
+.inspection-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.warning-list.compact {
+  margin: 0;
+  font-size: 12px;
+}
+
+.inspection-ok {
+  margin: 0;
+  color: #176346;
+}
+
+.structure-check .field-help {
+  margin: 0;
+}
+
 .path-row,
 .button-row {
   display: flex;
@@ -325,6 +391,46 @@ nav button:hover {
   margin: 0;
 }
 
+.setup-guide ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.setup-guide p {
+  margin-bottom: 0;
+}
+
+.setup-guide { order: 0; }
+.busy-panel { order: 1; }
+.setup-backend { order: 2; }
+.setup-license { order: 3; }
+.setup-status { order: 4; }
+.setup-assets { order: 5; }
+
+.download-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #9ccbd2;
+  border-radius: 8px;
+  background: #eef8fa;
+}
+
+.download-progress > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.download-progress progress {
+  width: 100%;
+  height: 14px;
+}
+
 .spinner {
   width: 28px;
   height: 28px;
@@ -390,8 +496,21 @@ nav button:hover {
 }
 
 .center-readout {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
   font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
   color: #0f5964;
+  text-align: right;
+}
+
+.center-readout strong {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.center-readout small {
+  color: #64747b;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .molstar-frame {
@@ -404,49 +523,6 @@ nav button:hover {
   border: 1px solid #d7dee2;
   border-radius: 6px;
   overflow: hidden;
-}
-
-.viewer-overlay {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  pointer-events: none;
-}
-
-.pocket-marker,
-.viewer-residue-chips span {
-  border: 1px solid rgba(15, 89, 100, 0.22);
-  background: rgba(255, 255, 255, 0.88);
-  color: #17323a;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 12px;
-  box-shadow: 0 4px 16px rgba(20, 45, 52, 0.12);
-}
-
-.pocket-marker {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-}
-
-.pocket-marker span {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #e14f3d;
-}
-
-.viewer-residue-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
 }
 
 .metric-row {
@@ -531,6 +607,28 @@ nav button:hover {
   padding: 8px 10px;
 }
 
+.science-note {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-left: 4px solid #397a85;
+  background: #eef8fa;
+  color: #304d53;
+}
+
+.science-note button {
+  margin-left: 8px;
+}
+
+.result-provenance {
+  margin-top: -4px;
+  font-size: 12px;
+  color: #64747b;
+}
+
+.empty-results {
+  max-width: 720px;
+}
+
 .output-files {
   display: grid;
   gap: 8px;
@@ -609,5 +707,15 @@ pre {
 
   .output-file {
     grid-template-columns: 1fr;
+  }
+
+  .inspection-metrics,
+  .metric-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .structure-check-heading {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

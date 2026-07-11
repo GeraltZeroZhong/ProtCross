@@ -38,9 +38,18 @@ fn start_backend(
     port: Option<u16>,
     root: Option<String>,
 ) -> Result<BackendStartResult, String> {
-    let mut guard = state.child.lock().map_err(|_| "backend lock poisoned".to_string())?;
-    let mut token_guard = state.token.lock().map_err(|_| "backend token lock poisoned".to_string())?;
-    let mut port_guard = state.port.lock().map_err(|_| "backend port lock poisoned".to_string())?;
+    let mut guard = state
+        .child
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    let mut token_guard = state
+        .token
+        .lock()
+        .map_err(|_| "backend token lock poisoned".to_string())?;
+    let mut port_guard = state
+        .port
+        .lock()
+        .map_err(|_| "backend port lock poisoned".to_string())?;
     if let Some(child) = guard.as_mut() {
         match child.try_wait() {
             Ok(Some(_status)) => {
@@ -55,7 +64,10 @@ fn start_backend(
                         port,
                     });
                 }
-                return Err("backend is already running but no API token is available; restart it".to_string());
+                return Err(
+                    "backend is already running but no API token is available; restart it"
+                        .to_string(),
+                );
             }
             Err(_exc) => {
                 *guard = None;
@@ -65,19 +77,30 @@ fn start_backend(
         }
     }
 
-    let root_path = root.as_deref().map(PathBuf::from).unwrap_or_else(|| app_data_root(&app));
+    let root_path = root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_data_root(&app));
     let log_dir = root_path.join("logs");
-    std::fs::create_dir_all(&log_dir).map_err(|exc| format!("failed to create backend log dir: {exc}"))?;
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|exc| format!("failed to create backend log dir: {exc}"))?;
     let log_file = open_log_file(&log_dir.join("backend.log"))?;
-    let stderr_file = log_file.try_clone().map_err(|exc| format!("failed to clone backend log: {exc}"))?;
+    let stderr_file = log_file
+        .try_clone()
+        .map_err(|exc| format!("failed to clone backend log: {exc}"))?;
 
     let resource_dir = app.path().resource_dir().ok();
     let backend_paths = backend_python_paths(resource_dir.as_deref());
     let bundled_assets = std::env::var("PROTCROSS_DESKTOP_BUNDLED_ASSETS")
         .ok()
-        .or_else(|| resource_dir.as_ref().map(|path| path.join("bundled-assets").to_string_lossy().to_string()));
-    let python = std::env::var("PROTCROSS_DESKTOP_PYTHON")
-        .unwrap_or_else(|_| configured_python(Some(root_path.as_path())).unwrap_or_else(|| "python".to_string()));
+        .or_else(|| {
+            resource_dir
+                .as_ref()
+                .map(|path| path.join("bundled-assets").to_string_lossy().to_string())
+        });
+    let python = std::env::var("PROTCROSS_DESKTOP_PYTHON").unwrap_or_else(|_| {
+        configured_python(Some(root_path.as_path())).unwrap_or_else(|| "python".to_string())
+    });
     let token = generate_token()?;
     let selected_port = match port {
         Some(value) if value != 0 => value,
@@ -90,13 +113,15 @@ fn start_backend(
         if let Some(existing) = std::env::var_os("PYTHONPATH") {
             paths.extend(std::env::split_paths(&existing));
         }
-        let joined = std::env::join_paths(paths).map_err(|exc| format!("invalid PYTHONPATH: {exc}"))?;
+        let joined =
+            std::env::join_paths(paths).map_err(|exc| format!("invalid PYTHONPATH: {exc}"))?;
         command.env("PYTHONPATH", joined);
     }
     if let Some(path) = bundled_assets {
         command.env("PROTCROSS_DESKTOP_BUNDLED_ASSETS", path);
     }
     command.env("PROTCROSS_DESKTOP_TOKEN", &token);
+    command.env("PROTCROSS_DESKTOP_VERSION", env!("CARGO_PKG_VERSION"));
     command
         .arg("-m")
         .arg("protcross_desktop.server")
@@ -106,11 +131,11 @@ fn start_backend(
         .arg(selected_port.to_string())
         .arg("--root")
         .arg(&root_path)
-        .arg("--token")
-        .arg(&token)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(stderr_file));
-    let mut child = command.spawn().map_err(|exc| format!("failed to start backend: {exc}"))?;
+    let mut child = command
+        .spawn()
+        .map_err(|exc| format!("failed to start backend: {exc}"))?;
     thread::sleep(Duration::from_millis(300));
     if let Ok(Some(status)) = child.try_wait() {
         return Err(format!(
@@ -129,9 +154,18 @@ fn start_backend(
 
 #[tauri::command]
 fn stop_backend(state: State<BackendProcess>) -> Result<String, String> {
-    let mut guard = state.child.lock().map_err(|_| "backend lock poisoned".to_string())?;
-    let mut token_guard = state.token.lock().map_err(|_| "backend token lock poisoned".to_string())?;
-    let mut port_guard = state.port.lock().map_err(|_| "backend port lock poisoned".to_string())?;
+    let mut guard = state
+        .child
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    let mut token_guard = state
+        .token
+        .lock()
+        .map_err(|_| "backend token lock poisoned".to_string())?;
+    let mut port_guard = state
+        .port
+        .lock()
+        .map_err(|_| "backend port lock poisoned".to_string())?;
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -145,7 +179,20 @@ fn stop_backend(state: State<BackendProcess>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn install_backend(
+async fn install_backend(
+    app: AppHandle,
+    mode: String,
+    root: Option<String>,
+    proxy_url: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        install_backend_blocking(app, mode, root, proxy_url)
+    })
+    .await
+    .map_err(|exc| format!("backend installer task failed: {exc}"))?
+}
+
+fn install_backend_blocking(
     app: AppHandle,
     mode: String,
     root: Option<String>,
@@ -154,7 +201,10 @@ fn install_backend(
     if mode != "cpu" && mode != "gpu" {
         return Err("backend mode must be cpu or gpu".to_string());
     }
-    let root_path = root.as_deref().map(PathBuf::from).unwrap_or_else(|| app_data_root(&app));
+    let root_path = root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_data_root(&app));
     let resource_dir = app
         .path()
         .resource_dir()
@@ -164,9 +214,12 @@ fn install_backend(
     std::fs::create_dir_all(&logs_dir).map_err(|exc| format!("failed to create log dir: {exc}"))?;
     let log_path = logs_dir.join(format!("runtime-install-{mode}.log"));
     let stdout = open_log_file(&log_path)?;
-    let stderr = stdout.try_clone().map_err(|exc| format!("failed to clone install log: {exc}"))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|exc| format!("failed to clone install log: {exc}"))?;
 
-    let mut command = runtime_install_command(&runtime_dir, &mode, &root_path, proxy_url.as_deref())?;
+    let mut command =
+        runtime_install_command(&runtime_dir, &mode, &root_path, proxy_url.as_deref())?;
     let status = command
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -178,7 +231,10 @@ fn install_backend(
             log_path.display()
         ));
     }
-    Ok(format!("{mode} backend installed; log: {}", log_path.display()))
+    Ok(format!(
+        "{mode} backend installed; log: {}",
+        log_path.display()
+    ))
 }
 
 #[tauri::command]
@@ -314,7 +370,9 @@ fn runtime_install_command(
         if let Some(proxy) = proxy_url.filter(|value| !value.is_empty()) {
             command.arg("-ProxyUrl").arg(proxy);
         }
-        command.arg("-Wheelhouse").arg(runtime_dir.join("wheelhouse"));
+        command
+            .arg("-Wheelhouse")
+            .arg(runtime_dir.join("wheelhouse"));
         if mode == "gpu" {
             command.arg("-AllowOnlinePackageIndex");
         }
@@ -331,7 +389,9 @@ fn runtime_install_command(
         if let Some(proxy) = proxy_url.filter(|value| !value.is_empty()) {
             command.arg("--proxy-url").arg(proxy);
         }
-        command.arg("--wheelhouse").arg(runtime_dir.join("wheelhouse"));
+        command
+            .arg("--wheelhouse")
+            .arg(runtime_dir.join("wheelhouse"));
         if mode == "gpu" {
             command.arg("--allow-online-package-index");
         }
@@ -346,7 +406,10 @@ fn backend_python_paths(resource_dir: Option<&Path>) -> Vec<PathBuf> {
     let Some(resource_dir) = resource_dir else {
         return Vec::new();
     };
-    vec![resource_dir.join("backend"), resource_dir.join("python-src")]
+    vec![
+        resource_dir.join("backend"),
+        resource_dir.join("python-src"),
+    ]
 }
 
 fn open_log_file(path: &Path) -> Result<File, String> {
@@ -359,7 +422,8 @@ fn open_log_file(path: &Path) -> Result<File, String> {
 
 fn generate_token() -> Result<String, String> {
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes).map_err(|exc| format!("failed to generate desktop API token: {exc}"))?;
+    getrandom::getrandom(&mut bytes)
+        .map_err(|exc| format!("failed to generate desktop API token: {exc}"))?;
     let mut token = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         token.push_str(&format!("{byte:02x}"));
@@ -382,7 +446,9 @@ fn app_data_root(app: &AppHandle) -> PathBuf {
     if let Ok(root) = std::env::var("PROTCROSS_DESKTOP_HOME") {
         return PathBuf::from(root);
     }
-    app.path().app_local_data_dir().unwrap_or_else(|_| default_desktop_root())
+    app.path()
+        .app_local_data_dir()
+        .unwrap_or_else(|_| default_desktop_root())
 }
 
 fn env_python_relative() -> &'static str {
@@ -404,17 +470,28 @@ fn default_desktop_root() -> PathBuf {
     {
         let base = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(".")));
+            .unwrap_or_else(|_| {
+                std::env::var("USERPROFILE")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+            });
         return base.join("ProtCross");
     }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
-        return home.join("Library").join("Application Support").join("ProtCross");
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join("ProtCross");
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
         home.join(".local").join("share").join("protcross-desktop")
     }
 }
