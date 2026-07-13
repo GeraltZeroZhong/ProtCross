@@ -24,6 +24,8 @@ dist/
 
 desktop/frontend/node_modules/
 desktop/frontend/dist/
+desktop/frontend/playwright-report/
+desktop/frontend/test-results/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
 desktop/bundled-assets/*

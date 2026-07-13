@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as distribution_version
 from dataclasses import dataclass, field
 import json
 import math
+from numbers import Integral
 from pathlib import Path
 import platform
 import time
@@ -15,7 +19,7 @@ import uuid
 
 import numpy as np
 import torch
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 
 from protcross.assets import (
     PredictorAssets,
@@ -35,6 +39,15 @@ from protcross.data.esm import ESMFeatureExtractor
 from protcross.models import EvoPointDALitModule
 
 from .pdb import write_bfactor_pdb
+
+
+@dataclass
+class _PreparedPrediction:
+    input_pdb: Path
+    parsed: dict
+    input_metadata: dict[str, object]
+    inspection: dict[str, object] | None
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -97,6 +110,14 @@ class PredictionResult:
 
     def __post_init__(self) -> None:
         self.input_pdb = Path(self.input_pdb)
+        self.residue_ids = [str(residue_id) for residue_id in self.residue_ids]
+        self.asset_metadata = deepcopy(self.asset_metadata) if self.asset_metadata is not None else None
+        self.output_files = dict(self.output_files) if self.output_files is not None else None
+        self.structure_summary = (
+            deepcopy(self.structure_summary) if self.structure_summary is not None else None
+        )
+        self.input_metadata = deepcopy(self.input_metadata) if self.input_metadata is not None else None
+        self.runtime_metadata = dict(self.runtime_metadata) if self.runtime_metadata is not None else None
         self.probabilities = np.array(self.probabilities, dtype=float, copy=True)
         if self.probabilities.ndim != 1:
             raise ValueError("Prediction probabilities must be a one-dimensional array.")
@@ -277,7 +298,7 @@ class PredictionResult:
 
     def to_records(self) -> list[dict[str, str | int | float | None]]:
         if self._records_cache is not None:
-            return self._records_cache
+            return deepcopy(self._records_cache)
         records = []
         coords = self._coordinate_array(required=False)
         cluster_ids = self._cluster_id_by_index() if coords is not None else np.zeros(len(self.residue_ids), dtype=int)
@@ -315,11 +336,11 @@ class PredictionResult:
                 }
             )
         self._records_cache = records
-        return records
+        return deepcopy(records)
 
     def to_pocket_dict(self) -> dict:
         if self._pocket_dict_cache is not None:
-            return self._pocket_dict_cache
+            return deepcopy(self._pocket_dict_cache)
         coords = self._coordinate_array(required=True)
         selected_indices = self._selected_indices()
         clusters = self._cluster_indices()
@@ -342,7 +363,11 @@ class PredictionResult:
             ),
             "compatibility_aliases": {"probability": "score"},
             "geometry_backend": "deterministic-pytorch",
-            "scoring_procedure_version": "protcross-0.2.1-deterministic-pytorch",
+            "determinism_scope": (
+                "canonical residue ordering and deterministic neighbor selection; "
+                "floating-point reductions remain device and kernel dependent"
+            ),
+            "scoring_procedure_version": "protcross-0.2.2-deterministic-pytorch",
             "residue_ordering": "canonical_model_chain_polymer_order",
             "rigid_rotation_invariant": False,
             "coordinate_frame": "input_structure",
@@ -375,11 +400,11 @@ class PredictionResult:
             ],
         }
         self._pocket_dict_cache = payload
-        return payload
+        return deepcopy(payload)
 
     def to_summary_dict(self) -> dict:
         if self._summary_dict_cache is not None:
-            return self._summary_dict_cache
+            return deepcopy(self._summary_dict_cache)
         pockets = (
             self.to_pocket_dict()
             if self.ca_coords is not None
@@ -423,7 +448,11 @@ class PredictionResult:
                 "probability_mean": "score_mean",
             },
             "geometry_backend": "deterministic-pytorch",
-            "scoring_procedure_version": "protcross-0.2.1-deterministic-pytorch",
+            "determinism_scope": (
+                "canonical residue ordering and deterministic neighbor selection; "
+                "floating-point reductions remain device and kernel dependent"
+            ),
+            "scoring_procedure_version": "protcross-0.2.2-deterministic-pytorch",
             "residue_ordering": "canonical_model_chain_polymer_order",
             "rigid_rotation_invariant": False,
             "threshold_origin": "user decision threshold; 0.5 is a neutral default, not an independently validated optimum",
@@ -491,7 +520,7 @@ class PredictionResult:
             ],
         }
         self._summary_dict_cache = payload
-        return payload
+        return deepcopy(payload)
 
     def format_summary(self, *, max_items: int = 50) -> str:
         summary = self.to_summary_dict()
@@ -801,6 +830,7 @@ class ProtCrossPredictor:
         asset_version: str | None = None,
         asset_metadata: dict[str, object] | None = None,
         accept_esm_license: bool = False,
+        feature_pipeline_fingerprint: str | None = None,
     ) -> None:
         self.device = self._resolve_device(device)
         if max_len <= 0 or max_len > MAX_ESM_RESIDUES:
@@ -810,11 +840,22 @@ class ProtCrossPredictor:
             raise ValueError("pca_dim must be greater than 0.")
         self.pca_dim = pca_dim
         self.embedding_cache_dir = Path(embedding_cache_dir).expanduser() if embedding_cache_dir else None
+        injected_feature_pipeline = esm_extractor is not None or pca_reducer is not None
+        if feature_pipeline_fingerprint is not None:
+            feature_pipeline_fingerprint = str(feature_pipeline_fingerprint).strip()
+            if not feature_pipeline_fingerprint:
+                raise ValueError("feature_pipeline_fingerprint must be a non-empty string when provided.")
+        if self.embedding_cache_dir is not None and injected_feature_pipeline and feature_pipeline_fingerprint is None:
+            raise ValueError(
+                "embedding_cache_dir with an injected ESM extractor or PCA reducer requires "
+                "feature_pipeline_fingerprint to prevent cache collisions between custom feature pipelines."
+            )
+        self.feature_pipeline_fingerprint = feature_pipeline_fingerprint
         self.asset_version = asset_version
         esm_weights_path = self._optional_existing_path(esm_weights, "esm_weights") if esm_weights is not None else None
         pca_path_obj = self._optional_existing_path(pca_path, "pca_path") if pca_path is not None else None
         ckpt_path_obj = self._optional_existing_path(ckpt_path, "ckpt_path") if ckpt_path is not None else None
-        self.asset_metadata = asset_metadata
+        self.asset_metadata = deepcopy(asset_metadata) if asset_metadata is not None else None
         if self.asset_metadata is None and all(
             path is not None for path in (ckpt_path_obj, esm_weights_path, pca_path_obj)
         ):
@@ -829,6 +870,7 @@ class ProtCrossPredictor:
         self._embedding_cache_asset_identity = self._embedding_cache_asset_identity_for(
             esm_weights_path,
             pca_path_obj,
+            self.asset_metadata,
         )
         self.structure_parser = structure_parser or StructureParser()
         if esm_extractor is None:
@@ -838,6 +880,8 @@ class ProtCrossPredictor:
             self.device,
         )
         self.pca_reducer = pca_reducer or self._load_pca(self._require_path(pca_path_obj, "pca_path"), pca_dim)
+        reducer_dim = getattr(self.pca_reducer, "n_components", None)
+        self._expected_feature_dim = int(reducer_dim) if reducer_dim is not None else None
         self.model = model or self._load_model(self._require_path(ckpt_path_obj, "ckpt_path"))
 
     @classmethod
@@ -983,6 +1027,7 @@ class ProtCrossPredictor:
         summary_json: str | Path | None = None,
         allow_truncation: bool = False,
         unscored_bfactor_policy: str = "zero",
+        structure_inspection: Mapping[str, object] | None = None,
     ) -> PredictionResult:
         _validate_prediction_options(
             threshold=threshold,
@@ -1004,9 +1049,214 @@ class ProtCrossPredictor:
             pocket_json,
             summary_json,
         )
-        input_metadata = _input_file_metadata(pdb_file)
+        prepared = self._prepare_prediction(
+            pdb_file,
+            chain_id=chain_id,
+            allow_truncation=allow_truncation,
+            structure_inspection=structure_inspection,
+        )
+        start_time = time.perf_counter()
+        features = self._featurize_parsed(prepared.parsed)
+        data = Data(
+            x=features,
+            pos=torch.from_numpy(prepared.parsed["coords"]),
+            batch=torch.zeros(len(prepared.parsed["coords"]), dtype=torch.long),
+        ).to(self.device)
 
-        parsed = self.structure_parser.parse_file_with_labels(pdb_file, chain_id=chain_id)
+        probabilities = self._infer(data)
+        elapsed_seconds = time.perf_counter() - start_time
+        return self._finish_prediction(
+            prepared,
+            probabilities,
+            threshold=threshold,
+            pocket_cluster_cutoff=pocket_cluster_cutoff,
+            output_pdb=output_pdb,
+            scores_tsv=scores_tsv,
+            pocket_json=pocket_json,
+            summary_json=summary_json,
+            unscored_bfactor_policy=unscored_bfactor_policy,
+            elapsed_seconds=elapsed_seconds,
+            execution_mode="single_fp32",
+            microbatch_size=1,
+        )
+
+    def predict_many(
+        self,
+        structures: Sequence[str | Path],
+        *,
+        chain_id: Optional[str] = None,
+        threshold: float = 0.5,
+        pocket_cluster_cutoff: float = 8.0,
+        output_pdb: str | Path | None = None,
+        scores_tsv: str | Path | None = None,
+        pocket_json: str | Path | None = None,
+        summary_json: str | Path | None = None,
+        output_paths: Sequence[Mapping[str, str | Path] | None] | None = None,
+        allow_truncation: bool = False,
+        unscored_bfactor_policy: str = "zero",
+        structure_inspections: Sequence[Mapping[str, object] | None] | None = None,
+        batch_size: int = 4,
+        max_batch_residues: int = 4096,
+        max_batch_quadratic_cost: int = 4 * MAX_ESM_RESIDUES * MAX_ESM_RESIDUES,
+        feature_batch_size: int | None = None,
+        max_feature_padded_tokens: int = 2048,
+        return_exceptions: bool = False,
+    ) -> list[PredictionResult | Exception]:
+        """Predict structures with bounded ESM and PointNet microbatches.
+
+        Each structure remains one independent PointNet graph while each chain
+        remains one independent ESM context.  Batches are bounded by count,
+        total residues, and ``sum(n_i**2)`` to account for geometric search.
+        Per-item output mappings may use either prediction argument names or
+        result keys (for example ``output_pdb``/``structure``).
+        """
+        structures = list(structures)
+        if not structures:
+            return []
+        _validate_prediction_options(
+            threshold=threshold,
+            pocket_cluster_cutoff=pocket_cluster_cutoff,
+            max_len=self.max_len,
+            unscored_bfactor_policy=unscored_bfactor_policy,
+        )
+        for name, value in (
+            ("batch_size", batch_size),
+            ("max_batch_residues", max_batch_residues),
+            ("max_batch_quadratic_cost", max_batch_quadratic_cost),
+            ("max_feature_padded_tokens", max_feature_padded_tokens),
+        ):
+            if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer.")
+        if feature_batch_size is None:
+            feature_batch_size = batch_size if self.device != "cpu" else min(batch_size, 2)
+        if (
+            isinstance(feature_batch_size, bool)
+            or not isinstance(feature_batch_size, Integral)
+            or feature_batch_size <= 0
+        ):
+            raise ValueError("feature_batch_size must be a positive integer.")
+        if structure_inspections is not None and len(structure_inspections) != len(structures):
+            raise ValueError("structure_inspections must have one entry per input structure.")
+        if output_paths is not None and len(output_paths) != len(structures):
+            raise ValueError("output_paths must have one entry per input structure.")
+        shared_outputs = (output_pdb, scores_tsv, pocket_json, summary_json)
+        if output_paths is not None and any(path is not None for path in shared_outputs):
+            raise ValueError("Pass either output_paths or the single-structure output arguments, not both.")
+        if len(structures) > 1 and any(path is not None for path in shared_outputs):
+            raise ValueError(
+                "Shared output paths are unsafe for multiple structures; pass one output_paths mapping per input."
+            )
+
+        results: list[PredictionResult | Exception | None] = [None] * len(structures)
+        resolved_paths: list[tuple[Path | None, ...] | None] = [None] * len(structures)
+        claimed_outputs: dict[Path, int] = {}
+        for index, structure in enumerate(structures):
+            try:
+                paths = (
+                    self._mapped_output_paths(output_paths[index])
+                    if output_paths is not None
+                    else tuple(_expanded_optional_path(path) for path in shared_outputs)
+                )
+                input_path = Path(structure).expanduser()
+                _validate_output_paths(input_path, *paths)
+                item_claims: list[Path] = []
+                for path in paths:
+                    if path is None:
+                        continue
+                    resolved = path.resolve(strict=False)
+                    if resolved in claimed_outputs:
+                        raise ValueError(
+                            f"Batch output path {path} is shared by inputs at indices "
+                            f"{claimed_outputs[resolved]} and {index}."
+                        )
+                    item_claims.append(resolved)
+                claimed_outputs.update((path, index) for path in item_claims)
+                resolved_paths[index] = paths
+            except Exception as exc:
+                if not return_exceptions:
+                    raise
+                results[index] = exc
+
+        pending: list[tuple[int, _PreparedPrediction, tuple[Path | None, ...]]] = []
+        pending_residues = 0
+        pending_cost = 0
+
+        def flush_pending() -> None:
+            nonlocal pending, pending_residues, pending_cost
+            if not pending:
+                return
+            completed = self._execute_prediction_group(
+                pending,
+                feature_batch_size=feature_batch_size,
+                max_feature_padded_tokens=max_feature_padded_tokens,
+                return_exceptions=return_exceptions,
+                threshold=threshold,
+                pocket_cluster_cutoff=pocket_cluster_cutoff,
+                unscored_bfactor_policy=unscored_bfactor_policy,
+            )
+            for completed_index, value in completed.items():
+                results[completed_index] = value
+            pending = []
+            pending_residues = 0
+            pending_cost = 0
+
+        for index, structure in enumerate(structures):
+            paths = resolved_paths[index]
+            if paths is None:
+                continue
+            try:
+                prepared = self._prepare_prediction(
+                    Path(structure).expanduser(),
+                    chain_id=chain_id,
+                    allow_truncation=allow_truncation,
+                    structure_inspection=(
+                        structure_inspections[index] if structure_inspections is not None else None
+                    ),
+                )
+                residue_count = len(prepared.parsed["coords"])
+                quadratic_cost = residue_count * residue_count
+                if residue_count > max_batch_residues or quadratic_cost > max_batch_quadratic_cost:
+                    raise ValueError(
+                        f"Input graph at index {index} has {residue_count} residues and quadratic cost "
+                        f"{quadratic_cost}, exceeding batch limits max_batch_residues={max_batch_residues} "
+                        f"and max_batch_quadratic_cost={max_batch_quadratic_cost}. Select a chain or "
+                        "raise the explicit limits for this structure."
+                    )
+                if pending and (
+                    len(pending) >= batch_size
+                    or pending_residues + residue_count > max_batch_residues
+                    or pending_cost + quadratic_cost > max_batch_quadratic_cost
+                ):
+                    flush_pending()
+                pending.append((index, prepared, paths))
+                pending_residues += residue_count
+                pending_cost += quadratic_cost
+            except Exception as exc:
+                if not return_exceptions:
+                    raise
+                results[index] = exc
+        flush_pending()
+
+        if any(value is None for value in results):
+            raise RuntimeError("Internal error: one or more batch inputs did not receive a result.")
+        return [value for value in results if value is not None]
+
+    def _prepare_prediction(
+        self,
+        pdb_file: Path,
+        *,
+        chain_id: str | None,
+        allow_truncation: bool,
+        structure_inspection: Mapping[str, object] | None,
+    ) -> _PreparedPrediction:
+        if not pdb_file.exists():
+            raise FileNotFoundError(f"Input structure not found: {pdb_file}")
+        input_metadata = _input_file_metadata(pdb_file)
+        prediction_parser = getattr(self.structure_parser, "parse_file", None)
+        if callable(prediction_parser):
+            parsed = prediction_parser(pdb_file, chain_id=chain_id)
+        else:
+            parsed = self.structure_parser.parse_file_with_labels(pdb_file, chain_id=chain_id)
         if not parsed:
             raise ValueError(f"No standard amino-acid residues with CA atoms found in {pdb_file}")
 
@@ -1017,34 +1267,66 @@ class ProtCrossPredictor:
                 f"Input has an ESM chain context of {longest} scored residues, which exceeds --max-len={self.max_len}. "
                 "Pass --allow-truncation to score only the leading residues of each long chain."
             )
-
         parsed = truncate_parsed_structure_by_chain(parsed, self.max_len)
-        start_time = time.perf_counter()
-        features = self._featurize_parsed(parsed)
-        data = Data(
-            x=features,
-            pos=torch.from_numpy(parsed["coords"]),
-            batch=torch.zeros(len(parsed["coords"]), dtype=torch.long),
-        ).to(self.device)
 
-        probabilities = self._infer(data)
-        elapsed_seconds = time.perf_counter() - start_time
-        inspection = None
-        try:
-            from protcross.data.inspection import inspect_structure
+        inspection: dict[str, object] | None = None
+        if structure_inspection is not None and _inspection_matches_input(
+            structure_inspection,
+            pdb_file,
+            chain_id=chain_id,
+            max_len=self.max_len,
+        ):
+            inspection = dict(structure_inspection)
+        else:
+            try:
+                from protcross.data.inspection import inspect_structure
 
-            inspection = inspect_structure(pdb_file, chain_id=chain_id, max_len=self.max_len)
-        except Exception:
-            # Custom parsers remain supported; the prediction parser is authoritative here.
-            inspection = None
+                inspection = inspect_structure(pdb_file, chain_id=chain_id, max_len=self.max_len)
+            except Exception:
+                # Custom parsers remain supported; the prediction parser is authoritative here.
+                inspection = None
         structure_warnings = list(parsed.get("structure_warnings", []))
         if inspection:
             structure_warnings.extend(str(item) for item in inspection.get("warnings", []))
-        structure_warnings = list(dict.fromkeys(structure_warnings))
-        _assert_input_file_unchanged(pdb_file, input_metadata)
-
-        result = PredictionResult(
+        return _PreparedPrediction(
             input_pdb=pdb_file,
+            parsed=parsed,
+            input_metadata=input_metadata,
+            inspection=inspection,
+            warnings=list(dict.fromkeys(structure_warnings)),
+        )
+
+    def _finish_prediction(
+        self,
+        prepared: _PreparedPrediction,
+        probabilities: np.ndarray,
+        *,
+        threshold: float,
+        pocket_cluster_cutoff: float,
+        output_pdb: Path | None,
+        scores_tsv: Path | None,
+        pocket_json: Path | None,
+        summary_json: Path | None,
+        unscored_bfactor_policy: str,
+        elapsed_seconds: float,
+        execution_mode: str,
+        microbatch_size: int,
+    ) -> PredictionResult:
+        _assert_input_file_unchanged(prepared.input_pdb, prepared.input_metadata)
+        parsed = prepared.parsed
+        runtime_metadata = _runtime_metadata()
+        runtime_metadata.update(
+            {
+                "execution_mode": execution_mode,
+                "precision": "float32",
+                "effective_microbatch_size": str(microbatch_size),
+                "elapsed_seconds_interpretation": (
+                    "amortized_microbatch_compute_time" if microbatch_size > 1 else "single_item_compute_time"
+                ),
+            }
+        )
+        result = PredictionResult(
+            input_pdb=prepared.input_pdb,
             residue_ids=list(parsed["residue_ids"]),
             probabilities=probabilities,
             threshold=threshold,
@@ -1060,33 +1342,299 @@ class ProtCrossPredictor:
             device=self.device,
             max_len=self.max_len,
             output_files=self._output_files(output_pdb, scores_tsv, pocket_json, summary_json),
-            output_format_warning=self._output_format_warning(pdb_file, output_pdb),
+            output_format_warning=self._output_format_warning(prepared.input_pdb, output_pdb),
             unscored_bfactor_policy=unscored_bfactor_policy,
             elapsed_seconds=elapsed_seconds,
-            warnings=structure_warnings,
-            structure_summary=inspection,
-            input_metadata=input_metadata,
-            runtime_metadata=_runtime_metadata(),
+            warnings=prepared.warnings,
+            structure_summary=prepared.inspection,
+            input_metadata=prepared.input_metadata,
+            runtime_metadata=runtime_metadata,
         )
-
-        if output_pdb:
-            result.write_pdb(output_pdb)
-        if scores_tsv:
-            result.write_scores_tsv(scores_tsv)
-        if pocket_json:
-            result.write_pocket_json(pocket_json)
-        if summary_json:
-            result.write_summary_json(summary_json)
-
+        self._write_result_package(
+            result,
+            output_pdb=output_pdb,
+            scores_tsv=scores_tsv,
+            pocket_json=pocket_json,
+            summary_json=summary_json,
+        )
         return result
 
-    def predict_many(
+    @staticmethod
+    def _write_result_package(
+        result: PredictionResult,
+        *,
+        output_pdb: Path | None,
+        scores_tsv: Path | None,
+        pocket_json: Path | None,
+        summary_json: Path | None,
+    ) -> None:
+        """Stage every requested output before publishing the result package.
+
+        Each stage file lives beside its final path, so publication uses an
+        atomic same-filesystem replace.  Multi-file publication is guarded by
+        per-file backups and best-effort rollback to prevent a failed writer or
+        replace from leaving a mixture of old, new, and partial outputs.
+        """
+        requested = [
+            (output_pdb, result.write_pdb),
+            (scores_tsv, result.write_scores_tsv),
+            (pocket_json, result.write_pocket_json),
+            (summary_json, result.write_summary_json),
+        ]
+        requested = [(path, writer) for path, writer in requested if path is not None]
+        if not requested:
+            return
+
+        transaction_id = uuid.uuid4().hex
+        staged: dict[Path, Path] = {}
+        backups: dict[Path, Path] = {}
+        committed: set[Path] = set()
+        try:
+            for final_path, writer in requested:
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                stage_path = final_path.with_name(
+                    f".{final_path.stem}.{transaction_id}.stage{final_path.suffix}"
+                )
+                stage_path.unlink(missing_ok=True)
+                staged[final_path] = stage_path
+                writer(stage_path)
+
+            for final_path, _writer in requested:
+                if final_path.exists():
+                    backup_path = final_path.with_name(
+                        f".{final_path.name}.{transaction_id}.backup"
+                    )
+                    backup_path.unlink(missing_ok=True)
+                    final_path.replace(backup_path)
+                    backups[final_path] = backup_path
+                staged[final_path].replace(final_path)
+                committed.add(final_path)
+        except Exception as exc:
+            rollback_errors = []
+            for final_path, _writer in reversed(requested):
+                try:
+                    backup_path = backups.get(final_path)
+                    if backup_path is not None and backup_path.exists():
+                        final_path.unlink(missing_ok=True)
+                        backup_path.replace(final_path)
+                    elif final_path in committed:
+                        final_path.unlink(missing_ok=True)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"{final_path}: {rollback_exc}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "Result-package publication failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from exc
+            raise
+        else:
+            for backup_path in backups.values():
+                backup_path.unlink(missing_ok=True)
+        finally:
+            for stage_path in staged.values():
+                stage_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _mapped_output_paths(mapping: Mapping[str, str | Path] | None) -> tuple[Path | None, ...]:
+        if mapping is None:
+            return (None, None, None, None)
+        aliases = (
+            ("output_pdb", "structure"),
+            ("scores_tsv", "scores_tsv"),
+            ("pocket_json", "pockets_json"),
+            ("summary_json", "summary_json"),
+        )
+        allowed = {name for pair in aliases for name in pair}
+        unknown = set(mapping) - allowed
+        if unknown:
+            raise ValueError(f"Unknown batch output path key(s): {', '.join(sorted(unknown))}.")
+        values = []
+        for primary, alias in aliases:
+            primary_value = mapping.get(primary)
+            alias_value = mapping.get(alias)
+            if primary != alias and primary_value is not None and alias_value is not None:
+                raise ValueError(f"Specify only one of {primary!r} and {alias!r} for an item.")
+            values.append(_expanded_optional_path(primary_value if primary_value is not None else alias_value))
+        return tuple(values)
+
+    @staticmethod
+    def _prediction_groups(
+        entries: list[tuple[int, _PreparedPrediction, tuple[Path | None, ...]]],
+        *,
+        batch_size: int,
+        max_batch_residues: int,
+        max_batch_quadratic_cost: int,
+    ) -> list[list[tuple[int, _PreparedPrediction, tuple[Path | None, ...]]]]:
+        groups = []
+        current = []
+        residues = 0
+        cost = 0
+        for entry in entries:
+            count = len(entry[1].parsed["coords"])
+            entry_cost = count * count
+            if count > max_batch_residues or entry_cost > max_batch_quadratic_cost:
+                raise ValueError(
+                    f"A single input graph has {count} residues and quadratic cost {entry_cost}, "
+                    "which exceeds the configured batch limits."
+                )
+            next_over_budget = current and (
+                len(current) >= batch_size
+                or residues + count > max_batch_residues
+                or cost + entry_cost > max_batch_quadratic_cost
+            )
+            if next_over_budget:
+                groups.append(current)
+                current = []
+                residues = 0
+                cost = 0
+            current.append(entry)
+            residues += count
+            cost += entry_cost
+        if current:
+            groups.append(current)
+        return groups
+
+    def _execute_prediction_group(
         self,
-        structures: list[str | Path] | tuple[str | Path, ...],
-        **kwargs,
-    ) -> list[PredictionResult]:
-        """Predict multiple structures while reusing loaded ESM, PCA, and model assets."""
-        return [self.predict(structure, **kwargs) for structure in structures]
+        group: list[tuple[int, _PreparedPrediction, tuple[Path | None, ...]]],
+        *,
+        feature_batch_size: int,
+        max_feature_padded_tokens: int,
+        return_exceptions: bool,
+        threshold: float,
+        pocket_cluster_cutoff: float,
+        unscored_bfactor_policy: str,
+    ) -> dict[int, PredictionResult | Exception]:
+        computed = self._compute_prediction_group(
+            group,
+            feature_batch_size=feature_batch_size,
+            max_feature_padded_tokens=max_feature_padded_tokens,
+            isolate_errors=return_exceptions,
+        )
+        completed: dict[int, PredictionResult | Exception] = {}
+        for index, prepared, paths in group:
+            value = computed[index]
+            if isinstance(value, Exception):
+                if not return_exceptions:
+                    raise value
+                completed[index] = value
+                continue
+            probabilities, elapsed_seconds, effective_batch_size = value
+            try:
+                completed[index] = self._finish_prediction(
+                    prepared,
+                    probabilities,
+                    threshold=threshold,
+                    pocket_cluster_cutoff=pocket_cluster_cutoff,
+                    output_pdb=paths[0],
+                    scores_tsv=paths[1],
+                    pocket_json=paths[2],
+                    summary_json=paths[3],
+                    unscored_bfactor_policy=unscored_bfactor_policy,
+                    elapsed_seconds=elapsed_seconds,
+                    execution_mode=(
+                        "microbatch_fp32" if effective_batch_size > 1 else "single_fp32_fallback"
+                    ),
+                    microbatch_size=effective_batch_size,
+                )
+            except Exception as exc:
+                if not return_exceptions:
+                    raise
+                completed[index] = exc
+        return completed
+
+    def _compute_prediction_group(
+        self,
+        group: list[tuple[int, _PreparedPrediction, tuple[Path | None, ...]]],
+        *,
+        feature_batch_size: int,
+        max_feature_padded_tokens: int,
+        isolate_errors: bool,
+    ) -> dict[int, tuple[np.ndarray, float, int] | Exception]:
+        start_time = time.perf_counter()
+        try:
+            features = self._featurize_parsed_many(
+                [entry[1].parsed for entry in group],
+                feature_batch_size=feature_batch_size,
+                max_feature_padded_tokens=max_feature_padded_tokens,
+            )
+            predictions = self._infer_feature_batch(
+                features,
+                [entry[1].parsed for entry in group],
+            )
+            elapsed = (time.perf_counter() - start_time) / len(group)
+            return {
+                entry[0]: (probability, elapsed, effective_size)
+                for entry, (probability, effective_size) in zip(group, predictions)
+            }
+        except Exception as exc:
+            if len(group) == 1 or not isolate_errors:
+                if len(group) == 1:
+                    return {group[0][0]: exc}
+                raise
+            results: dict[int, tuple[np.ndarray, float, int] | Exception] = {}
+            for entry in group:
+                results.update(
+                    self._compute_prediction_group(
+                        [entry],
+                        feature_batch_size=1,
+                        max_feature_padded_tokens=max_feature_padded_tokens,
+                        isolate_errors=True,
+                    )
+                )
+            return results
+
+    def _infer_feature_batch(
+        self,
+        features: list[torch.Tensor],
+        parsed_items: list[dict],
+    ) -> list[tuple[np.ndarray, int]]:
+        data_list = [
+            Data(x=item_features, pos=torch.from_numpy(parsed["coords"]))
+            for item_features, parsed in zip(features, parsed_items)
+        ]
+        if len(data_list) == 1:
+            data = data_list[0]
+            data.batch = torch.zeros(data.num_nodes, dtype=torch.long)
+        else:
+            data = Batch.from_data_list(data_list)
+        try:
+            probabilities = self._infer(data.to(self.device))
+        except RuntimeError as exc:
+            if len(data_list) <= 1 or "out of memory" not in str(exc).lower():
+                raise
+            del data
+            if self.device.startswith("cuda") and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if self.device.startswith("mps") and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+            middle = len(data_list) // 2
+            return self._infer_feature_batch(features[:middle], parsed_items[:middle]) + self._infer_feature_batch(
+                features[middle:], parsed_items[middle:]
+            )
+        lengths = [len(parsed["coords"]) for parsed in parsed_items]
+        if len(probabilities) != sum(lengths):
+            if len(data_list) == 1:
+                raise RuntimeError(
+                    "Model returned a residue-score count that does not match the input graph."
+                )
+            # Preserve compatibility with injected/custom models that only
+            # implement single-graph inference rather than per-node batching.
+            return [
+                (
+                    self._infer(
+                        Data(
+                            x=item_features,
+                            pos=torch.from_numpy(parsed["coords"]),
+                            batch=torch.zeros(len(parsed["coords"]), dtype=torch.long),
+                        ).to(self.device)
+                    ),
+                    1,
+                )
+                for item_features, parsed in zip(features, parsed_items)
+            ]
+        boundaries = np.cumsum(lengths[:-1], dtype=int)
+        return [(values, len(data_list)) for values in np.split(probabilities, boundaries)]
 
     @staticmethod
     def _output_files(
@@ -1122,10 +1670,10 @@ class ProtCrossPredictor:
         cache_path = self._embedding_cache_path(sequence)
         if cache_path and cache_path.exists():
             try:
-                try:
-                    return torch.load(cache_path, map_location="cpu", weights_only=True).float()
-                except TypeError:
-                    return torch.load(cache_path, map_location="cpu").float()
+                cached = torch.load(cache_path, map_location="cpu", weights_only=True).float()
+                if self._valid_cached_features(cached, len(sequence)):
+                    return cached
+                raise ValueError("cached feature tensor has an incompatible shape or non-finite values")
             except Exception:
                 # A killed writer or an older incompatible cache must not make
                 # the underlying structure permanently unscorable.
@@ -1133,16 +1681,13 @@ class ProtCrossPredictor:
 
         raw_embeddings = self.esm_extractor.extract_residue_embeddings(sequence)
         reduced_embeddings = self.pca_reducer.transform(raw_embeddings)
-        if cache_path:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.with_name(
-                f".{cache_path.stem}.{uuid.uuid4().hex}.part{cache_path.suffix}"
+        if not self._valid_cached_features(reduced_embeddings, len(sequence)):
+            raise ValueError(
+                "ESM/PCA feature tensor must be finite with shape "
+                f"({len(sequence)}, expected PCA dimension); got {tuple(reduced_embeddings.shape)}."
             )
-            try:
-                torch.save(reduced_embeddings.cpu(), tmp_path)
-                tmp_path.replace(cache_path)
-            finally:
-                tmp_path.unlink(missing_ok=True)
+        if cache_path:
+            self._write_cached_features(cache_path, reduced_embeddings)
         return reduced_embeddings.float()
 
     def _featurize_parsed(self, parsed: dict) -> torch.Tensor:
@@ -1154,15 +1699,119 @@ class ProtCrossPredictor:
         features = [self._featurize(sequence[start:end]) for start, end in chunks if start < end]
         return torch.cat(features, dim=0)
 
+    def _featurize_parsed_many(
+        self,
+        parsed_items: list[dict],
+        *,
+        feature_batch_size: int,
+        max_feature_padded_tokens: int,
+    ) -> list[torch.Tensor]:
+        sequence_chunks: list[str] = []
+        owners: list[list[int]] = []
+        for parsed in parsed_items:
+            sequence = parsed["sequence"]
+            chunks = parsed_structure_sequence_chunks(parsed)
+            owners.append([])
+            for start, end in chunks:
+                if start >= end:
+                    continue
+                owners[-1].append(len(sequence_chunks))
+                sequence_chunks.append(sequence[start:end])
+
+        chunk_features = self._featurize_sequences_many(
+            sequence_chunks,
+            feature_batch_size=feature_batch_size,
+            max_feature_padded_tokens=max_feature_padded_tokens,
+        )
+        return [torch.cat([chunk_features[index] for index in indices], dim=0) for indices in owners]
+
+    def _featurize_sequences_many(
+        self,
+        sequences: list[str],
+        *,
+        feature_batch_size: int,
+        max_feature_padded_tokens: int,
+    ) -> list[torch.Tensor]:
+        results: list[torch.Tensor | None] = [None] * len(sequences)
+        missing_by_sequence: dict[str, list[int]] = {}
+        for index, sequence in enumerate(sequences):
+            cache_path = self._embedding_cache_path(sequence)
+            if cache_path and cache_path.exists():
+                try:
+                    cached = torch.load(cache_path, map_location="cpu", weights_only=True).float()
+                    if not self._valid_cached_features(cached, len(sequence)):
+                        raise ValueError("invalid cached tensor")
+                    results[index] = cached
+                    continue
+                except Exception:
+                    cache_path.unlink(missing_ok=True)
+            missing_by_sequence.setdefault(sequence, []).append(index)
+
+        unique_sequences = list(missing_by_sequence)
+        if unique_sequences:
+            batch_extractor = getattr(self.esm_extractor, "extract_residue_embeddings_many", None)
+            if callable(batch_extractor) and len(unique_sequences) > 1:
+                raw_embeddings = batch_extractor(
+                    unique_sequences,
+                    max_batch_size=feature_batch_size,
+                    max_padded_tokens=max_feature_padded_tokens,
+                )
+            else:
+                raw_embeddings = [
+                    self.esm_extractor.extract_residue_embeddings(sequence)
+                    for sequence in unique_sequences
+                ]
+            if len(raw_embeddings) != len(unique_sequences):
+                raise RuntimeError("ESM batch extractor returned the wrong number of feature tensors.")
+            for sequence, raw in zip(unique_sequences, raw_embeddings):
+                reduced = self.pca_reducer.transform(raw).float()
+                if not self._valid_cached_features(reduced, len(sequence)):
+                    raise ValueError(
+                        "ESM/PCA feature tensor must be finite with shape "
+                        f"({len(sequence)}, expected PCA dimension); got {tuple(reduced.shape)}."
+                    )
+                cache_path = self._embedding_cache_path(sequence)
+                if cache_path:
+                    self._write_cached_features(cache_path, reduced)
+                for index in missing_by_sequence[sequence]:
+                    results[index] = reduced
+        if any(result is None for result in results):
+            raise RuntimeError("Internal error while assembling batched ESM/PCA features.")
+        return [result for result in results if result is not None]
+
+    def _valid_cached_features(self, features: torch.Tensor, sequence_length: int) -> bool:
+        return bool(
+            isinstance(features, torch.Tensor)
+            and features.ndim == 2
+            and features.shape[0] == sequence_length
+            and features.shape[1] > 0
+            and (self._expected_feature_dim is None or features.shape[1] == self._expected_feature_dim)
+            and torch.isfinite(features).all().item()
+        )
+
+    @staticmethod
+    def _write_cached_features(cache_path: Path, features: torch.Tensor) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_name(
+            f".{cache_path.stem}.{uuid.uuid4().hex}.part{cache_path.suffix}"
+        )
+        try:
+            torch.save(features.cpu(), tmp_path)
+            tmp_path.replace(cache_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
     def _embedding_cache_path(self, sequence: str) -> Path | None:
         if self.embedding_cache_dir is None:
             return None
         payload = "\n".join(
             [
                 sequence,
+                "feature_cache_schema=protcross-esm-pca-v2",
                 f"pca_dim={self.pca_dim}",
                 f"max_len={self.max_len}",
                 f"asset_version={self.asset_version or 'unknown'}",
+                f"feature_pipeline={self.feature_pipeline_fingerprint or 'release-assets'}",
                 self._embedding_cache_asset_identity,
             ]
         )
@@ -1237,11 +1886,23 @@ class ProtCrossPredictor:
         return cls._optional_existing_path(value, name)
 
     @staticmethod
-    def _embedding_cache_asset_identity_for(esm_weights: Path | None, pca_path: Path | None) -> str:
+    def _embedding_cache_asset_identity_for(
+        esm_weights: Path | None,
+        pca_path: Path | None,
+        asset_metadata: Mapping[str, object] | None = None,
+    ) -> str:
+        def identity(name: str, path: Path | None) -> str:
+            entry = asset_metadata.get(name) if asset_metadata else None
+            if isinstance(entry, Mapping):
+                digest = entry.get("actual_sha256") or entry.get("sha256")
+                if digest:
+                    return f"sha256={digest}"
+            return ProtCrossPredictor._file_cache_identity(path)
+
         return "\n".join(
             [
-                f"esm={ProtCrossPredictor._file_cache_identity(esm_weights)}",
-                f"pca={ProtCrossPredictor._file_cache_identity(pca_path)}",
+                f"esm={identity('esm_weights', esm_weights)}",
+                f"pca={identity('pca', pca_path)}",
             ]
         )
 
@@ -1297,7 +1958,7 @@ def predict_pdb(
         summary_json,
     )
     resolved_device = ProtCrossPredictor._resolve_device(device)
-    _preflight_prediction_structure(
+    structure_inspection = _preflight_prediction_structure(
         pdb_file,
         chain_id=chain_id,
         max_len=max_len,
@@ -1338,6 +1999,7 @@ def predict_pdb(
         summary_json=summary_json,
         allow_truncation=allow_truncation,
         unscored_bfactor_policy=unscored_bfactor_policy,
+        structure_inspection=structure_inspection,
     )
 
 
@@ -1450,7 +2112,8 @@ def _assert_input_file_unchanged(path: Path, expected: dict[str, object]) -> Non
         )
 
 
-def _runtime_metadata() -> dict[str, str]:
+@lru_cache(maxsize=1)
+def _runtime_metadata_base() -> tuple[tuple[str, str], ...]:
     packages = {
         "biopython": "biopython",
         "esm": "esm",
@@ -1467,7 +2130,36 @@ def _runtime_metadata() -> dict[str, str]:
             metadata[key] = distribution_version(distribution)
         except PackageNotFoundError:
             metadata[key] = "unknown"
-    return metadata
+    return tuple(sorted(metadata.items()))
+
+
+def _runtime_metadata() -> dict[str, str]:
+    return dict(_runtime_metadata_base())
+
+
+def _inspection_matches_input(
+    inspection: Mapping[str, object],
+    path: Path,
+    *,
+    chain_id: str | None,
+    max_len: int,
+) -> bool:
+    try:
+        inspected_path = Path(str(inspection.get("input_structure", ""))).expanduser()
+        stat = path.stat()
+        selected_chains = list(inspection.get("selected_chains") or [])
+        available_chains = list(inspection.get("available_chains") or [])
+        expected_chains = [chain_id] if chain_id is not None else available_chains
+        return (
+            inspection.get("schema_version") == "protcross-structure-inspection-v1"
+            and inspected_path.resolve(strict=False) == path.resolve(strict=False)
+            and int(inspection.get("file_size_bytes", -1)) == stat.st_size
+            and int(inspection.get("file_mtime_ns", -1)) == stat.st_mtime_ns
+            and int(inspection.get("max_len", -1)) == max_len
+            and selected_chains == expected_chains
+        )
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _max_pairwise_distance(coords: np.ndarray) -> float:
@@ -1488,19 +2180,14 @@ def _preflight_prediction_structure(
     chain_id: Optional[str],
     max_len: int,
     allow_truncation: bool,
-) -> None:
-    parser = StructureParser()
-    parsed = parser.parse_file_with_labels(pdb_file, chain_id=chain_id)
-    if not parsed:
-        if chain_id:
-            any_chain = parser.parse_file_with_labels(pdb_file, chain_id=None)
-            if any_chain:
-                raise ValueError(f"No standard amino-acid residues with CA atoms found for chain {chain_id!r}.")
-        raise ValueError(f"No standard amino-acid residues with CA atoms found in {pdb_file}.")
-    long_chunks = parsed_structure_long_chunks(parsed, max_len)
-    if long_chunks and not allow_truncation:
-        longest = max(end - start for start, end in long_chunks)
+) -> dict[str, object]:
+    from protcross.data.inspection import inspect_structure
+
+    inspection = inspect_structure(pdb_file, chain_id=chain_id, max_len=max_len)
+    if inspection["requires_truncation"] and not allow_truncation:
+        longest = int(inspection["longest_chain_context"])
         raise ValueError(
             f"Input has an ESM chain context of {longest} scored residues, which exceeds --max-len={max_len}. "
             "Pass allow_truncation=True or CLI --allow-truncation to score only the leading residues of each long chain."
         )
+    return inspection

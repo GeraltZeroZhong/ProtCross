@@ -1,4 +1,5 @@
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -12,6 +13,13 @@ struct BackendProcess {
     child: Mutex<Option<Child>>,
     token: Mutex<Option<String>>,
     port: Mutex<Option<u16>>,
+    root_lease: Mutex<Option<RootLease>>,
+    installing: Mutex<bool>,
+}
+
+struct RootLease {
+    _file: File,
+    root: PathBuf,
 }
 
 #[derive(serde::Serialize)]
@@ -38,6 +46,11 @@ fn start_backend(
     port: Option<u16>,
     root: Option<String>,
 ) -> Result<BackendStartResult, String> {
+    let root_path = root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_data_root(&app));
+    let root_path = ensure_root_lease(&state, &root_path)?;
     let mut guard = state
         .child
         .lock()
@@ -77,10 +90,6 @@ fn start_backend(
         }
     }
 
-    let root_path = root
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| app_data_root(&app));
     let log_dir = root_path.join("logs");
     std::fs::create_dir_all(&log_dir)
         .map_err(|exc| format!("failed to create backend log dir: {exc}"))?;
@@ -181,30 +190,50 @@ fn stop_backend(state: State<BackendProcess>) -> Result<String, String> {
 #[tauri::command]
 async fn install_backend(
     app: AppHandle,
+    state: State<'_, BackendProcess>,
     mode: String,
     root: Option<String>,
     proxy_url: Option<String>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        install_backend_blocking(app, mode, root, proxy_url)
+    let root_path = root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_data_root(&app));
+    let root_path = ensure_root_lease(&state, &root_path)?;
+    {
+        let mut installing = state
+            .installing
+            .lock()
+            .map_err(|_| "backend installer lock poisoned".to_string())?;
+        if *installing {
+            return Err("a backend installation is already running".to_string());
+        }
+        *installing = true;
+    }
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        install_backend_blocking(app, mode, root_path, proxy_url)
     })
     .await
-    .map_err(|exc| format!("backend installer task failed: {exc}"))?
+    .map_err(|exc| format!("backend installer task failed: {exc}"));
+
+    let mut installing = state
+        .installing
+        .lock()
+        .map_err(|_| "backend installer lock poisoned".to_string())?;
+    *installing = false;
+    result?
 }
 
 fn install_backend_blocking(
     app: AppHandle,
     mode: String,
-    root: Option<String>,
+    root_path: PathBuf,
     proxy_url: Option<String>,
 ) -> Result<String, String> {
     if mode != "cpu" && mode != "gpu" {
         return Err("backend mode must be cpu or gpu".to_string());
     }
-    let root_path = root
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| app_data_root(&app));
     let resource_dir = app
         .path()
         .resource_dir()
@@ -420,6 +449,94 @@ fn open_log_file(path: &Path) -> Result<File, String> {
         .map_err(|exc| format!("failed to open log file {}: {exc}", path.display()))
 }
 
+fn ensure_root_lease(state: &BackendProcess, requested_root: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(requested_root)
+        .map_err(|exc| format!("failed to create desktop data root: {exc}"))?;
+    let root = requested_root
+        .canonicalize()
+        .map_err(|exc| format!("failed to resolve desktop data root: {exc}"))?;
+    let mut guard = state
+        .root_lease
+        .lock()
+        .map_err(|_| "desktop root lock poisoned".to_string())?;
+    if let Some(lease) = guard.as_ref() {
+        if lease.root == root {
+            return Ok(root);
+        }
+        return Err(format!(
+            "this ProtCross Desktop instance already owns a different data root: {}",
+            lease.root.display()
+        ));
+    }
+
+    let lock_path = root.join(".protcross-desktop.lock");
+    let file = try_lock_root_file(&lock_path)?;
+    *guard = Some(RootLease {
+        _file: file,
+        root: root.clone(),
+    });
+    Ok(root)
+}
+
+#[cfg(unix)]
+fn try_lock_root_file(path: &Path) -> Result<File, String> {
+    use std::os::fd::AsRawFd;
+
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|exc| format!("failed to open desktop root lock {}: {exc}", path.display()))?;
+    let result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if result != 0 {
+        return Err(format!(
+            "another ProtCross Desktop instance is already using this data root ({}): {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    write_lock_owner(&mut file, path)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn try_lock_root_file(path: &Path) -> Result<File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(path)
+        .map_err(|exc| {
+            format!(
+                "another ProtCross Desktop instance is already using this data root ({}): {exc}",
+                path.display()
+            )
+        })?;
+    write_lock_owner(&mut file, path)?;
+    Ok(file)
+}
+
+fn write_lock_owner(file: &mut File, path: &Path) -> Result<(), String> {
+    file.set_len(0)
+        .and_then(|_| file.write_all(format!("pid={}\n", std::process::id()).as_bytes()))
+        .map_err(|exc| {
+            format!(
+                "failed to record desktop root lock {}: {exc}",
+                path.display()
+            )
+        })
+}
+
 fn generate_token() -> Result<String, String> {
     let mut bytes = [0_u8; 32];
     getrandom::getrandom(&mut bytes)
@@ -502,6 +619,8 @@ fn main() {
             child: Mutex::new(None),
             token: Mutex::new(None),
             port: Mutex::new(None),
+            root_lease: Mutex::new(None),
+            installing: Mutex::new(false),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

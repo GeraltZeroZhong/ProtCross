@@ -247,6 +247,25 @@ class StructureParser:
         ``coords`` are centered for model input; ``raw_coords`` preserve the
         input coordinate frame for downstream pocket reporting.
         """
+        return self._parse_file(file_path, chain_id=chain_id, include_labels=True)
+
+    def parse_file(self, file_path: str | Path, chain_id: Optional[str] = None) -> Optional[Dict]:
+        """Parse model inputs without constructing unused ligand labels.
+
+        Prediction uses exactly the same residue selection, canonical ordering,
+        coordinates, sequence, and metadata as :meth:`parse_file_with_labels`.
+        Skipping the all-atom neighbor index only removes work whose output is
+        not consumed by inference.
+        """
+        return self._parse_file(file_path, chain_id=chain_id, include_labels=False)
+
+    def _parse_file(
+        self,
+        file_path: str | Path,
+        *,
+        chain_id: Optional[str],
+        include_labels: bool,
+    ) -> Optional[Dict]:
         file_path = Path(file_path)
         is_mmcif = file_path.suffix.lower() in {".cif", ".mmcif"}
         parser = self.pdb_parser if file_path.suffix.lower() == ".pdb" else self.cif_parser
@@ -264,15 +283,16 @@ class StructureParser:
                 f"Input contains {len(models)} models; only model {model.id} was parsed and scored."
             )
 
-        all_atoms = [
-            atom
-            for atom in Selection.unfold_entities(model, "A")
-            if not self._is_ignored_hetatm_residue(atom.get_parent())
-        ]
-        if not all_atoms:
-            return None
-
-        neighbor_search = NeighborSearch(all_atoms)
+        neighbor_search = None
+        if include_labels:
+            all_atoms = [
+                atom
+                for atom in Selection.unfold_entities(model, "A")
+                if not self._is_ignored_hetatm_residue(atom.get_parent())
+            ]
+            if not all_atoms:
+                return None
+            neighbor_search = NeighborSearch(all_atoms)
         coords, seq_chars, plddts, residue_ids, residue_metadata, labels = [], [], [], [], [], []
 
         for chain in model:
@@ -285,7 +305,7 @@ class StructureParser:
                 if not is_standard or "CA" not in residue:
                     continue
 
-                ca_atom = residue["CA"]
+                ca_atom = self._select_atom_conformer(residue["CA"])
                 coords.append(ca_atom.get_coord())
                 plddts.append(ca_atom.get_bfactor())
                 insertion_code = residue.id[2].strip()
@@ -331,28 +351,64 @@ class StructureParser:
                     )
                 residue_metadata.append(metadata)
 
-                labels.append(self._has_ligand_neighbor(neighbor_search, ca_atom, residue))
+                if neighbor_search is not None:
+                    labels.append(self._has_ligand_neighbor(neighbor_search, ca_atom, residue))
 
         if not coords:
             return None
 
         raw_coords_np = np.asarray(coords, dtype=np.float32)
+        plddts_np = np.asarray(plddts, dtype=np.float32)
+        if raw_coords_np.ndim != 2 or raw_coords_np.shape[1] != 3:
+            raise ValueError(
+                f"Parsed CA coordinates must have shape (N, 3); got {raw_coords_np.shape} for {file_path}."
+            )
+        if plddts_np.shape != (raw_coords_np.shape[0],):
+            raise ValueError(
+                f"Parsed CA confidence values must have shape ({raw_coords_np.shape[0]},); "
+                f"got {plddts_np.shape} for {file_path}."
+            )
+        if not np.isfinite(raw_coords_np).all():
+            raise ValueError(f"Parsed CA coordinates contain non-finite values: {file_path}.")
+        if not np.isfinite(plddts_np).all():
+            raise ValueError(f"Parsed CA confidence values contain non-finite values: {file_path}.")
         coords_np = raw_coords_np - raw_coords_np.mean(axis=0)
 
-        return canonicalize_parsed_structure({
+        parsed = {
             "coords": coords_np,
             "raw_coords": raw_coords_np,
             "sequence": "".join(seq_chars),
-            "plddts": np.asarray(plddts, dtype=np.float32),
+            "plddts": plddts_np,
             "residue_ids": residue_ids,
             "residue_metadata": residue_metadata,
-            "labels": np.asarray(labels, dtype=np.float32),
             "truncated": False,
             "original_length": len(seq_chars),
             "model_count": len(models),
             "models_scored": [str(model.id)],
             "structure_warnings": structure_warnings,
-        })
+        }
+        if include_labels:
+            parsed["labels"] = np.asarray(labels, dtype=np.float32)
+        return canonicalize_parsed_structure(parsed)
+
+    @staticmethod
+    def _select_atom_conformer(atom):
+        """Choose a disordered atom conformer independently of record order."""
+        if not atom.is_disordered() or not hasattr(atom, "child_dict"):
+            return atom
+
+        candidates = list(atom.child_dict.values())
+        if not candidates:
+            return atom
+
+        def sort_key(candidate) -> tuple[float, int, str]:
+            occupancy = candidate.get_occupancy()
+            occupancy_value = float(occupancy) if occupancy is not None else float("-inf")
+            altloc = str(candidate.get_altloc() or "").strip()
+            preferred_rank = 0 if not altloc else 1 if altloc == "A" else 2
+            return (-occupancy_value, preferred_rank, altloc)
+
+        return min(candidates, key=sort_key)
 
     @staticmethod
     def _residue_key(model_id, chain_id: str, residue_id: tuple, resname: str | None = None) -> str:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from Bio.PDB import MMCIFParser, PDBParser
 from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 
@@ -53,6 +54,61 @@ def test_structure_parser_ignores_default_hetatm_blacklist(tmp_path: Path):
 
     assert parsed is not None
     assert parsed["labels"].tolist() == [0.0, 1.0]
+
+
+def test_structure_parser_unlabeled_path_preserves_all_model_inputs(tmp_path: Path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(ADDITIVE_AND_LIGAND_PDB, encoding="utf-8")
+    parser = StructureParser()
+
+    labeled = parser.parse_file_with_labels(input_pdb)
+    unlabeled = parser.parse_file(input_pdb)
+
+    assert labeled is not None
+    assert unlabeled is not None
+    assert "labels" in labeled
+    assert "labels" not in unlabeled
+    assert set(unlabeled) == set(labeled) - {"labels"}
+    for key, expected in labeled.items():
+        if key == "labels":
+            continue
+        actual = unlabeled[key]
+        if isinstance(expected, np.ndarray):
+            np.testing.assert_array_equal(actual, expected)
+        else:
+            assert actual == expected
+
+
+def test_structure_parser_selects_equal_occupancy_altloc_deterministically(tmp_path: Path):
+    records = {
+        "A": "ATOM      2  CA AALA A   1       1.000   0.000   0.000  0.50 21.00           C\n",
+        "B": "ATOM      3  CA BALA A   1       9.000   0.000   0.000  0.50 22.00           C\n",
+    }
+    parsed = []
+    for order in (("A", "B"), ("B", "A")):
+        path = tmp_path / f"altloc-{''.join(order)}.pdb"
+        path.write_text(
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N\n"
+            + "".join(records[key] for key in order)
+            + "ATOM      4  C   ALA A   1       2.000   0.000   0.000  1.00 23.00           C\nTER\nEND\n",
+            encoding="utf-8",
+        )
+        parsed.append(StructureParser().parse_file(path))
+
+    assert parsed[0] is not None and parsed[1] is not None
+    np.testing.assert_array_equal(parsed[0]["raw_coords"], parsed[1]["raw_coords"])
+    np.testing.assert_array_equal(parsed[0]["raw_coords"][0], [1.0, 0.0, 0.0])
+
+
+def test_structure_parser_rejects_nonfinite_ca_coordinates(tmp_path: Path):
+    input_pdb = tmp_path / "nan.pdb"
+    input_pdb.write_text(
+        "ATOM      1  CA  ALA A   1         nan   0.000   0.000  1.00 20.00           C\nEND\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="non-finite"):
+        StructureParser().parse_file(input_pdb)
 
 
 def test_structure_parser_preserves_raw_coordinates_for_pocket_reporting(tmp_path: Path):
@@ -382,6 +438,64 @@ ATOM 3 C C . ALA X 1 7 ? 2.000 0.000 0.000 1.00 13.00 ? 101 ALA A C 1
     assert out["_atom_site.auth_asym_id"] == ["A", "A", "A"]
     assert out["_atom_site.auth_seq_id"] == ["101", "101", "101"]
     assert [float(value) for value in out["_atom_site.B_iso_or_equiv"]] == [0.66, 0.66, 0.66]
+
+
+def test_write_bfactor_mmcif_keeps_microheterogeneous_resnames_separate(tmp_path: Path):
+    input_cif = tmp_path / "microheterogeneity.cif"
+    output_cif = tmp_path / "microheterogeneity.out.cif"
+    input_cif.write_text(
+        """\
+data_test
+#
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1 C CA A ALA X 1 7 ? 1.000 0.000 0.000 0.50 11.00 ? 101 ALA A CA 1
+ATOM 2 C CA B SER X 1 7 ? 2.000 0.000 0.000 0.50 22.00 ? 101 SER A CA 1
+#
+""",
+        encoding="utf-8",
+    )
+
+    write_bfactor_pdb(
+        input_cif,
+        output_cif,
+        ["A_101"],
+        np.asarray([0.77]),
+        residue_metadata=[
+            {
+                "model_id": "0",
+                "auth_asym_id": "A",
+                "label_asym_id": "X",
+                "auth_seq_id": 101,
+                "label_seq_id": 7,
+                "insertion_code": "",
+                "resname": "SER",
+            }
+        ],
+    )
+
+    out = MMCIF2Dict(str(output_cif))
+    assert [float(value) for value in out["_atom_site.B_iso_or_equiv"]] == [0.0, 0.77]
 
 
 def test_write_bfactor_mmcif_preserves_unscored_model_identity(tmp_path: Path):

@@ -11,9 +11,10 @@ from sklearn.decomposition import PCA
 
 
 class PCAReducer:
-    def __init__(self, n_components: int = 128) -> None:
+    def __init__(self, n_components: int = 128, random_state: int | None = 42) -> None:
         self.n_components = n_components
-        self.pca = PCA(n_components=n_components)
+        self.random_state = random_state
+        self.pca = PCA(n_components=n_components, random_state=random_state)
         self.is_fitted = False
 
     def fit(self, data_list: List[torch.Tensor]) -> None:

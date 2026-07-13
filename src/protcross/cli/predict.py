@@ -287,6 +287,7 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
             summary_json=args.summary_json,
             allow_truncation=args.allow_truncation,
             unscored_bfactor_policy=args.unscored_bfactor_policy,
+            structure_inspection=inspection,
         )
     except Exception as exc:
         print(f"ProtCross prediction failed: {exc}", file=sys.stderr)

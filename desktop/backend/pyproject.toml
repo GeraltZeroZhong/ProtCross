@@ -1,15 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "protcross-desktop-backend"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local sidecar backend for ProtCross Desktop."
-readme = { text = "Local sidecar backend for the ProtCross Desktop 0.2.1 prediction workflow.", content-type = "text/plain" }
+readme = { text = "Local sidecar backend for the ProtCross Desktop 0.2.2 prediction workflow.", content-type = "text/plain" }
 requires-python = ">=3.10,<3.11"
 dependencies = [
-  "protcross==0.2.1"
+  "protcross==0.2.2"
 ]
 
 [project.scripts]

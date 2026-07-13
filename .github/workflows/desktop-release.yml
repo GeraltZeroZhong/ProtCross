@@ -6,7 +6,7 @@ on:
       tag:
         description: "Release tag to create or update"
         required: true
-        default: "v0.2.1"
+        default: "v0.2.2"
 
 permissions:
   contents: read
@@ -16,17 +16,17 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DESKTOP_VERSION: "0.2.1"
+  DESKTOP_VERSION: "0.2.2"
 
 jobs:
   validate-input:
     name: Validate release tag and versions
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - name: Require the canonical 0.2.1 tag
+      - name: Require the canonical 0.2.2 tag
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -62,7 +62,7 @@ jobs:
     runs-on: windows-2022
     needs: validate-input
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -77,15 +77,15 @@ jobs:
             test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: desktop/frontend/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.10"
 
@@ -152,7 +152,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
           Copy-Item $installer.FullName "release-assets\ProtCross_Desktop_${env:DESKTOP_VERSION}_x64-setup.exe" -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: protcross-desktop-windows
           path: release-assets/*
@@ -163,7 +163,7 @@ jobs:
     runs-on: macos-15
     needs: validate-input
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -180,15 +180,15 @@ jobs:
       - name: Assert Apple Silicon release runner
         run: test "$(uname -m)" = "arm64"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: desktop/frontend/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.10"
 
@@ -272,7 +272,7 @@ jobs:
           mkdir -p release-assets
           cp "$dmg_path" "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos-aarch64.dmg"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: protcross-desktop-macos
           path: release-assets/*
@@ -290,7 +290,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -306,7 +306,7 @@ jobs:
             }
           fi
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: downloaded-assets
 
@@ -318,14 +318,14 @@ jobs:
           test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos-aarch64.dmg"
           (cd release-assets && sha256sum * > SHA256SUMS.txt)
           cat > release-notes.txt <<'NOTES'
-          # ProtCross Desktop 0.2.1
+          # ProtCross Desktop 0.2.2
 
-          **Unsigned pre-release testing build.** These Windows and macOS desktop artifacts exercise the 0.2.1 desktop workflow, but they are not code-signed or notarized. Windows SmartScreen and macOS Gatekeeper may block or warn about them. Do not treat these artifacts as production installers.
+          **Unsigned pre-release testing build.** These Windows and macOS desktop artifacts exercise the 0.2.2 desktop workflow, but they are not code-signed or notarized. Windows SmartScreen and macOS Gatekeeper may block or warn about them. Do not treat these artifacts as production installers.
 
           ## Downloads
 
-          - Windows 10/11 x64: `ProtCross_Desktop_0.2.1_x64-setup.exe`
-          - macOS 12+ on Apple Silicon (arm64): `ProtCross_Desktop_0.2.1_macos-aarch64.dmg`
+          - Windows 10/11 x64: `ProtCross_Desktop_0.2.2_x64-setup.exe`
+          - macOS 12+ on Apple Silicon (arm64): `ProtCross_Desktop_0.2.2_macos-aarch64.dmg`
           - Checksums: `SHA256SUMS.txt`
 
           ## What is included

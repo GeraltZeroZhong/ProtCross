@@ -16,6 +16,7 @@ from protcross.assets import (
     DEFAULT_CHECKPOINT_FILENAME,
     DEFAULT_PCA_FILENAME,
 )
+from protcross.data.esm import ESMFeatureExtractor
 from protcross.inference import PredictionResult, PredictorAssets, ProtCrossPredictor, predict_pdb
 from protcross.inference.predictor import _resolve_predict_pdb_assets
 
@@ -103,7 +104,7 @@ def test_prediction_result_reports_weighted_pocket_center_and_clusters():
     np.testing.assert_allclose(summary["top_pocket"]["center"], [0.8, 0.0, 0.0])
 
 
-def test_prediction_result_caches_records_pockets_and_summary():
+def test_prediction_result_caches_internal_derivations_and_returns_defensive_copies():
     result = PredictionResult(
         input_pdb=Path("input.pdb"),
         residue_ids=["A_1", "A_2", "A_3"],
@@ -113,9 +114,17 @@ def test_prediction_result_caches_records_pockets_and_summary():
         cluster_cutoff=8.0,
     )
 
-    assert result.to_records() is result.to_records()
-    assert result.to_pocket_dict() is result.to_pocket_dict()
-    assert result.to_summary_dict() is result.to_summary_dict()
+    records = result.to_records()
+    pockets = result.to_pocket_dict()
+    summary = result.to_summary_dict()
+
+    records[0]["score"] = 9.9
+    pockets["clustered_pockets"][0]["residue_count"] = 999
+    summary["top_residues"][0]["score"] = 9.9
+
+    assert result.to_records()[0]["score"] == pytest.approx(0.9)
+    assert result.to_pocket_dict()["clustered_pockets"][0]["residue_count"] == 2
+    assert result.to_summary_dict()["top_residues"][0]["score"] == pytest.approx(0.9)
 
 
 def test_prediction_result_invalidates_derived_caches_when_threshold_changes():
@@ -459,6 +468,82 @@ def test_protcross_predictor_fake_components_writes_result_package(tmp_path):
     assert summary["elapsed_seconds"] is not None
 
 
+def test_predictor_result_package_staging_preserves_existing_outputs_on_writer_failure(
+    tmp_path, monkeypatch
+):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    outputs = {
+        "output_pdb": tmp_path / "out.pdb",
+        "scores_tsv": tmp_path / "scores.tsv",
+        "pocket_json": tmp_path / "pockets.json",
+        "summary_json": tmp_path / "summary.json",
+    }
+    for path in outputs.values():
+        path.write_text(f"previous:{path.name}", encoding="utf-8")
+
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        esm_extractor=_FakeESM(),
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+    )
+
+    def fail_pocket_writer(self, output_json):
+        raise OSError("simulated pocket writer failure")
+
+    monkeypatch.setattr(PredictionResult, "write_pocket_json", fail_pocket_writer)
+
+    with pytest.raises(OSError, match="simulated pocket writer failure"):
+        predictor.predict(input_pdb, **outputs)
+
+    for path in outputs.values():
+        assert path.read_text(encoding="utf-8") == f"previous:{path.name}"
+    assert not list(tmp_path.glob(".*.stage.*"))
+    assert not list(tmp_path.glob(".*.backup"))
+
+
+def test_predictor_result_package_rolls_back_existing_outputs_on_replace_failure(
+    tmp_path, monkeypatch
+):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    outputs = {
+        "output_pdb": tmp_path / "out.pdb",
+        "scores_tsv": tmp_path / "scores.tsv",
+        "pocket_json": tmp_path / "pockets.json",
+        "summary_json": tmp_path / "summary.json",
+    }
+    for path in outputs.values():
+        path.write_text(f"previous:{path.name}", encoding="utf-8")
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        esm_extractor=_FakeESM(),
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+    )
+    original_replace = Path.replace
+
+    def fail_scores_publication(path, target):
+        if ".stage" in path.name and Path(target) == outputs["scores_tsv"]:
+            raise OSError("simulated publication replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_scores_publication)
+
+    with pytest.raises(OSError, match="simulated publication replace failure"):
+        predictor.predict(input_pdb, **outputs)
+
+    for path in outputs.values():
+        assert path.read_text(encoding="utf-8") == f"previous:{path.name}"
+    assert not list(tmp_path.glob(".*.stage.*"))
+    assert not list(tmp_path.glob(".*.backup"))
+
+
 def test_predict_pdb_missing_input_does_not_resolve_assets(tmp_path, monkeypatch):
     def fail_resolve_assets(*args, **kwargs):
         raise AssertionError("asset resolution must not run before input validation")
@@ -670,7 +755,7 @@ def test_predictor_rejects_invalid_prediction_options_before_featurizing(tmp_pat
     assert pca.calls == 0
 
 
-def test_predictor_predict_many_reuses_fake_components(tmp_path):
+def test_predictor_predict_many_matches_individual_predictions(tmp_path):
     input_pdb = tmp_path / "input.pdb"
     input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
     predictor = ProtCrossPredictor(
@@ -679,13 +764,161 @@ def test_predictor_predict_many_reuses_fake_components(tmp_path):
         esm_extractor=_FakeESM(),
         pca_reducer=_FakePCA(),
         structure_parser=_FakeParser(),
-        model=_FakeModel(),
+        model=_VariableFakeModel(),
         asset_version="test-assets",
     )
 
+    individual = [predictor.predict(input_pdb, threshold=0.5) for _ in range(2)]
     results = predictor.predict_many([input_pdb, input_pdb], threshold=0.5)
 
-    assert [result.binding_residues[0].residue_id for result in results] == ["A_1", "A_1"]
+    assert len(results) == len(individual) == 2
+    for batched, expected in zip(results, individual):
+        assert batched.residue_ids == expected.residue_ids
+        assert batched.residue_metadata == expected.residue_metadata
+        np.testing.assert_allclose(batched.probabilities, expected.probabilities, rtol=1e-6, atol=1e-7)
+        assert [record["is_binding"] for record in batched.to_records()] == [
+            record["is_binding"] for record in expected.to_records()
+        ]
+        assert batched.runtime_metadata["execution_mode"] == "microbatch_fp32"
+        assert batched.runtime_metadata["effective_microbatch_size"] == "2"
+
+
+def test_predictor_predict_many_deduplicates_identical_chain_features(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    esm = _CountingESM()
+    pca = _CountingPCA()
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        esm_extractor=esm,
+        pca_reducer=pca,
+        structure_parser=_FakeParser(),
+        model=_VariableFakeModel(),
+        asset_version="test-assets",
+    )
+
+    results = predictor.predict_many([input_pdb, input_pdb], batch_size=2)
+
+    assert len(results) == 2
+    assert esm.calls == 1
+    assert pca.calls == 1
+
+
+def test_predictor_predict_many_enforces_single_graph_batch_budgets(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    esm = _CountingESM()
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        esm_extractor=esm,
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+    )
+
+    results = predictor.predict_many(
+        [input_pdb],
+        max_batch_residues=1,
+        max_batch_quadratic_cost=1,
+        return_exceptions=True,
+    )
+
+    assert len(results) == 1
+    assert isinstance(results[0], ValueError)
+    assert "exceeding batch limits" in str(results[0])
+    assert esm.calls == 0
+
+
+def test_predictor_predict_many_rolls_back_failed_output_claims(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    first_output = tmp_path / "first.pdb"
+    reusable_output = tmp_path / "reusable.pdb"
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        esm_extractor=_FakeESM(),
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeParser(),
+        model=_VariableFakeModel(),
+        asset_version="test-assets",
+    )
+
+    results = predictor.predict_many(
+        [input_pdb, input_pdb, input_pdb],
+        output_paths=[
+            {"output_pdb": first_output},
+            {"output_pdb": reusable_output, "scores_tsv": first_output},
+            {"output_pdb": reusable_output},
+        ],
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], PredictionResult)
+    assert isinstance(results[1], ValueError)
+    assert isinstance(results[2], PredictionResult)
+    assert first_output.exists()
+    assert reusable_output.exists()
+
+
+def test_esm_padded_microbatches_match_single_sequence_extraction():
+    extractor = object.__new__(ESMFeatureExtractor)
+    extractor.device = "cpu"
+    extractor.tokenizer = types.SimpleNamespace(pad_token_id=0)
+    extractor._protein_cls = lambda sequence: types.SimpleNamespace(sequence=sequence)
+    extractor.model = _TokenAwareESM()
+    sequences = ["AG", "K", "MNPQR"]
+
+    individual = [extractor.extract_residue_embeddings(sequence) for sequence in sequences]
+    batched = extractor.extract_residue_embeddings_many(
+        sequences,
+        max_batch_size=3,
+        max_padded_tokens=12,
+    )
+
+    assert len(batched) == len(individual)
+    for actual, expected, sequence in zip(batched, individual, sequences):
+        assert actual.shape == (len(sequence), 4)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_esm_padded_microbatches_enforce_budget_for_single_sequence():
+    extractor = object.__new__(ESMFeatureExtractor)
+    extractor.device = "cpu"
+    extractor.tokenizer = types.SimpleNamespace(pad_token_id=0)
+    extractor._protein_cls = lambda sequence: types.SimpleNamespace(sequence=sequence)
+    extractor.model = _TokenAwareESM()
+
+    with pytest.raises(ValueError, match="exceeding max_padded_tokens=4"):
+        extractor.extract_residue_embeddings_many(
+            ["AGK"],
+            max_batch_size=1,
+            max_padded_tokens=4,
+        )
+
+
+def test_esm_padded_microbatches_split_oom_and_preserve_order():
+    extractor = object.__new__(ESMFeatureExtractor)
+    extractor.device = "cpu"
+    extractor.tokenizer = types.SimpleNamespace(pad_token_id=0)
+    extractor._protein_cls = lambda sequence: types.SimpleNamespace(sequence=sequence)
+    extractor.model = _OOMOnBatchESM()
+    sequences = ["AG", "K", "MNP"]
+
+    actual = extractor.extract_residue_embeddings_many(
+        sequences,
+        max_batch_size=3,
+        max_padded_tokens=15,
+    )
+
+    expected_model = _TokenAwareESM()
+    extractor.model = expected_model
+    expected = [extractor.extract_residue_embeddings(sequence) for sequence in sequences]
+    assert len(actual) == len(expected)
+    for actual_item, expected_item in zip(actual, expected):
+        torch.testing.assert_close(actual_item, expected_item, rtol=0, atol=0)
 
 
 def test_predictor_rejects_invalid_max_len():
@@ -823,6 +1056,7 @@ def test_predictor_embedding_cache_reuses_reduced_features(tmp_path):
         device="cpu",
         max_len=4,
         embedding_cache_dir=tmp_path / "feature-cache",
+        feature_pipeline_fingerprint="counting-esm-pca-v1",
         esm_extractor=esm,
         pca_reducer=pca,
         structure_parser=_FakeParser(),
@@ -838,6 +1072,43 @@ def test_predictor_embedding_cache_reuses_reduced_features(tmp_path):
     assert list((tmp_path / "feature-cache").glob("*.pt"))
 
 
+def test_injected_feature_pipeline_requires_explicit_cache_fingerprint(tmp_path):
+    with pytest.raises(ValueError, match="feature_pipeline_fingerprint"):
+        ProtCrossPredictor(
+            device="cpu",
+            embedding_cache_dir=tmp_path / "feature-cache",
+            esm_extractor=_FakeESM(),
+            pca_reducer=_FakePCA(),
+            structure_parser=_FakeParser(),
+            model=_FakeModel(),
+        )
+
+
+def test_injected_feature_pipeline_fingerprint_isolates_cache_namespaces(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    cache_dir = tmp_path / "feature-cache"
+    extractors = []
+    for fingerprint in ("pipeline-a", "pipeline-b"):
+        esm = _CountingESM()
+        extractors.append(esm)
+        predictor = ProtCrossPredictor(
+            device="cpu",
+            max_len=4,
+            embedding_cache_dir=cache_dir,
+            feature_pipeline_fingerprint=fingerprint,
+            esm_extractor=esm,
+            pca_reducer=_FakePCA(),
+            structure_parser=_FakeParser(),
+            model=_FakeModel(),
+            asset_version="test-assets",
+        )
+        predictor.predict(input_pdb)
+
+    assert [extractor.calls for extractor in extractors] == [1, 1]
+    assert len(list(cache_dir.glob("*.pt"))) == 2
+
+
 def test_predictor_rebuilds_corrupt_embedding_cache(tmp_path):
     input_pdb = tmp_path / "input.pdb"
     input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
@@ -848,6 +1119,7 @@ def test_predictor_rebuilds_corrupt_embedding_cache(tmp_path):
         device="cpu",
         max_len=4,
         embedding_cache_dir=cache_dir,
+        feature_pipeline_fingerprint="counting-esm-pca-v1",
         esm_extractor=esm,
         pca_reducer=pca,
         structure_parser=_FakeParser(),
@@ -864,6 +1136,41 @@ def test_predictor_rebuilds_corrupt_embedding_cache(tmp_path):
     assert esm.calls == 2
     assert pca.calls == 2
     assert not list(cache_dir.glob("*.part.pt"))
+
+
+@pytest.mark.parametrize(
+    "cached",
+    [
+        torch.ones((1, 2), dtype=torch.float32),
+        torch.tensor([[float("nan"), 1.0], [1.0, 1.0]], dtype=torch.float32),
+    ],
+)
+def test_predictor_rebuilds_invalid_embedding_cache_tensor(tmp_path, cached):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    cache_dir = tmp_path / "feature-cache"
+    esm = _CountingESM()
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        embedding_cache_dir=cache_dir,
+        feature_pipeline_fingerprint="counting-esm-pca-v1",
+        esm_extractor=esm,
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+        asset_version="test-assets",
+    )
+    predictor.predict(input_pdb)
+    cache_path = next(cache_dir.glob("*.pt"))
+    torch.save(cached, cache_path)
+
+    predictor.predict(input_pdb)
+
+    assert esm.calls == 2
+    rebuilt = torch.load(cache_path, map_location="cpu", weights_only=True)
+    assert rebuilt.shape == (2, 2)
+    assert torch.isfinite(rebuilt).all()
 
 
 def test_predictor_rejects_loaded_pca_dimension_mismatch(tmp_path):
@@ -900,6 +1207,7 @@ def test_predictor_embedding_cache_key_includes_asset_identity(tmp_path):
         device="cpu",
         max_len=4,
         embedding_cache_dir=cache_dir,
+        feature_pipeline_fingerprint="counting-esm-pca-v1",
         esm_extractor=esm_a,
         pca_reducer=pca_a,
         structure_parser=_FakeParser(),
@@ -917,6 +1225,7 @@ def test_predictor_embedding_cache_key_includes_asset_identity(tmp_path):
         device="cpu",
         max_len=4,
         embedding_cache_dir=cache_dir,
+        feature_pipeline_fingerprint="counting-esm-pca-v1",
         esm_extractor=esm_b,
         pca_reducer=pca_b,
         structure_parser=_FakeParser(),
@@ -1030,6 +1339,33 @@ class _FakeParser:
 class _FakeESM:
     def extract_residue_embeddings(self, sequence):
         return torch.ones((len(sequence), 4), dtype=torch.float32)
+
+
+class _TokenAwareESM:
+    def encode(self, protein):
+        residue_tokens = [3 + (ord(residue) % 20) for residue in protein.sequence]
+        return types.SimpleNamespace(sequence=torch.tensor([1, *residue_tokens, 2], dtype=torch.long))
+
+    def __call__(self, sequence_tokens):
+        token_values = sequence_tokens.to(dtype=torch.float32)
+        positions = torch.arange(sequence_tokens.shape[1], dtype=torch.float32).expand_as(token_values)
+        embeddings = torch.stack(
+            (
+                token_values,
+                token_values.square(),
+                positions,
+                (sequence_tokens != 0).to(dtype=torch.float32),
+            ),
+            dim=-1,
+        )
+        return types.SimpleNamespace(embeddings=embeddings)
+
+
+class _OOMOnBatchESM(_TokenAwareESM):
+    def __call__(self, sequence_tokens):
+        if sequence_tokens.shape[0] > 1:
+            raise RuntimeError("simulated accelerator out of memory")
+        return super().__call__(sequence_tokens)
 
 
 class _RecordingESM(_FakeESM):

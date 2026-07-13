@@ -94,17 +94,16 @@ def manual_radius(x, y, r, batch_x, batch_y, max_num_neighbors=64):
         for start in range(0, pos_y.shape[0], DISTANCE_TARGET_CHUNK_SIZE):
             stop = min(start + DISTANCE_TARGET_CHUNK_SIZE, pos_y.shape[0])
             within_radius = torch.cdist(pos_y[start:stop], pos_x) < r
-
-            for local_target_index in range(stop - start):
-                target_index = start + local_target_index
-                neighbors = torch.where(within_radius[local_target_index])[0]
-                if len(neighbors) > max_num_neighbors:
-                    neighbors = neighbors[:max_num_neighbors]
-
-                if neighbors.numel() == 0:
-                    continue
-                row_list.append(idx_y[target_index].expand(neighbors.numel()))
-                col_list.append(idx_x[neighbors])
+            # ``cumsum`` applies the cap independently per target while
+            # preserving source-input order.  ``nonzero`` is row-major, so the
+            # emitted edge ordering is identical to the former target loop,
+            # without one Python iteration/device synchronization per target.
+            retained = within_radius & (within_radius.cumsum(dim=1) <= max_num_neighbors)
+            local_targets, local_sources = torch.nonzero(retained, as_tuple=True)
+            if local_targets.numel() == 0:
+                continue
+            row_list.append(idx_y[start + local_targets])
+            col_list.append(idx_x[local_sources])
 
     if len(row_list) == 0:
         return (torch.empty(0, dtype=torch.long, device=x.device),

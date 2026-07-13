@@ -3,6 +3,7 @@ import pytest
 import torch
 
 from protcross.data.label_mapping import (
+    _index_af2_files,
     _reverse_pdb_uniprot_mapping,
     load_processed_pdb_labels,
     sequence_based_mapping,
@@ -23,6 +24,21 @@ def test_split_data_by_chain_keeps_chain_specific_sequence():
 
     assert chains["A"]["sequence"] == "ACDEF"
     assert chains["B"]["sequence"] == "GHIKL"
+
+
+def test_split_data_by_chain_uses_metadata_for_chain_ids_with_underscores():
+    payload = {
+        "coords": [[i, 0, 0] for i in range(5)],
+        "sequence": "ACDEF",
+        "residue_ids": [f"AUTH_A_{index}" for index in range(1, 6)],
+        "residue_metadata": [{"auth_asym_id": "AUTH_A"} for _ in range(5)],
+        "labels": [0, 1, 0, 0, 1],
+    }
+
+    chains = split_data_by_chain(payload)
+
+    assert list(chains) == ["AUTH_A"]
+    assert chains["AUTH_A"]["sequence"] == "ACDEF"
 
 
 def test_reverse_mapping_keeps_multiple_pdbs_for_one_uniprot():
@@ -57,6 +73,49 @@ def test_sequence_based_mapping_ignores_indices_beyond_truncated_af2_payload():
     assert rmsd < 1e-4
     assert message == "Success"
     assert mean_shift < 1e-4
+
+
+def test_sequence_based_mapping_uses_biopython_row_vector_rotation():
+    moving = np.asarray([[i, i % 4, (i * i) % 7] for i in range(12)], dtype=np.float32)
+    angle = np.deg2rad(37.0)
+    rotation = np.asarray(
+        [[np.cos(angle), -np.sin(angle), 0.0], [np.sin(angle), np.cos(angle), 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    fixed = moving @ rotation + np.asarray([11.0, -4.0, 3.5], dtype=np.float32)
+    labels, rmsd, message, mapped_count, _, mean_shift = sequence_based_mapping(
+        {"pos": torch.from_numpy(fixed)},
+        {"coords": moving, "labels": np.asarray([1] + [0] * 11, dtype=np.float32)},
+        "A" * 12,
+        "A" * 12,
+    )
+
+    assert labels is not None
+    assert message == "Success"
+    assert mapped_count == 1
+    assert rmsd < 1e-4
+    assert mean_shift < 1e-4
+
+
+def test_af2_filename_matching_is_exact_for_isoforms(tmp_path):
+    canonical = tmp_path / "AF-P12345.pt"
+    isoform = tmp_path / "AF-P12345-2.pt"
+    index = _index_af2_files(
+        [canonical, isoform],
+        {"p12345": ["1abc"], "p12345-2": ["2def"]},
+        "processed AF2",
+    )
+
+    assert index == {canonical: "p12345", isoform: "p12345-2"}
+
+
+def test_af2_filename_matching_rejects_duplicate_accession_inputs(tmp_path):
+    with pytest.raises(RuntimeError, match="Ambiguous processed AF2 inputs"):
+        _index_af2_files(
+            [tmp_path / "AF-P12345.pt", tmp_path / "AF-P12345-F1-model_v6.pt"],
+            {"p12345": ["1abc"]},
+            "processed AF2",
+        )
 
 
 def test_sequence_from_processed_or_raw_prefers_truncated_processed_sequence():

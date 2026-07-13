@@ -32,6 +32,7 @@ from .manifest import DesktopManifest
 PredictorFactory = Callable[..., Any]
 DEFAULT_BATCH_STATUS_LIMIT = 500
 MAX_RETAINED_FINISHED_JOBS = 20
+DEFAULT_PREDICTION_MICROBATCH_SIZE = 4
 
 
 @dataclass
@@ -41,6 +42,7 @@ class QueueItem:
     output_dir: str | None = None
     output_files: dict[str, str] = field(default_factory=dict)
     error: str | None = None
+    structure_inspection: dict[str, Any] | None = field(default=None, repr=False)
 
     def to_status_dict(self) -> dict[str, Any]:
         return {
@@ -532,15 +534,18 @@ class DesktopBackend:
         from protcross.data import inspect_structure
 
         input_errors = []
+        inspections: list[dict[str, Any] | None] = []
         for path in input_paths:
             try:
                 report = inspect_structure(path)
+                inspections.append(report)
                 if report["requires_truncation"] and not allow_truncation:
                     input_errors.append(
                         f"{path}: longest chain has {report['longest_chain_context']} scorable residues "
                         f"(limit {report['max_len']}); enable truncation or remove this input"
                     )
             except Exception as exc:
+                inspections.append(None)
                 input_errors.append(f"{path}: {exc}")
         if input_errors:
             shown = input_errors[:20]
@@ -553,7 +558,10 @@ class DesktopBackend:
 
         job = BatchJob(
             id=str(uuid.uuid4()),
-            items=[QueueItem(input_structure=str(path)) for path in input_paths],
+            items=[
+                QueueItem(input_structure=str(path), structure_inspection=inspection)
+                for path, inspection in zip(input_paths, inspections)
+            ],
             created_at=time.time(),
         )
         with self._lock:
@@ -614,6 +622,43 @@ class DesktopBackend:
             "output_files": output_files,
         }
 
+    def open_result(self, summary_json: str | Path) -> dict[str, Any]:
+        """Load an existing ProtCross result package selected by the desktop user."""
+        summary_path = Path(summary_json).expanduser().resolve()
+        if not summary_path.exists() or not summary_path.is_file():
+            raise FileNotFoundError(f"Summary JSON not found: {summary_path}")
+        if summary_path.suffix.lower() != ".json":
+            raise ValueError("Choose a ProtCross .summary.json file.")
+        summary = _read_json_file(summary_path)
+        if not str(summary.get("schema_version", "")).startswith("protcross-summary-"):
+            raise ValueError("The selected file is not a supported ProtCross summary.")
+        output_files = {}
+        for key, value in dict(summary.get("output_files") or {}).items():
+            if not value:
+                continue
+            referenced = _resolve_result_reference(summary_path, value)
+            output_files[str(key)] = str(referenced)
+        output_files["summary_json"] = str(summary_path)
+        pockets_path = output_files.get("pockets_json")
+        if not pockets_path:
+            candidate = summary_path.with_name(summary_path.name.replace(".summary.json", ".pockets.json"))
+            pockets_path = str(candidate)
+            output_files["pockets_json"] = pockets_path
+        pockets = _read_json_file(pockets_path)
+        if not str(pockets.get("schema_version", "")).startswith("protcross-pocket-"):
+            raise ValueError("The result package contains an unsupported pockets JSON schema.")
+        structure_path = output_files.get("structure")
+        if not structure_path:
+            raise FileNotFoundError("The summary does not reference an annotated structure file.")
+        self.register_readable_output(structure_path)
+        return {
+            "ok": True,
+            "summary": summary,
+            "pockets": pockets,
+            "top_pocket_residues": _top_pocket_residues(pockets),
+            "output_files": output_files,
+        }
+
     def cancel_batch(self, job_id: str) -> dict[str, Any]:
         with self._lock:
             if job_id not in self._jobs:
@@ -668,43 +713,88 @@ class DesktopBackend:
         try:
             with self._predict_lock:
                 predictor = self._get_predictor(device=device)
-            for index, item in enumerate(job.items, start=1):
+            supports_microbatch = callable(getattr(predictor, "predict_many", None))
+            microbatch_size = DEFAULT_PREDICTION_MICROBATCH_SIZE if supports_microbatch else 1
+            for batch_start in range(0, len(job.items), microbatch_size):
                 with self._lock:
                     if job.cancel_requested:
                         job.status = "cancelled"
                         return
-                    item.status = "running"
-                input_path = Path(item.input_structure)
-                batch_root = Path(output_dir).expanduser() if output_dir else self.paths.outputs_dir / "batch" / job.id
-                item_output = _unique_batch_output_dir(batch_root, input_path)
-                paths = _desktop_output_paths(input_path, item_output)
-                try:
-                    with self._predict_lock:
-                        if any(path.exists() for path in paths.values()):
-                            item_output = _next_available_run_dir(item_output)
-                            paths = _desktop_output_paths(input_path, item_output)
-                        predictor.predict(
-                            input_path,
-                            threshold=threshold,
-                            pocket_cluster_cutoff=pocket_cluster_cutoff,
-                            output_pdb=paths["structure"],
-                            scores_tsv=paths["scores_tsv"],
-                            pocket_json=paths["pockets_json"],
-                            summary_json=paths["summary_json"],
-                            allow_truncation=allow_truncation,
-                        )
+                batch_items = job.items[batch_start : batch_start + microbatch_size]
+                planned: list[tuple[QueueItem, Path, dict[str, Path]]] = []
+                reserved_outputs: set[Path] = set()
+                for item in batch_items:
+                    input_path = Path(item.input_structure)
+                    batch_root = (
+                        Path(output_dir).expanduser()
+                        if output_dir
+                        else self.paths.outputs_dir / "batch" / job.id
+                    )
+                    item_output = _unique_batch_output_dir(batch_root, input_path)
+                    paths = _desktop_output_paths(input_path, item_output)
+                    while any(path.exists() or path.resolve(strict=False) in reserved_outputs for path in paths.values()):
+                        item_output = _next_available_run_dir(item_output)
+                        paths = _desktop_output_paths(input_path, item_output)
+                    reserved_outputs.update(path.resolve(strict=False) for path in paths.values())
                     with self._lock:
-                        item.status = "completed"
-                        item.output_dir = str(item_output)
-                        item.output_files = {key: str(path) for key, path in paths.items()}
-                        self._readable_output_files.add(_resolve_output_file(paths["structure"]))
-                        job.completed = index
-                except Exception as exc:
-                    with self._lock:
-                        item.status = "failed"
-                        item.error = f"{type(exc).__name__}: {exc}"
-                        job.completed = index
-                        job.failed += 1
+                        item.status = "running"
+                    planned.append((item, item_output, paths))
+
+                if supports_microbatch:
+                    try:
+                        with self._predict_lock:
+                            batch_results = predictor.predict_many(
+                                [item.input_structure for item, _, _ in planned],
+                                threshold=threshold,
+                                pocket_cluster_cutoff=pocket_cluster_cutoff,
+                                output_paths=[paths for _, _, paths in planned],
+                                structure_inspections=[item.structure_inspection for item, _, _ in planned],
+                                allow_truncation=allow_truncation,
+                                batch_size=len(planned),
+                                return_exceptions=True,
+                            )
+                    except Exception as exc:
+                        batch_results = [exc] * len(planned)
+                else:
+                    batch_results = []
+                    for item, _, paths in planned:
+                        try:
+                            with self._predict_lock:
+                                result = predictor.predict(
+                                    item.input_structure,
+                                    threshold=threshold,
+                                    pocket_cluster_cutoff=pocket_cluster_cutoff,
+                                    output_pdb=paths["structure"],
+                                    scores_tsv=paths["scores_tsv"],
+                                    pocket_json=paths["pockets_json"],
+                                    summary_json=paths["summary_json"],
+                                    allow_truncation=allow_truncation,
+                                )
+                            batch_results.append(result)
+                        except Exception as exc:
+                            batch_results.append(exc)
+
+                if len(batch_results) != len(planned):
+                    mismatch = RuntimeError(
+                        "Predictor returned a batch result count that does not match the submitted microbatch."
+                    )
+                    batch_results = [mismatch] * len(planned)
+
+                for offset, ((item, item_output, paths), result) in enumerate(zip(planned, batch_results), start=1):
+                    completed_index = batch_start + offset
+                    if not isinstance(result, Exception):
+                        with self._lock:
+                            item.status = "completed"
+                            item.output_dir = str(item_output)
+                            item.output_files = {key: str(path) for key, path in paths.items()}
+                            self._readable_output_files.add(_resolve_output_file(paths["structure"]))
+                            job.completed = completed_index
+                    else:
+                        with self._lock:
+                            item.status = "failed"
+                            item.error = f"{type(result).__name__}: {result}"
+                            job.completed = completed_index
+                            job.failed += 1
             with self._lock:
                 job.status = "completed" if job.failed == 0 else "completed_with_errors"
         except Exception as exc:
@@ -880,6 +970,30 @@ def _read_json_file(path: str | Path) -> dict[str, Any]:
     if not file_path.exists() or not file_path.is_file():
         raise FileNotFoundError(f"JSON result file not found: {file_path}")
     return json.loads(file_path.read_text(encoding="utf-8"))
+
+
+def _resolve_result_reference(summary_path: Path, value: object) -> Path:
+    """Resolve a result-package member, preferring files beside the chosen summary.
+
+    Summary JSON files historically recorded absolute output paths.  Prefer a
+    same-name file in the selected package so copying or moving all four result
+    files keeps the package reopenable.  Newer relative references retain their
+    subdirectories and are resolved from the summary rather than the process CWD.
+    """
+    referenced = Path(str(value)).expanduser()
+    if referenced.is_absolute():
+        packaged = summary_path.parent / referenced.name
+        if packaged.exists():
+            return packaged.resolve()
+        return referenced.resolve(strict=False)
+
+    packaged = summary_path.parent / referenced
+    if packaged.exists():
+        return packaged.resolve()
+    legacy_sibling = summary_path.parent / referenced.name
+    if legacy_sibling.exists():
+        return legacy_sibling.resolve()
+    return packaged.resolve(strict=False)
 
 
 def _unique_batch_output_dir(root: str | Path, input_path: Path) -> Path:

@@ -62,7 +62,7 @@ def test_readme_does_not_reference_removed_markdown_documents():
 def test_readme_explains_custom_asset_verification():
     readme = Path("README.md").read_text(encoding="utf-8")
     asset_section = readme.split("### Existing or custom assets", 1)[1].split(
-        "## Common workflows and Python API", 1
+        "## Desktop application", 1
     )[0]
 
     assert "verified against the selected bundle's SHA256" in asset_section
@@ -81,10 +81,49 @@ def test_readme_front_matter_is_direct_and_ordered_for_first_use():
     assert "Journal of Chemical Information and Modeling" in intro
     assert "https://doi.org/10.1021/acs.jcim.5c03224" in intro
     assert readme.index("## Quick start") < readme.index("## Contents")
-    assert readme.index("## Contents") < readme.index("## Inspect a structure")
+    assert readme.index("## Contents") < readme.index("## Highlights")
     assert "### Score and threshold" not in front_matter
     assert "| Component |" not in front_matter
     assert "Version note" not in front_matter
+
+
+def test_readme_front_matter_exposes_install_surfaces_and_project_significance():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    intro = readme.split("## Quick start", 1)[0]
+
+    assert "https://pypi.org/project/protcross/" in intro
+    assert "Windows x64 Desktop" in intro
+    assert "macOS Apple Silicon Desktop" in intro
+    assert "Global fold accuracy and pLDDT alone do not establish" in intro
+    assert "residue-level binding-site scores" in intro
+
+
+def test_readme_022_history_has_at_most_three_entries():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    release = readme.split("### 0.2.2", 1)[1].split("### 0.2.1", 1)[0]
+    entries = [line for line in release.splitlines() if line.startswith("- ")]
+
+    assert 1 <= len(entries) <= 3
+
+
+def test_readme_uses_technical_structure_without_review_defense_sections():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    lowered = readme.lower()
+
+    for heading in (
+        "## Model and inference pipeline",
+        "## Batch inference",
+        "## Output package",
+        "## Training and development",
+        "## Version history",
+        "## Citation",
+    ):
+        assert heading in readme
+    assert "scientific scope and limitations" not in lowered
+    assert "interpretation boundaries" not in lowered
+    assert "rather than" not in lowered
+    assert "instead of" not in lowered
+    assert re.search(r"\bnot\b.{0,80}\bbut\b", lowered) is None
 
 
 def test_readme_contains_no_emoji():

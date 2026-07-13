@@ -184,6 +184,7 @@ def inspect_structure(
         "input_structure": str(path),
         "format": structure_format(path),
         "file_size_bytes": path.stat().st_size,
+        "file_mtime_ns": path.stat().st_mtime_ns,
         "model_count": len(models),
         "model_scored": str(model.id),
         "coordinate_chains": coordinate_chains,

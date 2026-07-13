@@ -134,6 +134,7 @@ def _prepare_backend(
             "-m",
             "pip",
             "wheel",
+            "--only-binary=:all:",
             "--wheel-dir",
             str(tmp_dir / "wheels"),
             "-r",

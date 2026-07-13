@@ -4,17 +4,20 @@ import { StructureSelection } from "molstar/lib/mol-model/structure";
 import type { Expression } from "molstar/lib/mol-script/language/expression";
 import { MolScriptBuilder as MS } from "molstar/lib/mol-script/language/builder";
 import { Script } from "molstar/lib/mol-script/script";
-import { desktopFileUrl } from "../api";
+import { fetchDesktopFile } from "../api";
 import type { PocketJson, ResidueSummary, SummaryJson } from "../types";
+import { ProtcrossScoreColorThemeProvider } from "./ProtcrossScoreTheme";
+import { Icon } from "./Icon";
 
 interface Props {
   structurePath?: string;
   summary?: SummaryJson | null;
   pockets?: PocketJson | null;
   selectedClusterIndex?: number;
+  darkMode?: boolean;
 }
 
-export function MolstarViewer({ structurePath, summary, pockets, selectedClusterIndex = 0 }: Props) {
+export function MolstarViewer({ structurePath, summary, pockets, selectedClusterIndex = 0, darkMode = false }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<any>(null);
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -23,6 +26,8 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
   const [error, setError] = useState<string | null>(null);
   const [selectionMessage, setSelectionMessage] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
+  const [showControls, setShowControls] = useState(false);
+  const [webglAvailable, setWebglAvailable] = useState<boolean | null>(null);
   const [loadedStructureRequest, setLoadedStructureRequest] = useState(0);
   const selectedCluster = pockets?.clustered_pockets?.[selectedClusterIndex] ?? null;
   const displayedCluster = selectedCluster ?? summary?.top_pocket ?? null;
@@ -36,20 +41,27 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
       try {
         const molstar = await import("molstar/build/viewer/molstar");
         const viewer = await molstar.Viewer.create(hostRef.current, {
+          extensions: [],
           layoutIsExpanded: false,
-          layoutShowControls: true,
-          layoutShowSequence: true,
+          layoutShowControls: false,
+          layoutShowRemoteState: false,
+          layoutShowSequence: false,
           layoutShowLog: false,
           layoutShowLeftPanel: false,
           viewportShowExpand: true,
           viewportShowSelectionMode: true,
-          backgroundColor: 0xffffff
+          viewportShowAnimation: false,
+          viewportShowTrajectoryControls: false,
+          volumeStreamingDisabled: true,
+          backgroundColor: darkMode ? 0x101820 : 0xffffff
         });
         if (cancelled) {
           disposeViewer(viewer);
           return;
         }
         viewerRef.current = viewer;
+        setWebglAvailable(Boolean(viewer.plugin.canvas3d));
+        viewer.plugin.representation.structure.themes.colorThemeRegistry.add(ProtcrossScoreColorThemeProvider);
         viewer.plugin.managers.interactivity.setProps({ granularity: "residue" });
         if (!cancelled) {
           setViewerReady(true);
@@ -68,8 +80,20 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
       disposeViewer(viewerRef.current);
       viewerRef.current = null;
       setViewerReady(false);
+      setWebglAvailable(null);
     };
   }, []);
+
+  useEffect(() => {
+    viewerRef.current?.plugin?.canvas3d?.setProps({
+      renderer: { backgroundColor: darkMode ? 0x101820 : 0xffffff },
+      transparentBackground: false
+    });
+  }, [darkMode, viewerReady]);
+
+  useEffect(() => {
+    viewerRef.current?.plugin?.layout?.setProps({ showControls });
+  }, [showControls, viewerReady]);
 
   useEffect(() => {
     if (!viewerReady || !viewerRef.current || !structurePath) {
@@ -77,6 +101,7 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
       return;
     }
     const request = structureRequestRef.current + 1;
+    const controller = new AbortController();
     structureRequestRef.current = request;
     selectionRequestRef.current += 1;
     setLoadedStructureRequest(0);
@@ -93,11 +118,20 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
         if (request !== structureRequestRef.current || !viewerRef.current) {
           return;
         }
-        const url = desktopFileUrl(structurePath);
+        const blob = await fetchDesktopFile(structurePath, controller.signal);
+        if (request !== structureRequestRef.current || !viewerRef.current) {
+          return;
+        }
+        const url = URL.createObjectURL(blob);
         const format = structurePath.toLowerCase().endsWith(".cif") || structurePath.toLowerCase().endsWith(".mmcif")
           ? "mmcif"
           : "pdb";
-        await viewer.loadStructureFromUrl(url, format, false);
+        try {
+          await viewer.loadStructureFromUrl(url, format, false);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+        await applyScoreTheme(viewer);
         if (request === structureRequestRef.current && viewerRef.current) {
           setLoadedStructureRequest(request);
         }
@@ -109,6 +143,7 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
     });
     operationQueueRef.current = operation;
     return () => {
+      controller.abort();
       if (structureRequestRef.current === request) {
         structureRequestRef.current += 1;
       }
@@ -162,7 +197,7 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
     <section className="viewer-panel">
       <div className="viewer-toolbar">
         <div>
-          <strong>Structure Viewer</strong>
+          <h3>Structure Viewer</h3>
           <span>{structurePath || "No annotated structure loaded"}</span>
         </div>
         {displayedCluster ? (
@@ -172,20 +207,43 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
             <small>Coordinates only; no 3D centroid marker is drawn.</small>
           </div>
         ) : null}
+        <button aria-pressed={showControls} className="viewer-tools-button" disabled={webglAvailable === false} onClick={() => setShowControls((current) => !current)}>
+          <Icon name="settings" size={15} /> {showControls ? "Hide tools" : "Viewer tools"}
+        </button>
       </div>
-      <div className="molstar-frame">
+      <div className={`molstar-frame ${webglAvailable === false ? "viewer-unavailable" : ""}`}>
         <div className="molstar-host" ref={hostRef} />
+        {webglAvailable === false ? (
+          <div className="viewer-fallback" role="status">
+            <span className="empty-icon"><Icon name="warning" size={24} /></span>
+            <strong>3D rendering is unavailable</strong>
+            <p>Restart ProtCross with hardware acceleration enabled. Cluster metrics, residue scores, and exported files remain available in the inspector.</p>
+          </div>
+        ) : null}
+        <div className="score-legend" aria-label="ProtCross model score color scale from zero to one">
+          <span>Model score</span>
+          <div className="score-gradient" aria-hidden="true" />
+          <div><span>0.00</span><span>0.50</span><span>1.00</span></div>
+        </div>
       </div>
-      {error ? <div className="inline-error">{error}</div> : null}
+      {error ? <div className="inline-error" role="alert">{error}</div> : null}
       <div className="viewer-note">
-        {selectionMessage ? <span>{selectionMessage} </span> : null}
-        Annotated structures store ProtCross model scores (0–1) in B-factor fields. The viewer uses its standard
-        structure colors; model scores are not labeled as uncertainty. The selected ball-and-stick residues are the
-        selected predicted-residue cluster. Its score-weighted Cα centroid is reported numerically above and is not shown
-        as a 3D point.
+        {selectionMessage ? <span role="status">{selectionMessage} </span> : null}
+        The structure color scale maps ProtCross model scores from 0 to 1. Ball-and-stick residues mark the selected
+        predicted-residue cluster. The score-weighted Cα centroid is reported numerically above.
       </div>
     </section>
   );
+}
+
+async function applyScoreTheme(viewer: any): Promise<void> {
+  const structures = viewer.plugin.managers.structure.hierarchy.current.structures ?? [];
+  for (const structure of structures) {
+    await viewer.plugin.managers.structure.component.updateRepresentationsTheme(
+      structure.components ?? [],
+      { color: "protcross-score" as any }
+    );
+  }
 }
 
 function disposeViewer(viewer: any): void {

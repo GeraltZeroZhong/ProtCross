@@ -275,6 +275,22 @@ def test_af2_downloader_creates_mapping_parent(tmp_path):
     downloader.save_mapping()
 
     assert json.loads(mapping_file.read_text(encoding="utf-8")) == {"1ABC": "P12345"}
+    assert not list(mapping_file.parent.glob(".*.part"))
+
+
+def test_af2_downloader_downloads_and_records_all_accessions(tmp_path, monkeypatch):
+    downloader = AF2Downloader(AF2DownloadConfig(mapping_file=tmp_path / "mapping.json"))
+    monkeypatch.setattr(downloader, "fetch_uniprot_ids", lambda pdb_id: ["P12345", "Q99999", "P12345"])
+    downloaded = []
+    monkeypatch.setattr(downloader, "download_structure", lambda accession: downloaded.append(accession) or True)
+
+    assert downloader.process_pdb_id("1ABC") is True
+    assert downloaded == ["P12345", "Q99999"]
+    assert downloader.mapping == {"1ABC": ["P12345", "Q99999"]}
+    downloader.save_mapping()
+    assert json.loads((tmp_path / "mapping.json").read_text(encoding="utf-8")) == {
+        "1ABC": ["P12345", "Q99999"]
+    }
 
 
 def test_af2_downloader_fails_when_requested_ids_do_not_download(tmp_path, monkeypatch):
