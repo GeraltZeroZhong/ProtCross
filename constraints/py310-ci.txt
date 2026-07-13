@@ -1,6 +1,6 @@
 # ProtCross 0.2.2 CI constraints for Python 3.10.
 # Desktop release installers use desktop/runtime/*.lock plus generated hash files.
-build==1.4.4
+build==1.5.1
 twine==6.2.0
 pytest==9.0.3
 biopython==1.87
