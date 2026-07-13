@@ -30,6 +30,9 @@ updates:
           - minor
           - patch
     ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
       - dependency-name: torch
       - dependency-name: torchvision
       - dependency-name: torchtext
@@ -47,6 +50,9 @@ updates:
           - minor
           - patch
     ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
       - dependency-name: react
         versions:
           - ">=19"
@@ -82,6 +88,9 @@ updates:
           - minor
           - patch
     ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
       - dependency-name: getrandom
         versions:
           - ">=0.3"
