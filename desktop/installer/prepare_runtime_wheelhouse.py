@@ -134,6 +134,8 @@ def _prepare_backend(
             "-m",
             "pip",
             "wheel",
+            "--only-binary=:all:",
+            "--no-binary=antlr4-python3-runtime",
             "--wheel-dir",
             str(tmp_dir / "wheels"),
             "-r",

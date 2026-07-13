@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -61,9 +62,22 @@ def split_data_by_chain(full_data: dict) -> dict[str, dict]:
 
     chains = defaultdict(lambda: {"coords": [], "sequence": [], "residue_ids": [], "labels": []})
     full_sequence = full_data["sequence"]
+    residue_metadata = full_data.get("residue_metadata") or []
+    use_metadata = len(residue_metadata) == len(full_data["residue_ids"])
 
     for index, residue_id in enumerate(full_data["residue_ids"]):
-        chain_id = residue_id.split("_")[0]
+        if use_metadata:
+            metadata = residue_metadata[index]
+            chain_id = str(
+                metadata.get("auth_asym_id")
+                or metadata.get("chain_id")
+                or metadata.get("label_asym_id")
+                or ""
+            )
+        else:
+            chain_id, separator, _ = str(residue_id).rpartition("_")
+            if not separator:
+                chain_id = str(residue_id)
         chains[chain_id]["coords"].append(full_data["coords"][index])
         chains[chain_id]["residue_ids"].append(residue_id)
         chains[chain_id]["labels"].append(full_data["labels"][index])
@@ -98,10 +112,10 @@ def find_best_matching_chain(full_pdb_data: dict, af2_sequence: str, *, debug: b
     aligner.mismatch_score = -1
     aligner.open_gap_score = -2.0
     aligner.extend_gap_score = -0.5
-    aligner.target_end_open_gap_score = 0.0
-    aligner.target_end_extend_gap_score = 0.0
-    aligner.query_end_open_gap_score = 0.0
-    aligner.query_end_extend_gap_score = 0.0
+    aligner.open_end_insertion_score = 0.0
+    aligner.extend_end_insertion_score = 0.0
+    aligner.open_end_deletion_score = 0.0
+    aligner.extend_end_deletion_score = 0.0
 
     best_chain_data = None
     best_pdb_sequence = None
@@ -137,23 +151,39 @@ def sequence_based_mapping(
     *,
     max_rmsd: float = 30.0,
 ):
+    af2_coords = torch.as_tensor(af2_data.get("pos"), dtype=torch.float32)
+    pdb_coords = np.asarray(pdb_data.get("coords"), dtype=np.float32)
+    pdb_labels_array = np.asarray(pdb_data.get("labels"), dtype=np.float32)
+    if af2_coords.ndim != 2 or af2_coords.shape[1] != 3:
+        raise ValueError(f"AF2 coordinates must have shape (N, 3); got {tuple(af2_coords.shape)}.")
+    if pdb_coords.ndim != 2 or pdb_coords.shape[1] != 3:
+        raise ValueError(f"PDB coordinates must have shape (N, 3); got {pdb_coords.shape}.")
+    if pdb_labels_array.shape != (pdb_coords.shape[0],):
+        raise ValueError(
+            f"PDB labels must have shape ({pdb_coords.shape[0]},); got {pdb_labels_array.shape}."
+        )
+    if not torch.isfinite(af2_coords).all() or not np.isfinite(pdb_coords).all():
+        raise ValueError("AF2 and PDB coordinates must contain only finite values.")
+    if not np.isfinite(pdb_labels_array).all():
+        raise ValueError("PDB labels must contain only finite values.")
+
     aligner = PairwiseAligner()
     aligner.mode = "global"
     aligner.match_score = 2
     aligner.mismatch_score = -1
     aligner.open_gap_score = -10.0
     aligner.extend_gap_score = -0.5
-    aligner.target_end_open_gap_score = 0.0
-    aligner.target_end_extend_gap_score = 0.0
-    aligner.query_end_open_gap_score = 0.0
-    aligner.query_end_extend_gap_score = 0.0
+    aligner.open_end_insertion_score = 0.0
+    aligner.extend_end_insertion_score = 0.0
+    aligner.open_end_deletion_score = 0.0
+    aligner.extend_end_deletion_score = 0.0
 
     try:
         alignment = aligner.align(af2_sequence, pdb_sequence)[0]
     except Exception:
         return None, 999.0, "Alignment error", 0, 0, 0.0
 
-    af2_len = int(af2_data["pos"].shape[0])
+    af2_len = int(af2_coords.shape[0])
     pdb_len = int(len(pdb_data["coords"]))
     af2_to_pdb = {}
     af2_indices_rmsd = []
@@ -172,15 +202,15 @@ def sequence_based_mapping(
     if len(af2_to_pdb) < 10:
         return None, 999.0, "Too few aligned residues", 0, 0, 0.0
 
-    fixed_coords = af2_data["pos"][af2_indices_rmsd]
+    fixed_coords = af2_coords[af2_indices_rmsd]
     moving_coords = pdb_data["coords"][pdb_indices_rmsd]
     superimposer = Superimposer()
     superimposer.set_atoms(create_ca_atoms(fixed_coords), create_ca_atoms(moving_coords))
     if superimposer.rms > max_rmsd:
         return None, superimposer.rms, f"Extreme RMSD ({superimposer.rms:.1f})", 0, 0, 0.0
 
-    new_labels = torch.zeros(af2_data["pos"].shape[0], dtype=torch.float32)
-    pdb_labels = pdb_data["labels"]
+    new_labels = torch.zeros(af2_coords.shape[0], dtype=torch.float32)
+    pdb_labels = pdb_labels_array
     total_pdb_sites = int((pdb_labels > 0.5).sum())
     mapped_count = 0
     site_displacements = []
@@ -193,18 +223,58 @@ def sequence_based_mapping(
             new_labels[af2_index] = 1.0
             mapped_count += 1
             pdb_coord = torch.from_numpy(pdb_data["coords"][pdb_index])
-            transformed = torch.matmul(pdb_coord, rotation.T) + translation
-            site_displacements.append(torch.norm(af2_data["pos"][af2_index] - transformed).item())
+            transformed = torch.matmul(pdb_coord, rotation) + translation
+            site_displacements.append(torch.norm(af2_coords[af2_index] - transformed).item())
 
     mean_shift = float(np.mean(site_displacements)) if site_displacements else 0.0
     return new_labels, superimposer.rms, "Success", mapped_count, total_pdb_sites, mean_shift
 
 
 def find_file_robust(directory: Path, lower_pattern: str, upper_pattern: str) -> list[str]:
-    matches = glob.glob(str(directory / lower_pattern))
+    matches = sorted(glob.glob(str(directory / lower_pattern)))
     if matches:
         return matches
-    return glob.glob(str(directory / upper_pattern))
+    return sorted(glob.glob(str(directory / upper_pattern)))
+
+
+def _index_af2_files(
+    files: list[Path],
+    uniprot_to_pdb: dict[str, list[str]],
+    description: str,
+) -> dict[Path, str]:
+    """Resolve conventional AF2 filenames to exact known accessions."""
+    by_path: dict[Path, str] = {}
+    path_by_accession: dict[str, Path] = {}
+    known_accessions = sorted(uniprot_to_pdb, key=lambda value: (-len(value), value))
+    for path in files:
+        stem = path.stem.casefold()
+        matches = []
+        for accession in known_accessions:
+            for prefix in (f"af-{accession}", accession):
+                if stem == prefix:
+                    matches.append(accession)
+                    break
+                remainder = stem[len(prefix):] if stem.startswith(prefix) else ""
+                if remainder and re.fullmatch(r"-f\d+(?:-.*)?", remainder):
+                    matches.append(accession)
+                    break
+        matches = list(dict.fromkeys(matches))
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Ambiguous {description} filename {path.name}: matches UniProt accessions "
+                f"{', '.join(matches)}."
+            )
+        if not matches:
+            continue
+        accession = matches[0]
+        previous = path_by_accession.get(accession)
+        if previous is not None:
+            raise RuntimeError(
+                f"Ambiguous {description} inputs for UniProt {accession}: {previous.name} and {path.name}."
+            )
+        by_path[path] = accession
+        path_by_accession[accession] = path
+    return by_path
 
 
 def parse_sequence(parser: StructureParser, raw_path: str | Path) -> str | None:
@@ -243,6 +313,7 @@ def load_processed_pdb_labels(processed_pdb_dir: Path, raw_pdb_file: Path) -> di
         "labels": np.asarray(labels, dtype=np.float32),
         "sequence": sequence,
         "residue_ids": list(residue_ids),
+        "residue_metadata": data.get("residue_metadata"),
         "processed_pdb_path": str(processed_path),
         "processed_pdb_sha256": _file_sha256(processed_path),
     }
@@ -289,6 +360,14 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
     if not af2_files:
         raise FileNotFoundError(f"No processed AF2 .pt files found in {config.processed_af2_dir}")
 
+    processed_af2_index = _index_af2_files(af2_files, uniprot_to_pdb, "processed AF2")
+    raw_af2_matches = _index_af2_files(
+        sorted(config.raw_af2_dir.glob("*.pdb")),
+        uniprot_to_pdb,
+        "raw AF2",
+    )
+    raw_af2_index = {accession: path for path, accession in raw_af2_matches.items()}
+
     print(f"Scanning {len(af2_files)} processed AF2 files.")
     stats = {
         "matched": 0,
@@ -302,23 +381,14 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
     debug_counter = 0
 
     for af2_path in tqdm(af2_files, desc="Mapping labels"):
-        target_pdb_ids = []
-        current_uniprot = None
-        lower_name = af2_path.name.lower()
-        for uniprot_id, pdb_ids in uniprot_to_pdb.items():
-            if uniprot_id in lower_name:
-                target_pdb_ids = pdb_ids
-                current_uniprot = uniprot_id
-                break
+        current_uniprot = processed_af2_index.get(af2_path)
+        target_pdb_ids = uniprot_to_pdb.get(current_uniprot, []) if current_uniprot else []
         if not target_pdb_ids or not current_uniprot:
             stats["skipped"] += 1
             continue
 
-        raw_af2_files = find_file_robust(
-            config.raw_af2_dir,
-            f"*{current_uniprot}*.pdb",
-            f"*{current_uniprot.upper()}*.pdb",
-        )
+        raw_af2_path = raw_af2_index.get(current_uniprot)
+        raw_af2_files = [str(raw_af2_path)] if raw_af2_path is not None else []
         raw_pdb_files = []
         for target_pdb_id in target_pdb_ids:
             raw_pdb_files.extend(

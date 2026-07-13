@@ -96,6 +96,8 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 self._json(self.backend.start_esm_download(**payload))
             elif path == "/predict":
                 self._json(self.backend.predict_single(**payload))
+            elif path == "/result/open":
+                self._json(self.backend.open_result(**payload))
             elif path == "/inspect":
                 self._json(self.backend.inspect_input_structure(**payload))
             elif path == "/batch":
@@ -161,14 +163,13 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         if origin and not _origin_allowed(origin):
             raise PermissionError(f"Origin is not allowed: {origin}")
 
-    def _require_auth(self, parsed_url) -> None:
+    def _require_auth(self, _parsed_url) -> None:
         if not self.auth_token:
             return
         auth_header = self.headers.get("authorization", "")
         header_token = self.headers.get("x-protcross-desktop-token")
-        query_token = parse_qs(parsed_url.query).get("token", [None])[0]
         bearer = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else None
-        if self.auth_token not in {header_token, query_token, bearer}:
+        if self.auth_token not in {header_token, bearer}:
             raise PermissionError("Missing or invalid desktop API token.")
 
     def _error(self, exc: Exception) -> None:
@@ -191,9 +192,15 @@ def create_server(
     token: str | None = None,
     backend: DesktopBackend | None = None,
 ) -> ThreadingHTTPServer:
+    resolved_token = token if token is not None else os.environ.get("PROTCROSS_DESKTOP_TOKEN")
+    if not resolved_token:
+        raise ValueError(
+            "ProtCross Desktop API token is required. Set PROTCROSS_DESKTOP_TOKEN "
+            "or pass token= explicitly."
+        )
     handler = type("BoundDesktopRequestHandler", (DesktopRequestHandler,), {})
     handler.backend = backend or DesktopBackend(root=root)
-    handler.auth_token = token or os.environ.get("PROTCROSS_DESKTOP_TOKEN")
+    handler.auth_token = resolved_token
     return ThreadingHTTPServer((host, port), handler)
 
 

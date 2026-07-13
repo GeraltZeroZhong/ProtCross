@@ -216,24 +216,21 @@ def test_frontend_release_build_prepares_generated_inputs():
 def test_readme_keeps_quick_start_short_and_desktop_details_in_installation():
     readme = Path("README.md").read_text(encoding="utf-8")
     quick_start = readme.split("## Quick start", 1)[1].split("## Contents", 1)[0]
-    installation = readme.split("## Installation and assets", 1)[1].split(
-        "## Common workflows and Python API", 1
+    desktop = readme.split("## Desktop application", 1)[1].split(
+        "## Training and development", 1
     )[0]
 
-    assert "### Desktop" in quick_start
-    assert "### Command line" in quick_start
-    assert quick_start.index("### Desktop") < quick_start.index("### Command line")
+    assert "GitHub Releases" in quick_start
     assert "protcross inspect input.pdb" in quick_start
     assert "protcross setup-assets --accept-esm-license" in quick_start
     assert "protcross predict input.pdb" in quick_start
-    assert "ProtCross_Desktop_0.2.1_x64-setup.exe" not in quick_start
-    assert "ProtCross_Desktop_0.2.1_macos-aarch64.dmg" not in quick_start
+    assert "ProtCross_Desktop_0.2.2_x64-setup.exe" not in quick_start
+    assert "ProtCross_Desktop_0.2.2_macos-aarch64.dmg" not in quick_start
 
-    assert "ProtCross_Desktop_0.2.1_x64-setup.exe" in installation
-    assert "ProtCross_Desktop_0.2.1_macos-aarch64.dmg" in installation
-    assert "when available" in installation
-    assert "unsigned and unnotarized" in installation
-    assert "Apple Silicon only" in installation
+    assert "ProtCross_Desktop_0.2.2_x64-setup.exe" in desktop
+    assert "ProtCross_Desktop_0.2.2_macos-aarch64.dmg" in desktop
+    assert "Tauri 2" in desktop
+    assert "Mol*" in desktop
 
 
 def test_packaged_sidecar_smoke_uses_env_token_only():
@@ -422,14 +419,18 @@ def test_release_scripts_use_cross_platform_hashing_and_wheel_builds():
     assert "sha256sum" not in bundled_assets_script
     assert '"wheel"' in wheelhouse_script
     assert '"download"' not in wheelhouse_script
-    assert "--only-binary=:all:" not in wheelhouse_script
+    assert "--only-binary=:all:" in wheelhouse_script
+    assert "--no-binary=antlr4-python3-runtime" in wheelhouse_script
     assert "local_desktop_backend_wheel" in wheelhouse_script
     assert "_remove_stale_release_wheels" in wheelhouse_script
     assert 'shutil.rmtree(package_dir / "build"' in wheelhouse_script
-    assert 'features = ["protocol-asset"]' in cargo_toml
+    assert 'features = ["protocol-asset"]' not in cargo_toml
     assert 'channel = "1.88.0"' in rust_toolchain
     assert "cargo +1.88.0 check --locked" in ci_workflow
-    assert "dtolnay/rust-toolchain@1.88.0" in ci_workflow
+    assert (
+        "dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0"
+        in ci_workflow
+    )
     assert "--backend cpu" in ci_workflow
     assert "-AcceptEsmLicenseForCi" not in ci_workflow
     assert "tauri:release-build -- --bundles app -- --locked" in ci_workflow

@@ -94,10 +94,10 @@ def test_readme_separates_default_and_paper_reproduction_assets():
     assert "python train.py" not in readme
     assert "scripts/preprocess_esm.py" not in readme
     assert "protcross-predict" not in readme
-    assert "default `0.1.2` checkpoint" in readme
+    assert "`default`, `latest`, `0.1.2`" in readme
     assert "0.1.0" in readme
     assert "0.1.1-paper" in readme
     assert "PDBbind" in readme
     assert "best-epoch=59.ckpt" in readme
     assert "python reproduction/legacy/run_Predict_ProtCross.py" in readme
-    assert "was not evaluated in that paper workflow" in readme
+    assert "published PDBbind v2020 workflow" in readme

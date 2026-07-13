@@ -470,6 +470,74 @@ def test_single_prediction_uses_desktop_output_package(tmp_path, monkeypatch):
     assert [residue["residue_id"] for residue in result["top_pocket_residues"]] == ["A_10", "A_11"]
 
 
+def test_existing_result_package_can_be_reopened(tmp_path, monkeypatch):
+    backend, input_pdb, _ = _ready_backend(tmp_path, monkeypatch)
+    predicted = backend.predict_single(input_pdb, output_dir=tmp_path / "results")
+
+    reopened = backend.open_result(predicted["output_files"]["summary_json"])
+
+    assert reopened["ok"] is True
+    assert reopened["summary"]["schema_version"] == "protcross-summary-v2"
+    assert reopened["pockets"]["schema_version"] == "protcross-pocket-v2"
+    assert reopened["output_files"] == predicted["output_files"]
+    assert [residue["residue_id"] for residue in reopened["top_pocket_residues"]] == ["A_10", "A_11"]
+    assert backend.readable_output_file(reopened["output_files"]["structure"]).exists()
+
+
+def test_moved_result_package_relocates_historical_absolute_paths(tmp_path, monkeypatch):
+    backend, input_path, _ = _ready_backend(tmp_path / "desktop", monkeypatch)
+    predicted = backend.predict_single(input_path)
+    original_dir = Path(predicted["output_files"]["summary_json"]).parent
+    moved_dir = tmp_path / "moved-result"
+    original_dir.rename(moved_dir)
+
+    reopened = backend.open_result(moved_dir / Path(predicted["output_files"]["summary_json"]).name)
+
+    assert Path(reopened["output_files"]["structure"]).parent == moved_dir
+    assert Path(reopened["output_files"]["pockets_json"]).parent == moved_dir
+    assert Path(reopened["output_files"]["summary_json"]).parent == moved_dir
+
+
+def test_open_result_resolves_nested_relative_paths_from_summary(tmp_path):
+    package = tmp_path / "package"
+    members = package / "members"
+    members.mkdir(parents=True)
+    structure = members / "input.protcross.pdb"
+    pockets = members / "input.protcross.pockets.json"
+    summary = package / "input.protcross.summary.json"
+    structure.write_text("HEADER    TEST\n", encoding="utf-8")
+    pockets.write_text(
+        json.dumps({"schema_version": "protcross-pocket-v2", "clustered_pockets": []}),
+        encoding="utf-8",
+    )
+    summary.write_text(
+        json.dumps(
+            {
+                "schema_version": "protcross-summary-v2",
+                "output_files": {
+                    "structure": "members/input.protcross.pdb",
+                    "pockets_json": "members/input.protcross.pockets.json",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    reopened = DesktopBackend(root=tmp_path / "desktop").open_result(summary)
+
+    assert Path(reopened["output_files"]["structure"]) == structure.resolve()
+    assert Path(reopened["output_files"]["pockets_json"]) == pockets.resolve()
+
+
+def test_open_result_rejects_unrelated_json(tmp_path):
+    backend = DesktopBackend(root=tmp_path)
+    unrelated = tmp_path / "unrelated.json"
+    unrelated.write_text('{"schema_version": "other-v1"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="supported ProtCross summary"):
+        backend.open_result(unrelated)
+
+
 def test_prediction_validates_input_before_asset_readiness(tmp_path):
     backend = DesktopBackend(root=tmp_path)
 
@@ -532,6 +600,49 @@ def test_batch_prediction_reuses_one_predictor(tmp_path, monkeypatch):
     detail = backend.batch_item_result(job["id"], status["items"][0]["input_structure"])
     assert [residue["residue_id"] for residue in detail["top_pocket_residues"]] == ["A_10", "A_11"]
     assert detail["pockets"]["schema_version"] == "protcross-pocket-v2"
+
+
+def test_batch_prediction_uses_bounded_predict_many_when_supported(tmp_path, monkeypatch):
+    batch_calls = []
+
+    class BatchPredictor(FakePredictor):
+        def predict_many(self, structures, **kwargs):
+            batch_calls.append((list(structures), kwargs))
+            results = []
+            for structure, paths in zip(structures, kwargs["output_paths"]):
+                results.append(
+                    self.predict(
+                        structure,
+                        output_pdb=paths["structure"],
+                        scores_tsv=paths["scores_tsv"],
+                        pocket_json=paths["pockets_json"],
+                        summary_json=paths["summary_json"],
+                    )
+                )
+            return results
+
+    backend, input_pdb, _ = _ready_backend(
+        tmp_path,
+        monkeypatch,
+        predictor_factory=lambda **kwargs: BatchPredictor(),
+    )
+    second = tmp_path / "second.pdb"
+    second.write_text(MINIMAL_PDB, encoding="utf-8")
+
+    job = backend.submit_batch([input_pdb, second], output_dir=tmp_path / "batch")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        status = backend.batch_status(job["id"])
+        if status["status"] in {"completed", "completed_with_errors", "failed"}:
+            break
+        time.sleep(0.05)
+
+    status = backend.batch_status(job["id"])
+    assert status["status"] == "completed"
+    assert len(batch_calls) == 1
+    assert batch_calls[0][1]["batch_size"] == 2
+    assert batch_calls[0][1]["return_exceptions"] is True
+    assert len(batch_calls[0][1]["structure_inspections"]) == 2
 
 
 def test_batch_rejects_second_active_job(tmp_path, monkeypatch):
@@ -626,7 +737,7 @@ def test_export_diagnostics_redacts_proxy_credentials_and_paths(tmp_path, monkey
 
 @pytest.mark.network
 def test_desktop_server_handles_cors_options(tmp_path):
-    server = create_server("127.0.0.1", 0, root=tmp_path)
+    server = create_server("127.0.0.1", 0, root=tmp_path, token="secret-token")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -693,7 +804,11 @@ def test_desktop_server_serves_result_file_for_viewer(tmp_path):
     thread.start()
     try:
         conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
-        conn.request("GET", f"/file?path={quote(str(structure))}&token=secret-token")
+        conn.request(
+            "GET",
+            f"/file?path={quote(str(structure))}",
+            headers={"X-ProtCross-Desktop-Token": "secret-token"},
+        )
         response = conn.getresponse()
         body = response.read().decode("utf-8")
 
@@ -715,7 +830,11 @@ def test_desktop_server_rejects_unregistered_file_reads(tmp_path):
     thread.start()
     try:
         conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
-        conn.request("GET", f"/file?path={quote(str(structure))}&token=secret-token")
+        conn.request(
+            "GET",
+            f"/file?path={quote(str(structure))}",
+            headers={"X-ProtCross-Desktop-Token": "secret-token"},
+        )
         response = conn.getresponse()
         response.read()
 
@@ -744,6 +863,13 @@ def test_desktop_server_requires_token_for_stateful_api(tmp_path):
         thread.join(timeout=2)
 
 
+def test_desktop_server_refuses_to_start_without_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROTCROSS_DESKTOP_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="API token is required"):
+        create_server("127.0.0.1", 0, root=tmp_path)
+
+
 @pytest.mark.network
 def test_desktop_server_rejects_null_origin_file_access(tmp_path):
     structure = tmp_path / "result.pdb"
@@ -757,8 +883,8 @@ def test_desktop_server_rejects_null_origin_file_access(tmp_path):
         conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
         conn.request(
             "GET",
-            f"/file?path={quote(str(structure))}&token=secret-token",
-            headers={"Origin": "null"},
+            f"/file?path={quote(str(structure))}",
+            headers={"Origin": "null", "X-ProtCross-Desktop-Token": "secret-token"},
         )
         response = conn.getresponse()
         response.read()

@@ -16,14 +16,29 @@ export function configureDesktopApi(token: string, port: number): void {
   baseUrl = `http://127.0.0.1:${port}`;
 }
 
-export function desktopFileUrl(path: string): string {
-  const url = requireBaseUrl();
-  const token = desktopToken ? `&token=${encodeURIComponent(desktopToken)}` : "";
-  return `${url}/file?path=${encodeURIComponent(path)}${token}`;
+export async function fetchDesktopFile(path: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await fetch(`${requireBaseUrl()}/file?path=${encodeURIComponent(path)}`, {
+    headers: desktopToken
+      ? {
+          authorization: `Bearer ${desktopToken}`,
+          "x-protcross-desktop-token": desktopToken
+        }
+      : {},
+    signal
+  });
+  if (!response.ok) {
+    const contentType = response.headers.get("content-type") ?? "";
+    const payload = contentType.includes("application/json")
+      ? await response.json()
+      : { error: await response.text() };
+    throw new Error(payload.error ?? `File request failed: ${response.status}`);
+  }
+  return response.blob();
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${requireBaseUrl()}${path}`, {
+    ...options,
     headers: {
       "content-type": "application/json",
       ...(desktopToken
@@ -33,8 +48,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
           }
         : {}),
       ...(options.headers ?? {})
-    },
-    ...options
+    }
   });
   const contentType = response.headers.get("content-type") ?? "";
   const payload = contentType.includes("application/json")
@@ -53,8 +67,8 @@ function requireBaseUrl(): string {
   return baseUrl;
 }
 
-export function getStatus(): Promise<DesktopStatus> {
-  return request<DesktopStatus>("/status");
+export function getStatus(signal?: AbortSignal): Promise<DesktopStatus> {
+  return request<DesktopStatus>("/status", { signal });
 }
 
 export function confirmLicense(): Promise<Record<string, unknown>> {
@@ -110,8 +124,8 @@ export function downloadEsm(force = false): Promise<AssetDownloadJob> {
   });
 }
 
-export function getEsmDownload(jobId: string): Promise<AssetDownloadJob> {
-  return request<AssetDownloadJob>(`/asset-download/${jobId}`);
+export function getEsmDownload(jobId: string, signal?: AbortSignal): Promise<AssetDownloadJob> {
+  return request<AssetDownloadJob>(`/asset-download/${jobId}`, { signal });
 }
 
 export function cancelEsmDownload(jobId: string): Promise<AssetDownloadJob> {
@@ -132,6 +146,13 @@ export function runPrediction(payload: {
   return request<PredictResponse>("/predict", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export function openResult(summaryJson: string): Promise<PredictResponse> {
+  return request<PredictResponse>("/result/open", {
+    method: "POST",
+    body: JSON.stringify({ summary_json: summaryJson })
   });
 }
 
@@ -158,8 +179,8 @@ export function submitBatch(payload: {
   });
 }
 
-export function getBatch(jobId: string, limit = 500, offset = 0): Promise<BatchJob> {
-  return request<BatchJob>(`/batch/${jobId}?limit=${limit}&offset=${offset}`);
+export function getBatch(jobId: string, limit = 500, offset = 0, signal?: AbortSignal): Promise<BatchJob> {
+  return request<BatchJob>(`/batch/${jobId}?limit=${limit}&offset=${offset}`, { signal });
 }
 
 export function getBatchResult(jobId: string, inputStructure: string): Promise<BatchResultResponse> {

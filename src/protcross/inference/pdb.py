@@ -265,10 +265,12 @@ def _metadata_mmcif_keys(metadata: Mapping[str, object]) -> list[tuple[str | Non
     label_seq = _optional_str(metadata.get("label_seq_id"))
     if auth_asym and auth_seq:
         keys.append((model_num, auth_asym, auth_seq, insertion_code, resname))
-        keys.append((model_num, auth_asym, auth_seq, insertion_code, None))
+        if resname is None:
+            keys.append((model_num, auth_asym, auth_seq, insertion_code, None))
     if label_asym and label_seq:
         keys.append((model_num, label_asym, label_seq, insertion_code, resname))
-        keys.append((model_num, label_asym, label_seq, insertion_code, None))
+        if resname is None:
+            keys.append((model_num, label_asym, label_seq, insertion_code, None))
     return keys
 
 

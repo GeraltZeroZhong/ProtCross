@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import random
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from tqdm import tqdm
 
 
 PREPROCESS_MANIFEST = "protcross-preprocess-manifest.json"
+DATASET_CACHE_SCHEMA = "protcross-dataset-cache-v2"
 
 
 class EvoPointDataset(InMemoryDataset):
@@ -34,8 +36,11 @@ class EvoPointDataset(InMemoryDataset):
         self.require_labels = require_labels
         self.require_positive_labels = require_positive_labels
         self.split_seed = split_seed
-        super().__init__(str(root))
+        # Reject an interrupted preprocessing run before PyG can build and
+        # persist a cache from its partial output directory.
+        self.root = str(root)
         self._validate_preprocess_manifest()
+        super().__init__(str(root))
 
         if not os.path.exists(self.processed_paths[0]):
             self.process()
@@ -47,8 +52,17 @@ class EvoPointDataset(InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        suffix = "" if self.require_labels and self.require_positive_labels else "_all"
-        return [f"data_cache_{self.split}{suffix}.pt", f"data_cache_{self.split}{suffix}.manifest.json"]
+        if self.require_labels and self.require_positive_labels:
+            filter_suffix = ""
+        elif self.require_labels:
+            filter_suffix = "_labeled"
+        elif self.require_positive_labels:
+            filter_suffix = "_positive"
+        else:
+            filter_suffix = "_all"
+        seed_suffix = "" if self.split_seed == 42 else f"_seed{self.split_seed}"
+        stem = f"data_cache_{self.split}{filter_suffix}{seed_suffix}"
+        return [f"{stem}.pt", f"{stem}.manifest.json"]
 
     def _augment(self, pos: torch.Tensor) -> torch.Tensor:
         theta = np.random.uniform(0, 2 * np.pi)
@@ -88,7 +102,13 @@ class EvoPointDataset(InMemoryDataset):
             )
 
         data, slices = self.collate(data_list)
-        torch.save((data, slices), self.processed_paths[0])
+        cache_path = Path(self.processed_paths[0])
+        temporary_path = cache_path.with_name(f".{cache_path.name}.{uuid.uuid4().hex}.part")
+        try:
+            torch.save((data, slices), temporary_path)
+            temporary_path.replace(cache_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
         self._write_cache_manifest(raw_files)
         print(f"   - Final Valid Samples: {len(data_list)} / {len(raw_files)}")
         print(f"   - Cache saved to: {self.processed_paths[0]}")
@@ -102,11 +122,15 @@ class EvoPointDataset(InMemoryDataset):
         rng.shuffle(raw_files)
 
         num_files = len(raw_files)
-        if num_files < 10:
-            return raw_files
-
-        train_end = int(num_files * 0.8)
-        val_end = int(num_files * 0.9)
+        train_count = max(1, int(num_files * 0.8)) if num_files else 0
+        if num_files >= 3:
+            train_count = min(train_count, num_files - 2)
+        elif num_files == 2:
+            train_count = 1
+        remaining = num_files - train_count
+        val_count = min(max(1, int(num_files * 0.1)), remaining - 1) if remaining >= 2 else remaining
+        train_end = train_count
+        val_end = train_count + val_count
 
         if self.split == "train":
             return raw_files[:train_end]
@@ -124,6 +148,15 @@ class EvoPointDataset(InMemoryDataset):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             return True
+        expected_config = {
+            "schema_version": DATASET_CACHE_SCHEMA,
+            "split": self.split,
+            "require_labels": self.require_labels,
+            "require_positive_labels": self.require_positive_labels,
+            "split_seed": self.split_seed,
+        }
+        if any(manifest.get(key) != value for key, value in expected_config.items()):
+            return True
         return manifest.get("signature") != self._cache_signature(self._split_files())
 
     def _validate_preprocess_manifest(self) -> None:
@@ -134,6 +167,11 @@ class EvoPointDataset(InMemoryDataset):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise RuntimeError(f"Invalid preprocessing manifest: {manifest_path}") from exc
+        if manifest.get("complete") is False:
+            raise RuntimeError(
+                f"Preprocessing manifest is incomplete: {manifest_path}. "
+                "Re-run protcross preprocess successfully before loading this dataset."
+            )
         if manifest.get("append_mode"):
             return
         if "produced_outputs" in manifest:
@@ -153,20 +191,30 @@ class EvoPointDataset(InMemoryDataset):
 
     def _write_cache_manifest(self, raw_files: list[str]) -> None:
         manifest = {
-            "schema_version": "protcross-dataset-cache-v1",
+            "schema_version": DATASET_CACHE_SCHEMA,
             "split": self.split,
             "require_labels": self.require_labels,
             "require_positive_labels": self.require_positive_labels,
             "split_seed": self.split_seed,
             "signature": self._cache_signature(raw_files),
         }
-        Path(self.processed_paths[1]).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest_path = Path(self.processed_paths[1])
+        temporary_path = manifest_path.with_name(f".{manifest_path.name}.{uuid.uuid4().hex}.part")
+        try:
+            temporary_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            temporary_path.replace(manifest_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     def _cache_signature(self, raw_files: list[str]) -> dict:
         all_files = sorted(glob.glob(os.path.join(self.root, "*.pt")))
+        signatures_by_path = {
+            os.path.abspath(path): self._file_signature(path)
+            for path in dict.fromkeys([*all_files, *raw_files])
+        }
         return {
-            "all_files": [self._file_signature(path) for path in all_files],
-            "split_files": [self._file_signature(path) for path in raw_files],
+            "all_files": [signatures_by_path[os.path.abspath(path)] for path in all_files],
+            "split_files": [signatures_by_path[os.path.abspath(path)] for path in raw_files],
         }
 
     @staticmethod
@@ -193,24 +241,50 @@ class EvoPointDataset(InMemoryDataset):
             if "x" not in raw or "pos" not in raw:
                 return None
 
+            x_tensor = self._to_tensor(raw["x"])
+            pos_tensor = self._to_tensor(raw["pos"])
+            if pos_tensor.ndim != 2 or pos_tensor.shape[1] != 3:
+                raise ValueError(f"pos must have shape (N, 3); got {tuple(pos_tensor.shape)}")
+            residue_count = int(pos_tensor.shape[0])
+            if residue_count < 1:
+                raise ValueError("pos must contain at least one residue")
+            if x_tensor.ndim != 2 or x_tensor.shape[0] != residue_count or x_tensor.shape[1] < 1:
+                raise ValueError(
+                    f"x must have shape ({residue_count}, D) with D >= 1; got {tuple(x_tensor.shape)}"
+                )
+            if not torch.isfinite(pos_tensor).all() or not torch.isfinite(x_tensor).all():
+                raise ValueError("x and pos must contain only finite values")
+
             y = raw.get("y")
             if y is None:
                 if self.require_labels:
                     return None
-                y = torch.zeros(len(raw["pos"]), dtype=torch.float)
+                y = torch.zeros(residue_count, dtype=torch.float)
 
             y_tensor = self._to_tensor(y)
+            if y_tensor.ndim != 1 or y_tensor.shape[0] != residue_count:
+                raise ValueError(f"y must have shape ({residue_count},); got {tuple(y_tensor.shape)}")
+            if not torch.isfinite(y_tensor).all():
+                raise ValueError("y must contain only finite values")
             if self.require_positive_labels and y_tensor.sum() == 0:
                 return None
 
             plddt = raw.get("plddt")
             if plddt is None:
-                plddt = torch.ones(len(raw["pos"]), dtype=torch.float)
+                plddt = torch.ones(residue_count, dtype=torch.float)
+            plddt_tensor = self._to_tensor(plddt)
+            if plddt_tensor.shape not in {(residue_count,), (residue_count, 1)}:
+                raise ValueError(
+                    f"plddt must have shape ({residue_count},) or ({residue_count}, 1); "
+                    f"got {tuple(plddt_tensor.shape)}"
+                )
+            if not torch.isfinite(plddt_tensor).all():
+                raise ValueError("plddt must contain only finite values")
 
             return Data(
-                x=self._to_tensor(raw["x"]),
-                pos=self._to_tensor(raw["pos"]),
-                plddt=self._to_tensor(plddt),
+                x=x_tensor,
+                pos=pos_tensor,
+                plddt=plddt_tensor,
                 y=y_tensor,
                 protein_id=Path(file_path).stem,
             )

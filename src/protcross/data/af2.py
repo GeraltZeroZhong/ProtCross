@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ import requests
 
 PDB_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{4}$")
 AF2_MODEL_VERSION = "model_v6"
+MappingValue = str | list[str]
 
 
 @dataclass
@@ -44,10 +46,10 @@ class AF2Downloader:
         self.download_locks: dict[Path, threading.Lock] = {}
         existing_mapping = self.load_mapping_file(config.mapping_file) if config.mapping_file.exists() else {}
         initial_mapping = self.load_mapping_file(config.initial_mapping_file) if config.initial_mapping_file else {}
-        self.preloaded_mapping: dict[str, str] = {**initial_mapping, **existing_mapping}
-        self.mapping: dict[str, str] = dict(existing_mapping) if config.append else {}
+        self.preloaded_mapping: dict[str, MappingValue] = {**initial_mapping, **existing_mapping}
+        self.mapping: dict[str, MappingValue] = dict(existing_mapping) if config.append else {}
 
-    def run(self) -> dict[str, str]:
+    def run(self) -> dict[str, MappingValue]:
         pdb_ids = self.collect_pdb_ids()
 
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -80,7 +82,13 @@ class AF2Downloader:
                 "Check network access, input IDs, or pass --allow-empty-downloads."
             )
         if not self.config.append:
-            self._quarantine_orphan_structures(set(self.mapping.values()))
+            self._quarantine_orphan_structures(
+                {
+                    accession
+                    for mapping_value in self.mapping.values()
+                    for accession in self._normalize_accessions(mapping_value)
+                }
+            )
         return self.mapping
 
     def collect_pdb_ids(self) -> list[str]:
@@ -125,17 +133,22 @@ class AF2Downloader:
         return self.process_pdb_id(pdb_file.stem.upper())
 
     def process_pdb_id(self, pdb_id: str) -> bool:
-        preloaded_accession = self.preloaded_mapping.get(pdb_id)
-        uniprot_ids = [preloaded_accession] if preloaded_accession else self.fetch_uniprot_ids(pdb_id)
+        preloaded_accessions = self._normalize_accessions(self.preloaded_mapping.get(pdb_id))
+        uniprot_ids = preloaded_accessions or self.fetch_uniprot_ids(pdb_id)
+        uniprot_ids = list(dict.fromkeys(accession for accession in uniprot_ids if accession))
         if not uniprot_ids:
             self.safe_print(f"[skip] No UniProt accession found for PDB {pdb_id}.")
             return False
 
+        downloaded = []
         for accession in uniprot_ids:
             if self.download_structure(accession):
-                with self.mapping_lock:
-                    self.mapping[pdb_id] = accession
-                return True
+                downloaded.append(accession)
+
+        if downloaded:
+            with self.mapping_lock:
+                self.mapping[pdb_id] = self._compact_accessions(downloaded)
+            return True
 
         self.safe_print(f"[skip] All AlphaFold candidates failed for PDB {pdb_id}: {uniprot_ids}")
         return False
@@ -196,10 +209,17 @@ class AF2Downloader:
         print(f"Writing PDB-to-UniProt mapping to {self.config.mapping_file}...")
         self.config.mapping_file.parent.mkdir(parents=True, exist_ok=True)
         mapping = dict(sorted(self.mapping.items()))
-        self.config.mapping_file.write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
+        temporary_path = self.config.mapping_file.with_name(
+            f".{self.config.mapping_file.name}.{uuid.uuid4().hex}.part"
+        )
+        try:
+            temporary_path.write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
+            temporary_path.replace(self.config.mapping_file)
+        finally:
+            temporary_path.unlink(missing_ok=True)
         print(f"Saved {len(self.mapping)} mapping records.")
 
-    def load_mapping_file(self, mapping_file: Path) -> dict[str, str]:
+    def load_mapping_file(self, mapping_file: Path) -> dict[str, MappingValue]:
         if not mapping_file.exists():
             raise FileNotFoundError(f"Mapping file not found: {mapping_file}")
 
@@ -207,13 +227,31 @@ class AF2Downloader:
         if not isinstance(data, dict):
             raise ValueError(f"Mapping file must contain a JSON object: {mapping_file}")
 
-        mapping: dict[str, str] = {}
-        for pdb_id, accession in data.items():
+        mapping: dict[str, MappingValue] = {}
+        for pdb_id, value in data.items():
             normalized_pdb_id = str(pdb_id).strip().upper()
-            normalized_accession = str(accession).strip()
-            if PDB_ID_PATTERN.match(normalized_pdb_id) and normalized_accession:
-                mapping[normalized_pdb_id] = normalized_accession
+            accessions = self._normalize_accessions(value)
+            if PDB_ID_PATTERN.match(normalized_pdb_id) and accessions:
+                mapping[normalized_pdb_id] = self._compact_accessions(accessions)
         return mapping
+
+    @staticmethod
+    def _normalize_accessions(value: object) -> list[str]:
+        if value is None:
+            return []
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        normalized = []
+        for accession in values:
+            if not isinstance(accession, (str, int)):
+                continue
+            accession_text = str(accession).strip()
+            if accession_text and accession_text not in normalized:
+                normalized.append(accession_text)
+        return normalized
+
+    @staticmethod
+    def _compact_accessions(accessions: list[str]) -> MappingValue:
+        return accessions[0] if len(accessions) == 1 else list(accessions)
 
     def safe_print(self, message: str) -> None:
         with self.print_lock:
@@ -261,7 +299,13 @@ class AF2Downloader:
             "size_bytes": len(content),
             "sha256": self._sha256_bytes(content),
         }
-        self._manifest_path(output_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest_path = self._manifest_path(output_path)
+        temporary_path = manifest_path.with_name(f".{manifest_path.name}.{uuid.uuid4().hex}.part")
+        try:
+            temporary_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            temporary_path.replace(manifest_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     def _quarantine_orphan_structures(self, active_uniprot_ids: set[str]) -> None:
         stale: list[Path] = []
@@ -291,5 +335,5 @@ class AF2Downloader:
         return hashlib.sha256(content).hexdigest()
 
 
-def download_af2_structures(config: AF2DownloadConfig) -> dict[str, str]:
+def download_af2_structures(config: AF2DownloadConfig) -> dict[str, MappingValue]:
     return AF2Downloader(config).run()

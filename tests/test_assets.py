@@ -107,7 +107,7 @@ def test_setup_assets_writes_manifest_without_network(tmp_path, monkeypatch):
 
     manifest = json.loads((output_dir / ASSET_MANIFEST_FILENAME).read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "protcross-assets-v1"
-    assert manifest["package_version"] == "0.2.1"
+    assert manifest["package_version"] == "0.2.2"
     assert manifest["asset_version"] == "0.1.2"
     assert manifest["asset_bundle_version"] == "0.1.2"
     assert manifest["checkpoint_filename"] == DEFAULT_CHECKPOINT_FILENAME
