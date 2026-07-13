@@ -320,7 +320,7 @@ jobs:
           cat > release-notes.txt <<'NOTES'
           # ProtCross Desktop 0.2.2
 
-          **Unsigned pre-release testing build.** These Windows and macOS desktop artifacts exercise the 0.2.2 desktop workflow, but they are not code-signed or notarized. Windows SmartScreen and macOS Gatekeeper may block or warn about them. Do not treat these artifacts as production installers.
+          Windows and macOS desktop packages are currently unsigned. Windows SmartScreen and macOS Gatekeeper may display a warning during installation.
 
           ## Downloads
 
@@ -347,14 +347,13 @@ jobs:
               --target "$GITHUB_SHA" \
               --title "ProtCross Desktop ${DESKTOP_VERSION}" \
               --notes-file release-notes.txt \
-              --prerelease \
-              --latest=false
+              --latest
           else
             gh release create "$RELEASE_TAG" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "ProtCross Desktop ${DESKTOP_VERSION}" \
               --notes-file release-notes.txt \
-              --prerelease
+              --latest
             exit 0
           fi
           gh release upload "$RELEASE_TAG" release-assets/* --clobber
