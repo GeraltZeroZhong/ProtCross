@@ -103,17 +103,25 @@ export interface PredictResponse {
   ok: boolean;
   summary: SummaryJson;
   pockets?: PocketJson;
+  scores?: ResidueSummary[];
   top_pocket_residues?: ResidueSummary[];
   output_files: Record<string, string>;
 }
 
 export interface BatchResultResponse extends PredictResponse {
   input_structure: string;
+  chain_id?: string | null;
 }
 
 export interface SummaryJson {
   schema_version: string;
+  protcross_version?: string;
+  asset_version?: string;
+  geometry_backend?: string;
   input_structure?: string;
+  input_file?: { sha256?: string; [key: string]: unknown };
+  threshold?: number;
+  cluster_cutoff?: number;
   top_pocket?: PocketSummary | null;
   aggregate_pocket?: PocketSummary | null;
   top_residues?: ResidueSummary[];
@@ -132,6 +140,7 @@ export interface PocketSummary {
 
 export interface ResidueSummary {
   residue_id: string;
+  residue_key?: string;
   score?: number;
   probability: number;
   chain_id?: string;
@@ -142,11 +151,21 @@ export interface ResidueSummary {
   label_seq_id?: string | number;
   insertion_code?: string;
   cluster_id?: number | null;
+  x?: number | null;
+  y?: number | null;
+  z?: number | null;
+  rank_global?: number;
+  rank_within_chain?: number;
+  is_binding?: number | boolean;
+  is_scored?: number | boolean;
   [key: string]: unknown;
 }
 
 export interface PocketJson {
   schema_version: string;
+  threshold?: number;
+  cluster_cutoff?: number;
+  selected_residue_count?: number;
   aggregate_pocket?: PocketDetail | null;
   clustered_pockets: PocketDetail[];
   [key: string]: unknown;
@@ -160,6 +179,16 @@ export interface PocketDetail extends PocketSummary {
 export interface BatchJob {
   id: string;
   status: string;
+  created_at?: number;
+  completed_at?: number | null;
+  retry_of?: string | null;
+  settings?: {
+    output_dir?: string | null;
+    threshold: number;
+    pocket_cluster_cutoff: number;
+    allow_truncation: boolean;
+    device?: string | null;
+  };
   completed: number;
   failed: number;
   cancel_requested: boolean;
@@ -172,6 +201,7 @@ export interface BatchJob {
 
 export interface BatchItem {
   input_structure: string;
+  chain_id?: string | null;
   status: string;
   output_dir?: string | null;
   output_files?: Record<string, string>;

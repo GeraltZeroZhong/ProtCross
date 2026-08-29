@@ -16,6 +16,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
+DIAGNOSTIC_LOG_TEXT_LIMIT = 32_000
+DIAGNOSTIC_LOG_READ_LIMIT = DIAGNOSTIC_LOG_TEXT_LIMIT * 2
+
+
 IMPORT_CHECK = r"""
 import json
 from importlib import metadata
@@ -150,6 +154,7 @@ def export_diagnostics(
     manifest: dict[str, Any],
     env_results: list[dict[str, Any]],
     extra: dict[str, Any] | None = None,
+    logs_dir: str | Path | None = None,
 ) -> Path:
     output_zip = Path(output_zip)
     output_zip.parent.mkdir(parents=True, exist_ok=True)
@@ -162,12 +167,67 @@ def export_diagnostics(
     })
     with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("diagnostics.json", json.dumps(payload, indent=2))
+        included_logs = _sanitized_log_files(logs_dir)
+        for name, content in included_logs:
+            archive.writestr(f"logs/{name}", content)
         archive.writestr(
             "README.txt",
             "This diagnostic archive is generated locally by ProtCross Desktop. "
-            "Review diagnostics.json before attaching it to a GitHub issue.\n",
+            "Review diagnostics.json and any sanitized log excerpts before attaching it to a GitHub issue.\n"
+            f"Included log excerpts: {', '.join(name for name, _ in included_logs) or 'none'}\n",
         )
     return output_zip
+
+
+def _sanitized_log_files(logs_dir: str | Path | None) -> list[tuple[str, str]]:
+    if logs_dir is None:
+        return []
+    directory = Path(logs_dir)
+    if not directory.is_dir():
+        return []
+    local_root = str(directory.parent)
+    logs = []
+    for path in sorted(directory.glob("*.log")):
+        if not path.is_file():
+            continue
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size > DIAGNOSTIC_LOG_READ_LIMIT:
+                handle.seek(-DIAGNOSTIC_LOG_READ_LIMIT, os.SEEK_END)
+            else:
+                handle.seek(0)
+            content = handle.read().decode("utf-8", errors="replace")
+        logs.append(
+            (
+                path.name,
+                _sanitize_log_text(
+                    content,
+                    local_root=local_root,
+                    earlier_output_omitted=size > DIAGNOSTIC_LOG_READ_LIMIT,
+                ),
+            ),
+        )
+    return logs
+
+
+def _sanitize_log_text(
+    value: str,
+    *,
+    local_root: str,
+    earlier_output_omitted: bool = False,
+) -> str:
+    sanitized = _redact_proxy_credentials(value)
+    if local_root:
+        sanitized = sanitized.replace(local_root, "<local-path>")
+    sanitized = _redact_path(sanitized)
+    sanitized = _redact_secret_words(sanitized)
+    if len(sanitized) <= DIAGNOSTIC_LOG_TEXT_LIMIT and not earlier_output_omitted:
+        return sanitized
+    return (
+        "[earlier log output truncated by ProtCross Desktop diagnostics]\n"
+        + sanitized[-DIAGNOSTIC_LOG_TEXT_LIMIT:]
+    )
 
 
 def sanitize_diagnostics_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "protcross"
-version = "0.2.2"
+version = "0.2.3"
 description = "Domain-adaptive protein point-cloud binding-site prediction."
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
@@ -43,7 +43,7 @@ dev = ["pytest>=8,<10", "build>=1.2,<1.5", "twine>=5,<7", "ruff>=0.11,<1"]
 
 [project.urls]
 Publication = "https://doi.org/10.1021/acs.jcim.5c03224"
-Documentation = "https://github.com/GeraltZeroZhong/ProtCross/blob/v0.2.2/README.md"
+Documentation = "https://github.com/GeraltZeroZhong/ProtCross/blob/v0.2.3/README.md"
 Repository = "https://github.com/GeraltZeroZhong/ProtCross"
 Issues = "https://github.com/GeraltZeroZhong/ProtCross/issues"
 

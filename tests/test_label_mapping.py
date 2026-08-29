@@ -5,6 +5,7 @@ import torch
 from protcross.data.label_mapping import (
     _index_af2_files,
     _reverse_pdb_uniprot_mapping,
+    _sequence_for_af2_data,
     load_processed_pdb_labels,
     sequence_based_mapping,
     sequence_from_processed_or_raw,
@@ -123,6 +124,24 @@ def test_sequence_from_processed_or_raw_prefers_truncated_processed_sequence():
 
     assert sequence_from_processed_or_raw(af2_data, "ACDEFGHIK") == "ACDE"
     assert sequence_from_processed_or_raw({"pos": torch.zeros((4, 3))}, "ACDEFGHIK") == "ACDE"
+
+
+def test_af2_processed_sequence_avoids_reparsing_raw_structure(monkeypatch):
+    import protcross.data.label_mapping as label_mapping
+
+    monkeypatch.setattr(
+        label_mapping,
+        "parse_sequence",
+        lambda *args: (_ for _ in ()).throw(AssertionError("raw structure should not be parsed")),
+    )
+
+    sequence = _sequence_for_af2_data(
+        {"pos": torch.zeros((4, 3)), "sequence": "ACDE"},
+        object(),
+        "unused.pdb",
+    )
+
+    assert sequence == "ACDE"
 
 
 def test_load_processed_pdb_labels_uses_processed_payload_and_provenance(tmp_path):

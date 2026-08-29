@@ -215,6 +215,7 @@ def test_frontend_release_build_prepares_generated_inputs():
 
 def test_readme_keeps_quick_start_short_and_desktop_details_in_installation():
     readme = Path("README.md").read_text(encoding="utf-8")
+    version = _core_version()
     quick_start = readme.split("## Quick start", 1)[1].split("## Contents", 1)[0]
     desktop = readme.split("## Desktop application", 1)[1].split(
         "## Training and development", 1
@@ -224,11 +225,11 @@ def test_readme_keeps_quick_start_short_and_desktop_details_in_installation():
     assert "protcross inspect input.pdb" in quick_start
     assert "protcross setup-assets --accept-esm-license" in quick_start
     assert "protcross predict input.pdb" in quick_start
-    assert "ProtCross_Desktop_0.2.2_x64-setup.exe" not in quick_start
-    assert "ProtCross_Desktop_0.2.2_macos-aarch64.dmg" not in quick_start
+    assert f"ProtCross_Desktop_{version}_x64-setup.exe" not in quick_start
+    assert f"ProtCross_Desktop_{version}_macos-aarch64.dmg" not in quick_start
 
-    assert "ProtCross_Desktop_0.2.2_x64-setup.exe" in desktop
-    assert "ProtCross_Desktop_0.2.2_macos-aarch64.dmg" in desktop
+    assert f"ProtCross_Desktop_{version}_x64-setup.exe" in desktop
+    assert f"ProtCross_Desktop_{version}_macos-aarch64.dmg" in desktop
     assert "Tauri 2" in desktop
     assert "Mol*" in desktop
 
@@ -533,10 +534,12 @@ def _copy_version_fixture(root: Path) -> Path:
     fixture = root / "version-fixture"
     relative_files = (
         "pyproject.toml",
+        "README.md",
         "src/protcross/__init__.py",
         "desktop/backend/pyproject.toml",
         "desktop/frontend/package.json",
         "desktop/frontend/package-lock.json",
+        "desktop/frontend/src/App.tsx",
         "desktop/src-tauri/Cargo.toml",
         "desktop/src-tauri/Cargo.lock",
         "desktop/src-tauri/tauri.conf.json",

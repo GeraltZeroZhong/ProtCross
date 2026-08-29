@@ -307,10 +307,25 @@ def setup_assets(
 
     print(f"Installing ProtCross assets into {output_dir}")
     print("Note: ESM-C weights are distributed by EvolutionaryScale under their Hugging Face model terms.")
-    if not skip_esm and _asset_needs_download(specs[0], output_dir / specs[0].filename, force=force, verify=verify):
+    known_sha256: dict[str, str] = {}
+    esm_path = output_dir / specs[0].filename
+    esm_needs_download = not skip_esm and (force or not esm_path.exists())
+    if not skip_esm and not esm_needs_download and verify and specs[0].sha256:
+        known_sha256[specs[0].filename] = sha256_file(esm_path)
+        esm_needs_download = known_sha256[specs[0].filename] != specs[0].sha256
+    if esm_needs_download:
         _require_esm_license_acceptance(license_accepted)
+    resolved_sha256: dict[str, str] = {}
     for spec in download_specs:
-        download_asset(spec, output_dir / spec.filename, force=force, verify=verify)
+        actual_sha256 = download_asset(
+            spec,
+            output_dir / spec.filename,
+            force=force,
+            verify=verify,
+            known_sha256=known_sha256.get(spec.filename),
+        )
+        if actual_sha256:
+            resolved_sha256[spec.filename] = actual_sha256
 
     write_env_file(output_dir, bundle=bundle, include_esm=(output_dir / bundle.esm_filename).exists())
     write_asset_manifest(
@@ -320,6 +335,7 @@ def setup_assets(
         include_esm=(output_dir / bundle.esm_filename).exists(),
         esm_license_accepted=license_accepted,
         previous_manifest=existing_manifest,
+        actual_sha256_by_filename=resolved_sha256,
     )
     print("\nAsset setup complete.")
     print("Use with: protcross predict input.pdb --out-dir protcross-results")
@@ -336,17 +352,19 @@ def download_asset(
     verify: bool = True,
     progress_callback: Callable[[int, int | None], None] | None = None,
     cancel_event: Event | None = None,
-) -> None:
+    known_sha256: str | None = None,
+) -> str | None:
     """Download and verify an asset, resuming a retained ``.part`` file when possible."""
     output_path = Path(output_path).expanduser()
     with _asset_download_lock(output_path):
-        _download_asset_locked(
+        return _download_asset_locked(
             spec,
             output_path,
             force=force,
             verify=verify,
             progress_callback=progress_callback,
             cancel_event=cancel_event,
+            known_sha256=known_sha256,
         )
 
 
@@ -358,17 +376,21 @@ def _download_asset_locked(
     verify: bool,
     progress_callback: Callable[[int, int | None], None] | None,
     cancel_event: Event | None,
-) -> None:
+    known_sha256: str | None,
+) -> str | None:
     from tqdm import tqdm
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists() and not force:
-        if not verify or not spec.sha256 or sha256_file(output_path) == spec.sha256:
+        actual_sha256 = known_sha256
+        if verify and spec.sha256 and actual_sha256 is None:
+            actual_sha256 = sha256_file(output_path)
+        if not verify or not spec.sha256 or actual_sha256 == spec.sha256:
             if progress_callback:
                 size = output_path.stat().st_size
                 progress_callback(size, spec.size_bytes or size)
             print(f"[skip] {spec.name}: {output_path}")
-            return
+            return actual_sha256
         print(f"[warn] Existing file failed SHA256 verification and will be replaced: {output_path}")
 
     tmp_path = output_path.with_suffix(output_path.suffix + ".part")
@@ -396,7 +418,7 @@ def _download_asset_locked(
             if progress_callback:
                 progress_callback(resume_from, spec.size_bytes or resume_from)
             print(f"[ok] {output_path}")
-            return
+            return spec.sha256 if complete_by_hash else None
         tmp_path.unlink()
         resume_from = 0
     _require_download_space(output_path.parent, spec.size_bytes, already_downloaded=resume_from)
@@ -486,18 +508,20 @@ def _download_asset_locked(
             f"partial data retained at {tmp_path}. Rerun the same command to resume."
         )
 
+    actual_sha256 = None
     if verify and spec.sha256:
-        actual = sha256_file(tmp_path)
-        if actual != spec.sha256:
+        actual_sha256 = sha256_file(tmp_path)
+        if actual_sha256 != spec.sha256:
             tmp_path.unlink(missing_ok=True)
             raise RuntimeError(
-                f"SHA256 mismatch for {spec.filename}: expected {spec.sha256}, got {actual}"
+                f"SHA256 mismatch for {spec.filename}: expected {spec.sha256}, got {actual_sha256}"
             )
 
     tmp_path.replace(output_path)
     if progress_callback:
         progress_callback(output_path.stat().st_size, total)
     print(f"[ok] {output_path}")
+    return actual_sha256
 
 
 def _content_range_start(value: str | None) -> int | None:
@@ -603,13 +627,18 @@ def write_asset_manifest(
     include_esm: bool = True,
     esm_license_accepted: bool = False,
     previous_manifest: dict | None = None,
+    actual_sha256_by_filename: dict[str, str] | None = None,
 ) -> None:
+    actual_sha256_by_filename = actual_sha256_by_filename or {}
     files = {}
     for spec in specs:
         if spec.filename == bundle.esm_filename and not include_esm:
             continue
         path = output_dir / spec.filename
-        actual_sha256 = sha256_file(path) if path.exists() else None
+        actual_sha256 = (
+            actual_sha256_by_filename.get(spec.filename)
+            or (sha256_file(path) if path.exists() else None)
+        )
         size_bytes = path.stat().st_size if path.exists() else None
         mtime_ns = path.stat().st_mtime_ns if path.exists() else None
         verified = None
@@ -871,6 +900,7 @@ def resolve_prediction_assets(
 
     _raise_missing_user_assets(ckpt, esm, pca, sources, source_labels)
     fill_from_assets(require_exists=True)
+    _seed_hash_cache_from_manifest(assets, sources, hash_cache)
     mismatches = _managed_asset_mismatches(
         assets,
         ckpt,
@@ -893,6 +923,7 @@ def resolve_prediction_assets(
         assets = PredictorAssets.from_dir(output_dir, asset_version=asset_version)
         fill_from_assets(require_exists=True)
         hash_cache.clear()
+        _seed_hash_cache_from_manifest(assets, sources, hash_cache)
         mismatches = _managed_asset_mismatches(
             assets,
             ckpt,
@@ -982,6 +1013,52 @@ def resolve_prediction_assets(
         asset_version=resolved_asset_version,
         asset_metadata=asset_metadata,
     )
+
+
+def _seed_hash_cache_from_manifest(
+    assets: PredictorAssets,
+    sources: dict[str, str | None],
+    hash_cache: dict[Path, str],
+) -> None:
+    """Reuse verified managed hashes while the recorded files are unchanged."""
+    if not any(source == "managed" for source in sources.values()):
+        return
+    manifest = read_asset_manifest(assets.checkpoint.parent)
+    if not manifest or manifest.get("asset_version") != assets.asset_version:
+        return
+
+    bundle = get_asset_bundle(assets.asset_version)
+    specs = {
+        "checkpoint": next(spec for spec in bundle.assets if spec.filename == bundle.checkpoint_filename),
+        "esm_weights": next(spec for spec in bundle.assets if spec.filename == bundle.esm_filename),
+        "pca": next(spec for spec in bundle.assets if spec.filename == bundle.pca_filename),
+    }
+    paths = {
+        "checkpoint": assets.checkpoint,
+        "esm_weights": assets.esm_weights,
+        "pca": assets.pca,
+    }
+    entries = {
+        str(entry.get("filename")): entry
+        for entry in (manifest.get("files") or {}).values()
+        if isinstance(entry, dict) and entry.get("filename")
+    }
+    for name, path in paths.items():
+        if sources.get(name) != "managed" or not path.exists():
+            continue
+        spec = specs[name]
+        entry = entries.get(path.name)
+        if not entry or not spec.sha256:
+            continue
+        stat = path.stat()
+        if (
+            entry.get("expected_sha256") == spec.sha256
+            and entry.get("actual_sha256") == spec.sha256
+            and entry.get("verified") is True
+            and entry.get("size_bytes") == stat.st_size
+            and entry.get("mtime_ns") == stat.st_mtime_ns
+        ):
+            hash_cache[path.expanduser().resolve()] = spec.sha256
 
 
 def _path_or_env_with_source(

@@ -48,10 +48,13 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 self._require_auth(parsed_url)
                 parts = path.strip("/").split("/")
                 if len(parts) == 3 and parts[0] == "batch" and parts[2] == "result":
-                    values = parse_qs(parsed_url.query).get("input_structure", [])
+                    query = parse_qs(parsed_url.query, keep_blank_values=True)
+                    values = query.get("input_structure", [])
                     if not values:
                         raise ValueError("Missing input_structure.")
-                    self._json(self.backend.batch_item_result(parts[1], values[0]))
+                    chain_values = query.get("chain_id", [])
+                    chain_id = chain_values[0] if chain_values else None
+                    self._json(self.backend.batch_item_result(parts[1], values[0], chain_id=chain_id))
                 elif len(parts) == 2:
                     query = parse_qs(parsed_url.query)
                     limit = _optional_int(query.get("limit", [None])[0])
@@ -102,6 +105,9 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 self._json(self.backend.inspect_input_structure(**payload))
             elif path == "/batch":
                 self._json(self.backend.submit_batch(**payload))
+            elif path.startswith("/batch/") and path.endswith("/retry"):
+                job_id = path.split("/")[-2]
+                self._json(self.backend.retry_failed_batch(job_id))
             elif path.startswith("/batch/") and path.endswith("/cancel"):
                 job_id = path.split("/")[-2]
                 self._json(self.backend.cancel_batch(job_id))

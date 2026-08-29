@@ -44,7 +44,7 @@ def backup_checkpoints(exp_id: str, seed: int, checkpoint_dir: str = "checkpoint
 def run_command(command: str, log_file: str) -> str:
     print(f"Exec: {command}")
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    output_buffer = ""
+    output_lines: list[str] = []
     args = shlex.split(command)
     with open(log_file, "w", encoding="utf-8") as file:
         process = subprocess.Popen(
@@ -61,17 +61,17 @@ def run_command(command: str, log_file: str) -> str:
             for line in process.stdout:
                 print(line, end="")
                 file.write(line)
-                output_buffer += line
+                output_lines.append(line)
             process.wait()
             if process.returncode != 0:
                 print(f"Command failed with return code {process.returncode}")
                 print("Last 5 log lines:")
-                print("   " + "\n   ".join(output_buffer.splitlines()[-5:]))
-                raise subprocess.CalledProcessError(process.returncode, args, output=output_buffer)
+                print("   " + "\n   ".join(line.rstrip("\r\n") for line in output_lines[-5:]))
+                raise subprocess.CalledProcessError(process.returncode, args, output="".join(output_lines))
         except BaseException:
             _terminate_process(process)
             raise
-    return output_buffer
+    return "".join(output_lines)
 
 
 def _terminate_process(process: subprocess.Popen) -> None:

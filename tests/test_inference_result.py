@@ -11,14 +11,12 @@ import pytest
 import torch
 
 from protcross.assets import (
-    ASSET_MANIFEST_FILENAME,
     DEFAULT_ASSET_BUNDLE,
     DEFAULT_CHECKPOINT_FILENAME,
     DEFAULT_PCA_FILENAME,
 )
 from protcross.data.esm import ESMFeatureExtractor
 from protcross.inference import PredictionResult, PredictorAssets, ProtCrossPredictor, predict_pdb
-from protcross.inference.predictor import _resolve_predict_pdb_assets
 
 
 MINIMAL_PDB = """\
@@ -104,7 +102,7 @@ def test_prediction_result_reports_weighted_pocket_center_and_clusters():
     np.testing.assert_allclose(summary["top_pocket"]["center"], [0.8, 0.0, 0.0])
 
 
-def test_prediction_result_caches_internal_derivations_and_returns_defensive_copies():
+def test_prediction_result_caches_internal_derivations_and_returns_independent_payloads():
     result = PredictionResult(
         input_pdb=Path("input.pdb"),
         residue_ids=["A_1", "A_2", "A_3"],
@@ -125,6 +123,29 @@ def test_prediction_result_caches_internal_derivations_and_returns_defensive_cop
     assert result.to_records()[0]["score"] == pytest.approx(0.9)
     assert result.to_pocket_dict()["clustered_pockets"][0]["residue_count"] == 2
     assert result.to_summary_dict()["top_residues"][0]["score"] == pytest.approx(0.9)
+
+
+def test_prediction_result_isolates_nested_metadata_from_caller_mutation():
+    assets = {"checkpoint": {"verified": True}}
+    structure = {"chains": [{"chain_id": "A"}]}
+    input_file = {"sha256": "original"}
+    result = PredictionResult(
+        input_pdb=Path("input.pdb"),
+        residue_ids=["A_1"],
+        probabilities=np.array([0.9]),
+        asset_metadata=assets,
+        structure_summary=structure,
+        input_metadata=input_file,
+    )
+
+    assets["checkpoint"]["verified"] = False
+    structure["chains"][0]["chain_id"] = "B"
+    input_file["sha256"] = "changed"
+
+    summary = result.to_summary_dict()
+    assert summary["assets"]["checkpoint"]["verified"] is True
+    assert summary["structure_summary"]["chains"][0]["chain_id"] == "A"
+    assert summary["input_file"]["sha256"] == "original"
 
 
 def test_prediction_result_invalidates_derived_caches_when_threshold_changes():
@@ -355,81 +376,6 @@ def test_predictor_assets_from_dir(tmp_path):
     assert assets.pca == tmp_path / DEFAULT_PCA_FILENAME
 
 
-def test_predict_pdb_asset_resolution_uses_assets_dir(tmp_path, monkeypatch):
-    _trust_managed_asset_hashes(monkeypatch)
-    for filename in (DEFAULT_CHECKPOINT_FILENAME, "esmc_600m_2024_12_v0.pth", DEFAULT_PCA_FILENAME):
-        (tmp_path / filename).write_bytes(b"asset")
-
-    ckpt, esm, pca = _resolve_predict_pdb_assets(None, None, None, assets_dir=tmp_path, auto_setup_assets=False)
-
-    assert ckpt == tmp_path / DEFAULT_CHECKPOINT_FILENAME
-    assert esm == tmp_path / "esmc_600m_2024_12_v0.pth"
-    assert pca == tmp_path / DEFAULT_PCA_FILENAME
-
-
-def test_predict_pdb_asset_resolution_reports_missing(tmp_path, monkeypatch):
-    for name in ("PROTCROSS_CHECKPOINT", "PROTCROSS_ESM_WEIGHTS", "PROTCROSS_PCA"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("PROTCROSS_ASSETS_DIR", str(tmp_path / "empty-assets"))
-
-    with pytest.raises(ValueError, match="Run `protcross setup-assets`"):
-        _resolve_predict_pdb_assets(None, None, None, auto_setup_assets=False)
-
-
-def test_predict_pdb_asset_resolution_auto_installs_defaults(tmp_path, monkeypatch):
-    _trust_managed_asset_hashes(monkeypatch)
-    for name in ("PROTCROSS_CHECKPOINT", "PROTCROSS_ESM_WEIGHTS", "PROTCROSS_PCA"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("PROTCROSS_ASSETS_DIR", str(tmp_path))
-
-    def fake_setup_assets(output_dir=None, **kwargs):
-        output_dir = Path(output_dir) if output_dir else tmp_path
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for filename in (DEFAULT_CHECKPOINT_FILENAME, "esmc_600m_2024_12_v0.pth", DEFAULT_PCA_FILENAME):
-            (output_dir / filename).write_bytes(b"asset")
-        (output_dir / ASSET_MANIFEST_FILENAME).write_text(
-            '{"asset_version": "0.1.2"}',
-            encoding="utf-8",
-        )
-        return output_dir
-
-    monkeypatch.setattr("protcross.assets.setup_assets", fake_setup_assets)
-
-    ckpt, esm, pca = _resolve_predict_pdb_assets(None, None, None)
-
-    assert ckpt == tmp_path / DEFAULT_CHECKPOINT_FILENAME
-    assert esm == tmp_path / "esmc_600m_2024_12_v0.pth"
-    assert pca == tmp_path / DEFAULT_PCA_FILENAME
-
-
-def test_predict_pdb_asset_resolution_uses_partial_assets_and_explicit_esm(tmp_path, monkeypatch):
-    _trust_managed_asset_hashes(monkeypatch)
-    for name in ("PROTCROSS_CHECKPOINT", "PROTCROSS_ESM_WEIGHTS", "PROTCROSS_PCA"):
-        monkeypatch.delenv(name, raising=False)
-    (tmp_path / DEFAULT_CHECKPOINT_FILENAME).write_bytes(b"checkpoint")
-    (tmp_path / DEFAULT_PCA_FILENAME).write_bytes(b"pca")
-    esm = tmp_path / "external-esm.pth"
-    esm.write_bytes(b"esm")
-
-    def fake_setup_assets(*args, **kwargs):
-        raise AssertionError("setup_assets should not run when explicit ESM completes the bundle")
-
-    monkeypatch.setattr("protcross.assets.setup_assets", fake_setup_assets)
-
-    ckpt, resolved_esm, pca = _resolve_predict_pdb_assets(
-        None,
-        esm,
-        None,
-        assets_dir=tmp_path,
-        auto_setup_assets=True,
-        trust_unverified_assets=True,
-    )
-
-    assert ckpt == tmp_path / DEFAULT_CHECKPOINT_FILENAME
-    assert resolved_esm == esm
-    assert pca == tmp_path / DEFAULT_PCA_FILENAME
-
-
 def test_protcross_predictor_fake_components_writes_result_package(tmp_path):
     input_pdb = tmp_path / "input.pdb"
     input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
@@ -466,82 +412,6 @@ def test_protcross_predictor_fake_components_writes_result_package(tmp_path):
     assert summary["asset_version"] == "test-assets"
     assert summary["unscored_bfactor_policy"] == "zero"
     assert summary["elapsed_seconds"] is not None
-
-
-def test_predictor_result_package_staging_preserves_existing_outputs_on_writer_failure(
-    tmp_path, monkeypatch
-):
-    input_pdb = tmp_path / "input.pdb"
-    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
-    outputs = {
-        "output_pdb": tmp_path / "out.pdb",
-        "scores_tsv": tmp_path / "scores.tsv",
-        "pocket_json": tmp_path / "pockets.json",
-        "summary_json": tmp_path / "summary.json",
-    }
-    for path in outputs.values():
-        path.write_text(f"previous:{path.name}", encoding="utf-8")
-
-    predictor = ProtCrossPredictor(
-        device="cpu",
-        max_len=4,
-        esm_extractor=_FakeESM(),
-        pca_reducer=_FakePCA(),
-        structure_parser=_FakeParser(),
-        model=_FakeModel(),
-    )
-
-    def fail_pocket_writer(self, output_json):
-        raise OSError("simulated pocket writer failure")
-
-    monkeypatch.setattr(PredictionResult, "write_pocket_json", fail_pocket_writer)
-
-    with pytest.raises(OSError, match="simulated pocket writer failure"):
-        predictor.predict(input_pdb, **outputs)
-
-    for path in outputs.values():
-        assert path.read_text(encoding="utf-8") == f"previous:{path.name}"
-    assert not list(tmp_path.glob(".*.stage.*"))
-    assert not list(tmp_path.glob(".*.backup"))
-
-
-def test_predictor_result_package_rolls_back_existing_outputs_on_replace_failure(
-    tmp_path, monkeypatch
-):
-    input_pdb = tmp_path / "input.pdb"
-    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
-    outputs = {
-        "output_pdb": tmp_path / "out.pdb",
-        "scores_tsv": tmp_path / "scores.tsv",
-        "pocket_json": tmp_path / "pockets.json",
-        "summary_json": tmp_path / "summary.json",
-    }
-    for path in outputs.values():
-        path.write_text(f"previous:{path.name}", encoding="utf-8")
-    predictor = ProtCrossPredictor(
-        device="cpu",
-        max_len=4,
-        esm_extractor=_FakeESM(),
-        pca_reducer=_FakePCA(),
-        structure_parser=_FakeParser(),
-        model=_FakeModel(),
-    )
-    original_replace = Path.replace
-
-    def fail_scores_publication(path, target):
-        if ".stage" in path.name and Path(target) == outputs["scores_tsv"]:
-            raise OSError("simulated publication replace failure")
-        return original_replace(path, target)
-
-    monkeypatch.setattr(Path, "replace", fail_scores_publication)
-
-    with pytest.raises(OSError, match="simulated publication replace failure"):
-        predictor.predict(input_pdb, **outputs)
-
-    for path in outputs.values():
-        assert path.read_text(encoding="utf-8") == f"previous:{path.name}"
-    assert not list(tmp_path.glob(".*.stage.*"))
-    assert not list(tmp_path.glob(".*.backup"))
 
 
 def test_predict_pdb_missing_input_does_not_resolve_assets(tmp_path, monkeypatch):
@@ -803,6 +673,47 @@ def test_predictor_predict_many_deduplicates_identical_chain_features(tmp_path):
     assert len(results) == 2
     assert esm.calls == 1
     assert pca.calls == 1
+
+
+def test_predictor_predict_many_accepts_one_chain_selection_per_input(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    parser = _RecordingChainParser()
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        esm_extractor=_FakeESM(),
+        pca_reducer=_FakePCA(),
+        structure_parser=parser,
+        model=_VariableFakeModel(),
+        asset_version="test-assets",
+    )
+
+    results = predictor.predict_many([input_pdb, input_pdb], chain_ids=["A", "B"])
+
+    assert len(results) == 2
+    assert parser.chain_ids == ["A", "B"]
+
+    with pytest.raises(ValueError, match="one entry per input"):
+        predictor.predict_many([input_pdb, input_pdb], chain_ids=["A"])
+    with pytest.raises(ValueError, match="either chain_id or chain_ids"):
+        predictor.predict_many([input_pdb], chain_id="A", chain_ids=["A"])
+
+
+def test_predictor_predict_many_rejects_mismatched_batch_output_size(tmp_path):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    predictor = ProtCrossPredictor(
+        device="cpu",
+        max_len=4,
+        esm_extractor=_FakeESM(),
+        pca_reducer=_FakePCA(),
+        structure_parser=_FakeParser(),
+        model=_FakeModel(),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match the input graph batch"):
+        predictor.predict_many([input_pdb, input_pdb], batch_size=2)
 
 
 def test_predictor_predict_many_enforces_single_graph_batch_budgets(tmp_path):
@@ -1289,7 +1200,7 @@ def test_predictor_truncates_each_chain_independently(tmp_path):
 
 
 class _FakeParser:
-    def parse_file_with_labels(self, file_path, chain_id=None):
+    def parse_file(self, file_path, chain_id=None):
         return {
             "coords": np.array([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0]], dtype=np.float32),
             "raw_coords": np.array([[12.56, 13.12, 9.327], [15.56, 14.92, 9.827]], dtype=np.float32),
@@ -1334,6 +1245,15 @@ class _FakeParser:
             "truncated": False,
             "original_length": 2,
         }
+
+
+class _RecordingChainParser(_FakeParser):
+    def __init__(self):
+        self.chain_ids = []
+
+    def parse_file(self, file_path, chain_id=None):
+        self.chain_ids.append(chain_id)
+        return super().parse_file(file_path, chain_id=chain_id)
 
 
 class _FakeESM:
@@ -1424,7 +1344,7 @@ class _VariableFakeModel(_FakeModel):
 
 
 class _FakeMultiChainParser:
-    def parse_file_with_labels(self, file_path, chain_id=None):
+    def parse_file(self, file_path, chain_id=None):
         return {
             "coords": np.array([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [16.0, 0.0, 0.0]], dtype=np.float32),
             "raw_coords": np.array([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [16.0, 0.0, 0.0]], dtype=np.float32),
@@ -1443,7 +1363,7 @@ class _FakeMultiChainParser:
 
 
 class _FakeLongMultiChainParser:
-    def parse_file_with_labels(self, file_path, chain_id=None):
+    def parse_file(self, file_path, chain_id=None):
         return {
             "coords": np.array(
                 [

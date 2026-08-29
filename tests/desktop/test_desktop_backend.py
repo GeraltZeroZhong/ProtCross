@@ -70,16 +70,52 @@ def test_desktop_status_exposes_active_work_and_prunes_finished_history(tmp_path
 class FakeResult:
     def __init__(self, input_path, output_pdb=None, scores_tsv=None, pocket_json=None, summary_json=None):
         self.input_path = str(input_path)
+        self.records = [
+            {
+                "residue_id": "A_10",
+                "residue_key": "model:0|chain:A|het:ATOM|resseq:10|icode:|resname:ALA",
+                "residue_id_namespace": "pdb",
+                "model_id": "0",
+                "chain_id": "A",
+                "auth_asym_id": "A",
+                "label_asym_id": None,
+                "residue_number": 10,
+                "auth_seq_id": 10,
+                "label_seq_id": None,
+                "insertion_code": "",
+                "resname": "ALA",
+                "one_letter_code": "A",
+                "input_bfactor": 20.0,
+                "score": 0.9,
+                "probability": 0.9,
+                "is_binding": 1,
+                "x": 1.0,
+                "y": 2.0,
+                "z": 3.0,
+                "cluster_id": 1,
+                "is_scored": 1,
+                "rank_global": 1,
+                "rank_within_chain": 1,
+            }
+        ]
         self.output_files = {
             "structure": str(output_pdb),
             "scores_tsv": str(scores_tsv),
             "pockets_json": str(pocket_json),
             "summary_json": str(summary_json),
         }
-        for path in (output_pdb, scores_tsv):
-            if path:
-                Path(path).parent.mkdir(parents=True, exist_ok=True)
-                Path(path).write_text("fake", encoding="utf-8")
+        if output_pdb:
+            Path(output_pdb).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_pdb).write_text("fake", encoding="utf-8")
+        if scores_tsv:
+            Path(scores_tsv).parent.mkdir(parents=True, exist_ok=True)
+            Path(scores_tsv).write_text(
+                "residue_id\tresidue_key\tchain_id\tresidue_number\tmodel_score\tprobability\t"
+                "is_scored\tx\ty\tz\trank_global\n"
+                "A_10\tmodel:0|chain:A|het:ATOM|resseq:10|icode:|resname:ALA\tA\t10\t"
+                "0.9\t0.9\t1\t1.0\t2.0\t3.0\t1\n",
+                encoding="utf-8",
+            )
         if pocket_json:
             Path(pocket_json).parent.mkdir(parents=True, exist_ok=True)
             Path(pocket_json).write_text(json.dumps(self.to_pocket_dict()), encoding="utf-8")
@@ -99,6 +135,9 @@ class FakeResult:
             },
             "output_files": self.output_files,
         }
+
+    def to_records(self):
+        return self.records
 
     def to_pocket_dict(self):
         return {
@@ -189,6 +228,17 @@ def _wait_for_asset_download(backend, job_id, terminal_statuses, timeout=3.0):
         time.sleep(0.01)
         status = backend.esm_download_status(job_id)
     assert status["status"] in terminal_statuses, status
+    return status
+
+
+def _wait_for_batch(backend, job_id, timeout=5.0):
+    terminal = {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
+    deadline = time.time() + timeout
+    status = backend.batch_status(job_id)
+    while status["status"] not in terminal and time.time() < deadline:
+        time.sleep(0.01)
+        status = backend.batch_status(job_id)
+    assert status["status"] in terminal, status
     return status
 
 
@@ -468,6 +518,8 @@ def test_single_prediction_uses_desktop_output_package(tmp_path, monkeypatch):
     assert result["output_files"]["structure"].endswith("input.protcross.pdb")
     assert Path(result["output_files"]["summary_json"]).exists()
     assert [residue["residue_id"] for residue in result["top_pocket_residues"]] == ["A_10", "A_11"]
+    assert result["scores"][0]["residue_key"].startswith("model:0|chain:A")
+    assert result["scores"][0]["is_scored"] == 1
 
 
 def test_existing_result_package_can_be_reopened(tmp_path, monkeypatch):
@@ -480,6 +532,8 @@ def test_existing_result_package_can_be_reopened(tmp_path, monkeypatch):
     assert reopened["summary"]["schema_version"] == "protcross-summary-v2"
     assert reopened["pockets"]["schema_version"] == "protcross-pocket-v2"
     assert reopened["output_files"] == predicted["output_files"]
+    assert reopened["scores"][0]["rank_global"] == 1
+    assert reopened["scores"][0]["x"] == pytest.approx(1.0)
     assert [residue["residue_id"] for residue in reopened["top_pocket_residues"]] == ["A_10", "A_11"]
     assert backend.readable_output_file(reopened["output_files"]["structure"]).exists()
 
@@ -504,10 +558,16 @@ def test_open_result_resolves_nested_relative_paths_from_summary(tmp_path):
     members.mkdir(parents=True)
     structure = members / "input.protcross.pdb"
     pockets = members / "input.protcross.pockets.json"
+    scores = members / "input.protcross.scores.tsv"
     summary = package / "input.protcross.summary.json"
     structure.write_text("HEADER    TEST\n", encoding="utf-8")
     pockets.write_text(
         json.dumps({"schema_version": "protcross-pocket-v2", "clustered_pockets": []}),
+        encoding="utf-8",
+    )
+    scores.write_text(
+        "residue_id\tresidue_key\tchain_id\tresidue_number\tmodel_score\tis_scored\tx\ty\tz\trank_global\n"
+        "A_1\tmodel:0|chain:A|het:ATOM|resseq:1|icode:|resname:ALA\tA\t1\t0.8\t1\t0\t0\t0\t1\n",
         encoding="utf-8",
     )
     summary.write_text(
@@ -517,6 +577,7 @@ def test_open_result_resolves_nested_relative_paths_from_summary(tmp_path):
                 "output_files": {
                     "structure": "members/input.protcross.pdb",
                     "pockets_json": "members/input.protcross.pockets.json",
+                    "scores_tsv": "members/input.protcross.scores.tsv",
                 },
             }
         ),
@@ -527,6 +588,27 @@ def test_open_result_resolves_nested_relative_paths_from_summary(tmp_path):
 
     assert Path(reopened["output_files"]["structure"]) == structure.resolve()
     assert Path(reopened["output_files"]["pockets_json"]) == pockets.resolve()
+    assert Path(reopened["output_files"]["scores_tsv"]) == scores.resolve()
+    assert reopened["scores"][0]["score"] == pytest.approx(0.8)
+
+
+def test_open_result_keeps_legacy_packages_viewable_without_extended_scores(tmp_path, monkeypatch):
+    backend, input_pdb, _ = _ready_backend(tmp_path, monkeypatch)
+    predicted = backend.predict_single(input_pdb)
+    scores_path = Path(predicted["output_files"]["scores_tsv"])
+    scores_path.unlink()
+
+    reopened = backend.open_result(predicted["output_files"]["summary_json"])
+    assert reopened["scores"] == []
+    assert "Interactive regrouping is disabled" in reopened["summary"]["warnings"][-1]
+
+    scores_path.write_text(
+        "residue_id\tchain_id\tresidue_number\tprobability\tis_binding\nA_1\tA\t1\t0.8\t1\n",
+        encoding="utf-8",
+    )
+    reopened = backend.open_result(predicted["output_files"]["summary_json"])
+    assert reopened["scores"] == []
+    assert "unsupported schema" in reopened["summary"]["warnings"][-1]
 
 
 def test_open_result_rejects_unrelated_json(tmp_path):
@@ -629,7 +711,13 @@ def test_batch_prediction_uses_bounded_predict_many_when_supported(tmp_path, mon
     second = tmp_path / "second.pdb"
     second.write_text(MINIMAL_PDB, encoding="utf-8")
 
-    job = backend.submit_batch([input_pdb, second], output_dir=tmp_path / "batch")
+    job = backend.submit_batch(
+        items=[
+            {"input_structure": input_pdb, "chain_id": "A"},
+            {"input_structure": second, "chain_id": None},
+        ],
+        output_dir=tmp_path / "batch",
+    )
     deadline = time.time() + 5
     while time.time() < deadline:
         status = backend.batch_status(job["id"])
@@ -643,6 +731,140 @@ def test_batch_prediction_uses_bounded_predict_many_when_supported(tmp_path, mon
     assert batch_calls[0][1]["batch_size"] == 2
     assert batch_calls[0][1]["return_exceptions"] is True
     assert len(batch_calls[0][1]["structure_inspections"]) == 2
+    assert batch_calls[0][1]["chain_ids"] == ["A", None]
+    assert [item["chain_id"] for item in status["items"]] == ["A", None]
+
+
+def test_batch_prediction_passes_per_item_chain_to_single_predictor(tmp_path, monkeypatch):
+    calls = []
+
+    class ChainPredictor(FakePredictor):
+        def predict(self, input_structure, **kwargs):
+            calls.append((Path(input_structure).name, kwargs.get("chain_id")))
+            return super().predict(input_structure, **kwargs)
+
+    backend, input_pdb, _ = _ready_backend(
+        tmp_path,
+        monkeypatch,
+        predictor_factory=lambda **kwargs: ChainPredictor(),
+    )
+    second = tmp_path / "second.pdb"
+    second.write_text(MINIMAL_PDB, encoding="utf-8")
+
+    job = backend.submit_batch(
+        items=[
+            {"input_structure": input_pdb, "chain_id": "A"},
+            {"input_structure": second},
+        ]
+    )
+    status = _wait_for_batch(backend, job["id"])
+
+    assert status["status"] == "completed"
+    assert calls == [("input.pdb", "A"), ("second.pdb", None)]
+
+
+def test_batch_history_restores_and_retry_only_failed_items(tmp_path, monkeypatch):
+    attempts = {}
+
+    class FlakyPredictor(FakePredictor):
+        def predict(self, input_structure, **kwargs):
+            name = Path(input_structure).name
+            attempts[name] = attempts.get(name, 0) + 1
+            if name == "second.pdb" and attempts[name] == 1:
+                raise RuntimeError("simulated per-item failure")
+            return super().predict(input_structure, **kwargs)
+
+    def factory(**kwargs):
+        return FlakyPredictor()
+
+    backend, input_pdb, _ = _ready_backend(tmp_path, monkeypatch, predictor_factory=factory)
+    second = tmp_path / "second.pdb"
+    second.write_text(MINIMAL_PDB, encoding="utf-8")
+    original = backend.submit_batch(
+        items=[
+            {"input_structure": input_pdb, "chain_id": "A"},
+            {"input_structure": second, "chain_id": None},
+        ],
+        output_dir=tmp_path / "batch",
+        threshold=0.65,
+        pocket_cluster_cutoff=6.5,
+        allow_truncation=True,
+        device="cpu",
+    )
+    original_status = _wait_for_batch(backend, original["id"])
+    assert original_status["status"] == "completed_with_errors"
+    completed_output = Path(original_status["items"][0]["output_files"]["structure"])
+    completed_bytes = completed_output.read_bytes()
+    completed_mtime = completed_output.stat().st_mtime_ns
+
+    restored = DesktopBackend(root=tmp_path, predictor_factory=factory)
+    restored_status = restored.batch_status(original["id"])
+    assert restored_status["status"] == "completed_with_errors"
+    assert [item["status"] for item in restored_status["items"]] == ["completed", "failed"]
+    assert any(job["id"] == original["id"] for job in restored.status()["activity"]["batch_jobs"])
+    assert restored.readable_output_file(completed_output) == completed_output.resolve()
+    restored_result = restored.batch_item_result(original["id"], str(input_pdb), chain_id="A")
+    assert restored_result["chain_id"] == "A"
+    assert restored_result["scores"][0]["is_scored"] == 1
+
+    retry = restored.retry_failed_batch(original["id"])
+    retry_status = _wait_for_batch(restored, retry["id"])
+
+    assert retry_status["status"] == "completed"
+    assert retry_status["retry_of"] == original["id"]
+    assert retry_status["settings"] == original_status["settings"]
+    assert [(item["input_structure"], item["chain_id"]) for item in retry_status["items"]] == [
+        (str(second), None)
+    ]
+    assert attempts == {"input.pdb": 1, "second.pdb": 2}
+    assert completed_output.read_bytes() == completed_bytes
+    assert completed_output.stat().st_mtime_ns == completed_mtime
+    with pytest.raises(ValueError, match="no failed or interrupted items"):
+        restored.retry_failed_batch(retry["id"])
+
+
+def test_batch_history_marks_inflight_work_interrupted_without_losing_completed_outputs(tmp_path):
+    completed_structure = tmp_path / "completed.pdb"
+    completed_structure.write_text("completed output", encoding="utf-8")
+    backend = DesktopBackend(root=tmp_path)
+    job = desktop_service.BatchJob(
+        id="interrupted-job",
+        items=[
+            desktop_service.QueueItem(
+                input_structure=str(tmp_path / "done.pdb"),
+                chain_id="A",
+                status="completed",
+                output_files={"structure": str(completed_structure)},
+            ),
+            desktop_service.QueueItem(
+                input_structure=str(tmp_path / "pending.pdb"),
+                chain_id="B",
+                status="running",
+            ),
+        ],
+        status="running",
+        created_at=time.time(),
+        completed=1,
+        output_dir=str(tmp_path / "batch"),
+        threshold=0.7,
+    )
+    with backend._lock:
+        backend._jobs[job.id] = job
+        backend._persist_batch_jobs_locked()
+
+    restored = DesktopBackend(root=tmp_path)
+    status = restored.batch_status(job.id)
+
+    assert status["status"] == "interrupted"
+    assert [item["status"] for item in status["items"]] == ["completed", "interrupted"]
+    assert [item["chain_id"] for item in status["items"]] == ["A", "B"]
+    assert status["settings"]["threshold"] == pytest.approx(0.7)
+    assert completed_structure.read_text(encoding="utf-8") == "completed output"
+    assert restored.readable_output_file(completed_structure) == completed_structure.resolve()
+    assert json.loads((tmp_path / desktop_service.BATCH_HISTORY_FILENAME).read_text(encoding="utf-8"))[
+        "schema_version"
+    ] == desktop_service.BATCH_HISTORY_SCHEMA
+    assert not list(tmp_path.glob(".batch-jobs.json.*.tmp"))
 
 
 def test_batch_rejects_second_active_job(tmp_path, monkeypatch):
@@ -713,6 +935,15 @@ def test_batch_level_failure_marks_items_and_exposes_error(tmp_path, monkeypatch
 
 def test_export_diagnostics_zip_is_local_and_reviewable(tmp_path, monkeypatch):
     backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    backend_log = backend.paths.logs_dir / "backend.log"
+    backend_log.write_text(
+        "beginning-only marker\n"
+        + ("old output\n" * 10_000)
+        + f"root={backend.paths.root}\n"
+        + "proxy=http://user:pass@proxy.example:8080 token=diagnostic-secret\n"
+        + "final model load failure\n",
+        encoding="utf-8",
+    )
 
     zip_path = Path(backend.export_diagnostics(tmp_path / "diag.zip"))
 
@@ -720,6 +951,15 @@ def test_export_diagnostics_zip_is_local_and_reviewable(tmp_path, monkeypatch):
     with zipfile.ZipFile(zip_path) as archive:
         assert "diagnostics.json" in archive.namelist()
         assert "README.txt" in archive.namelist()
+        assert "logs/backend.log" in archive.namelist()
+        log_excerpt = archive.read("logs/backend.log").decode("utf-8")
+    assert "final model load failure" in log_excerpt
+    assert "earlier log output truncated" in log_excerpt
+    assert "beginning-only marker" not in log_excerpt
+    assert str(backend.paths.root) not in log_excerpt
+    assert "user:pass" not in log_excerpt
+    assert "diagnostic-secret" not in log_excerpt
+    assert "http://<redacted>@proxy.example:8080" in log_excerpt
 
 
 def test_export_diagnostics_redacts_proxy_credentials_and_paths(tmp_path, monkeypatch):
@@ -787,6 +1027,84 @@ def test_desktop_server_inspect_route_returns_structure_qc_without_ready_assets(
         assert body["scorable_residue_count"] == 1
         assert body["requires_truncation"] is False
         assert body["input_interpretation"]["assembly"].startswith("coordinates_as_supplied")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.network
+def test_desktop_server_retries_failed_batch_items(tmp_path):
+    calls = []
+
+    class RetryBackend:
+        def retry_failed_batch(self, job_id):
+            calls.append(job_id)
+            return {"id": "retry-job", "status": "queued", "retry_of": job_id}
+
+    server = create_server(
+        "127.0.0.1",
+        0,
+        root=tmp_path,
+        token="secret-token",
+        backend=RetryBackend(),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        conn.request(
+            "POST",
+            "/batch/original-job/retry",
+            body="{}",
+            headers={
+                "Content-Type": "application/json",
+                "X-ProtCross-Desktop-Token": "secret-token",
+            },
+        )
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert body == {"id": "retry-job", "status": "queued", "retry_of": "original-job"}
+        assert calls == ["original-job"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.network
+def test_desktop_server_preserves_blank_chain_in_batch_result_query(tmp_path):
+    calls = []
+
+    class BatchResultBackend:
+        def batch_item_result(self, job_id, input_structure, *, chain_id=None):
+            calls.append((job_id, input_structure, chain_id))
+            return {"ok": True, "chain_id": chain_id}
+
+    server = create_server(
+        "127.0.0.1",
+        0,
+        root=tmp_path,
+        token="secret-token",
+        backend=BatchResultBackend(),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        conn.request(
+            "GET",
+            "/batch/job/result?input_structure=input.pdb&chain_id=",
+            headers={"X-ProtCross-Desktop-Token": "secret-token"},
+        )
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert body == {"ok": True, "chain_id": ""}
+        assert calls == [("job", "input.pdb", "")]
     finally:
         server.shutdown()
         server.server_close()

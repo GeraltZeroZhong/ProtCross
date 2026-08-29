@@ -78,7 +78,6 @@ class PredictionResult:
     device: str | None = None
     max_len: int | None = None
     output_files: dict[str, str] | None = None
-    output_format_warning: str | None = None
     unscored_bfactor_policy: str = "zero"
     elapsed_seconds: float | None = None
     warnings: list[str] | None = None
@@ -189,8 +188,6 @@ class PredictionResult:
         if missing_value is None and policy == "zero":
             missing_value = 0.0
         final_path = Path(output_pdb).expanduser()
-        if self.input_metadata:
-            _assert_input_file_unchanged(self.input_pdb, self.input_metadata)
         self._validate_single_output_path(final_path)
         input_is_cif = self.input_pdb.suffix.lower() in {".cif", ".mmcif"}
         output_is_cif = final_path.suffix.lower() in {".cif", ".mmcif"}
@@ -226,7 +223,7 @@ class PredictionResult:
             temporary_path.unlink(missing_ok=True)
 
     def _write_scores_tsv_file(self, output_tsv: Path, *, schema: str) -> None:
-        records = self.to_records()
+        records = self._records()
         with output_tsv.open("w", encoding="utf-8") as file:
             if schema == "legacy":
                 file.write("residue_id\tchain_id\tresidue_number\tprobability\tis_binding\n")
@@ -268,10 +265,10 @@ class PredictionResult:
                 )
 
     def write_pocket_json(self, output_json: str | Path) -> None:
-        self._write_json_atomic(output_json, self.to_pocket_dict())
+        self._write_json_atomic(output_json, self._pocket_dict())
 
     def write_summary_json(self, output_json: str | Path) -> None:
-        self._write_json_atomic(output_json, self.to_summary_dict())
+        self._write_json_atomic(output_json, self._summary_dict())
 
     @staticmethod
     def _temporary_output_path(final_path: Path) -> Path:
@@ -297,8 +294,11 @@ class PredictionResult:
             raise ValueError(f"Output path must not overwrite the input structure: {path}.")
 
     def to_records(self) -> list[dict[str, str | int | float | None]]:
+        return deepcopy(self._records())
+
+    def _records(self) -> list[dict[str, str | int | float | None]]:
         if self._records_cache is not None:
-            return deepcopy(self._records_cache)
+            return self._records_cache
         records = []
         coords = self._coordinate_array(required=False)
         cluster_ids = self._cluster_id_by_index() if coords is not None else np.zeros(len(self.residue_ids), dtype=int)
@@ -336,15 +336,18 @@ class PredictionResult:
                 }
             )
         self._records_cache = records
-        return deepcopy(records)
+        return records
 
     def to_pocket_dict(self) -> dict:
+        return deepcopy(self._pocket_dict())
+
+    def _pocket_dict(self) -> dict:
         if self._pocket_dict_cache is not None:
-            return deepcopy(self._pocket_dict_cache)
+            return self._pocket_dict_cache
         coords = self._coordinate_array(required=True)
         selected_indices = self._selected_indices()
         clusters = self._cluster_indices()
-        records = self.to_records()
+        records = self._records()
         payload = {
             "schema_version": "protcross-pocket-v2",
             "protcross_version": self._protcross_version(),
@@ -400,13 +403,16 @@ class PredictionResult:
             ],
         }
         self._pocket_dict_cache = payload
-        return deepcopy(payload)
+        return payload
 
     def to_summary_dict(self) -> dict:
+        return deepcopy(self._summary_dict())
+
+    def _summary_dict(self) -> dict:
         if self._summary_dict_cache is not None:
-            return deepcopy(self._summary_dict_cache)
+            return self._summary_dict_cache
         pockets = (
-            self.to_pocket_dict()
+            self._pocket_dict()
             if self.ca_coords is not None
             else {"aggregate_pocket": None, "clustered_pockets": []}
         )
@@ -423,7 +429,7 @@ class PredictionResult:
                 "probability": record["probability"],
                 "rank_global": record["rank_global"],
             }
-            for record in sorted(self.to_records(), key=lambda record: int(record["rank_global"]))[:10]
+            for record in sorted(self._records(), key=lambda record: int(record["rank_global"]))[:10]
         ]
         payload = {
             "schema_version": "protcross-summary-v2",
@@ -507,7 +513,6 @@ class PredictionResult:
             "cluster_count": len(pockets["clustered_pockets"]),
             "top_residues": top_residues,
             "output_files": self.output_files or {},
-            "output_format_warning": self.output_format_warning,
             "warnings": self.warnings,
             "structure_summary": self.structure_summary or {},
             "intended_use": "Hypothesis generation and residue ranking for small-molecule-adjacent site analysis.",
@@ -520,10 +525,10 @@ class PredictionResult:
             ],
         }
         self._summary_dict_cache = payload
-        return deepcopy(payload)
+        return payload
 
     def format_summary(self, *, max_items: int = 50) -> str:
-        summary = self.to_summary_dict()
+        summary = self._summary_dict()
         hits = self.binding_residues
         lines = [
             f"Input: {self.input_pdb}",
@@ -552,8 +557,6 @@ class PredictionResult:
             )
         if summary["elapsed_seconds"] is not None:
             lines.append(f"Elapsed: {float(summary['elapsed_seconds']):.2f} s")
-        if summary["output_format_warning"]:
-            lines.append(f"Output format warning: {summary['output_format_warning']}")
         for warning in summary["warnings"]:
             lines.append(f"WARNING: {warning}")
         if self.truncated:
@@ -1085,6 +1088,7 @@ class ProtCrossPredictor:
         structures: Sequence[str | Path],
         *,
         chain_id: Optional[str] = None,
+        chain_ids: Sequence[Optional[str]] | None = None,
         threshold: float = 0.5,
         pocket_cluster_cutoff: float = 8.0,
         output_pdb: str | Path | None = None,
@@ -1107,12 +1111,21 @@ class ProtCrossPredictor:
         Each structure remains one independent PointNet graph while each chain
         remains one independent ESM context.  Batches are bounded by count,
         total residues, and ``sum(n_i**2)`` to account for geometric search.
+        ``chain_ids`` assigns one chain selection per input; ``None`` selects
+        all scorable chains for that item. ``chain_id`` applies one selection
+        to every input.
         Per-item output mappings may use either prediction argument names or
         result keys (for example ``output_pdb``/``structure``).
         """
         structures = list(structures)
         if not structures:
             return []
+        if chain_id is not None and chain_ids is not None:
+            raise ValueError("Pass either chain_id or chain_ids, not both.")
+        if chain_ids is not None:
+            chain_ids = list(chain_ids)
+            if len(chain_ids) != len(structures):
+                raise ValueError("chain_ids must have one entry per input structure.")
         _validate_prediction_options(
             threshold=threshold,
             pocket_cluster_cutoff=pocket_cluster_cutoff,
@@ -1205,9 +1218,10 @@ class ProtCrossPredictor:
             if paths is None:
                 continue
             try:
+                item_chain_id = chain_ids[index] if chain_ids is not None else chain_id
                 prepared = self._prepare_prediction(
                     Path(structure).expanduser(),
-                    chain_id=chain_id,
+                    chain_id=item_chain_id,
                     allow_truncation=allow_truncation,
                     structure_inspection=(
                         structure_inspections[index] if structure_inspections is not None else None
@@ -1252,11 +1266,7 @@ class ProtCrossPredictor:
         if not pdb_file.exists():
             raise FileNotFoundError(f"Input structure not found: {pdb_file}")
         input_metadata = _input_file_metadata(pdb_file)
-        prediction_parser = getattr(self.structure_parser, "parse_file", None)
-        if callable(prediction_parser):
-            parsed = prediction_parser(pdb_file, chain_id=chain_id)
-        else:
-            parsed = self.structure_parser.parse_file_with_labels(pdb_file, chain_id=chain_id)
+        parsed = self.structure_parser.parse_file(pdb_file, chain_id=chain_id)
         if not parsed:
             raise ValueError(f"No standard amino-acid residues with CA atoms found in {pdb_file}")
 
@@ -1312,7 +1322,6 @@ class ProtCrossPredictor:
         execution_mode: str,
         microbatch_size: int,
     ) -> PredictionResult:
-        _assert_input_file_unchanged(prepared.input_pdb, prepared.input_metadata)
         parsed = prepared.parsed
         runtime_metadata = _runtime_metadata()
         runtime_metadata.update(
@@ -1342,7 +1351,6 @@ class ProtCrossPredictor:
             device=self.device,
             max_len=self.max_len,
             output_files=self._output_files(output_pdb, scores_tsv, pocket_json, summary_json),
-            output_format_warning=self._output_format_warning(prepared.input_pdb, output_pdb),
             unscored_bfactor_policy=unscored_bfactor_policy,
             elapsed_seconds=elapsed_seconds,
             warnings=prepared.warnings,
@@ -1368,71 +1376,14 @@ class ProtCrossPredictor:
         pocket_json: Path | None,
         summary_json: Path | None,
     ) -> None:
-        """Stage every requested output before publishing the result package.
-
-        Each stage file lives beside its final path, so publication uses an
-        atomic same-filesystem replace.  Multi-file publication is guarded by
-        per-file backups and best-effort rollback to prevent a failed writer or
-        replace from leaving a mixture of old, new, and partial outputs.
-        """
-        requested = [
+        for path, writer in (
             (output_pdb, result.write_pdb),
             (scores_tsv, result.write_scores_tsv),
             (pocket_json, result.write_pocket_json),
             (summary_json, result.write_summary_json),
-        ]
-        requested = [(path, writer) for path, writer in requested if path is not None]
-        if not requested:
-            return
-
-        transaction_id = uuid.uuid4().hex
-        staged: dict[Path, Path] = {}
-        backups: dict[Path, Path] = {}
-        committed: set[Path] = set()
-        try:
-            for final_path, writer in requested:
-                final_path.parent.mkdir(parents=True, exist_ok=True)
-                stage_path = final_path.with_name(
-                    f".{final_path.stem}.{transaction_id}.stage{final_path.suffix}"
-                )
-                stage_path.unlink(missing_ok=True)
-                staged[final_path] = stage_path
-                writer(stage_path)
-
-            for final_path, _writer in requested:
-                if final_path.exists():
-                    backup_path = final_path.with_name(
-                        f".{final_path.name}.{transaction_id}.backup"
-                    )
-                    backup_path.unlink(missing_ok=True)
-                    final_path.replace(backup_path)
-                    backups[final_path] = backup_path
-                staged[final_path].replace(final_path)
-                committed.add(final_path)
-        except Exception as exc:
-            rollback_errors = []
-            for final_path, _writer in reversed(requested):
-                try:
-                    backup_path = backups.get(final_path)
-                    if backup_path is not None and backup_path.exists():
-                        final_path.unlink(missing_ok=True)
-                        backup_path.replace(final_path)
-                    elif final_path in committed:
-                        final_path.unlink(missing_ok=True)
-                except OSError as rollback_exc:
-                    rollback_errors.append(f"{final_path}: {rollback_exc}")
-            if rollback_errors:
-                raise RuntimeError(
-                    "Result-package publication failed and rollback was incomplete: "
-                    + "; ".join(rollback_errors)
-                ) from exc
-            raise
-        else:
-            for backup_path in backups.values():
-                backup_path.unlink(missing_ok=True)
-        finally:
-            for stage_path in staged.values():
-                stage_path.unlink(missing_ok=True)
+        ):
+            if path is not None:
+                writer(path)
 
     @staticmethod
     def _mapped_output_paths(mapping: Mapping[str, str | Path] | None) -> tuple[Path | None, ...]:
@@ -1456,43 +1407,6 @@ class ProtCrossPredictor:
                 raise ValueError(f"Specify only one of {primary!r} and {alias!r} for an item.")
             values.append(_expanded_optional_path(primary_value if primary_value is not None else alias_value))
         return tuple(values)
-
-    @staticmethod
-    def _prediction_groups(
-        entries: list[tuple[int, _PreparedPrediction, tuple[Path | None, ...]]],
-        *,
-        batch_size: int,
-        max_batch_residues: int,
-        max_batch_quadratic_cost: int,
-    ) -> list[list[tuple[int, _PreparedPrediction, tuple[Path | None, ...]]]]:
-        groups = []
-        current = []
-        residues = 0
-        cost = 0
-        for entry in entries:
-            count = len(entry[1].parsed["coords"])
-            entry_cost = count * count
-            if count > max_batch_residues or entry_cost > max_batch_quadratic_cost:
-                raise ValueError(
-                    f"A single input graph has {count} residues and quadratic cost {entry_cost}, "
-                    "which exceeds the configured batch limits."
-                )
-            next_over_budget = current and (
-                len(current) >= batch_size
-                or residues + count > max_batch_residues
-                or cost + entry_cost > max_batch_quadratic_cost
-            )
-            if next_over_budget:
-                groups.append(current)
-                current = []
-                residues = 0
-                cost = 0
-            current.append(entry)
-            residues += count
-            cost += entry_cost
-        if current:
-            groups.append(current)
-        return groups
 
     def _execute_prediction_group(
         self,
@@ -1614,25 +1528,9 @@ class ProtCrossPredictor:
             )
         lengths = [len(parsed["coords"]) for parsed in parsed_items]
         if len(probabilities) != sum(lengths):
-            if len(data_list) == 1:
-                raise RuntimeError(
-                    "Model returned a residue-score count that does not match the input graph."
-                )
-            # Preserve compatibility with injected/custom models that only
-            # implement single-graph inference rather than per-node batching.
-            return [
-                (
-                    self._infer(
-                        Data(
-                            x=item_features,
-                            pos=torch.from_numpy(parsed["coords"]),
-                            batch=torch.zeros(len(parsed["coords"]), dtype=torch.long),
-                        ).to(self.device)
-                    ),
-                    1,
-                )
-                for item_features, parsed in zip(features, parsed_items)
-            ]
+            raise RuntimeError(
+                "Model returned a residue-score count that does not match the input graph batch."
+            )
         boundaries = np.cumsum(lengths[:-1], dtype=int)
         return [(values, len(data_list)) for values in np.split(probabilities, boundaries)]
 
@@ -1653,18 +1551,6 @@ class ProtCrossPredictor:
         if summary_json:
             output_files["summary_json"] = str(summary_json)
         return output_files
-
-    @staticmethod
-    def _output_format_warning(input_structure: Path, output_structure: str | Path | None) -> str | None:
-        if not output_structure:
-            return None
-        input_suffix = input_structure.suffix.lower()
-        output_suffix = Path(output_structure).suffix.lower()
-        input_is_cif = input_suffix in {".cif", ".mmcif"}
-        output_is_cif = output_suffix in {".cif", ".mmcif"}
-        if input_is_cif != output_is_cif:
-            return "Output structure format differs from the input structure extension."
-        return None
 
     def _featurize(self, sequence: str) -> torch.Tensor:
         cache_path = self._embedding_cache_path(sequence)
@@ -2003,34 +1889,6 @@ def predict_pdb(
     )
 
 
-def _resolve_predict_pdb_assets(
-    ckpt_path: str | Path | None,
-    esm_weights: str | Path | None,
-    pca_path: str | Path | None,
-    *,
-    assets_dir: str | Path | None = None,
-    auto_setup_assets: bool = True,
-    asset_version: str | None = None,
-    refresh_assets: bool = False,
-    offline: bool = False,
-    accept_esm_license: bool = False,
-    trust_unverified_assets: bool = False,
-) -> tuple[str | Path, str | Path, str | Path]:
-    resolved = resolve_prediction_assets(
-        ckpt_path,
-        esm_weights,
-        pca_path,
-        assets_dir=assets_dir,
-        auto_setup_assets=auto_setup_assets,
-        asset_version=asset_version,
-        refresh_assets=refresh_assets,
-        offline=offline,
-        accept_esm_license=accept_esm_license,
-        trust_unverified_assets=trust_unverified_assets,
-    )
-    return resolved.checkpoint, resolved.esm_weights, resolved.pca
-
-
 def _validate_prediction_options(
     *,
     threshold: float,
@@ -2098,18 +1956,6 @@ def _input_file_metadata(path: Path) -> dict[str, object]:
         "size_bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
-
-
-def _assert_input_file_unchanged(path: Path, expected: dict[str, object]) -> None:
-    current = _input_file_metadata(path)
-    if (
-        current["sha256"] != expected.get("sha256")
-        or current["size_bytes"] != expected.get("size_bytes")
-    ):
-        raise RuntimeError(
-            f"Input structure changed while prediction results were being prepared: {path}. "
-            "No annotated structure was written; rerun with a stable input file."
-        )
 
 
 @lru_cache(maxsize=1)

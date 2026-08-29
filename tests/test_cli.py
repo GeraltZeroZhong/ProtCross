@@ -10,16 +10,15 @@ import pytest
 
 from protcross.cli import setup_assets
 from protcross.cli.download_af2 import build_parser as build_download_af2_parser
+from protcross.cli.inspect import main as inspect_main
 from protcross.cli.main import build_parser as build_main_parser
 from protcross.cli.predict import (
     _default_output_paths,
-    _resolve_asset_directory,
     _resolve_prediction_asset_paths,
     build_parser,
     main as predict_main,
 )
 from protcross.assets import (
-    ASSET_MANIFEST_FILENAME,
     DEFAULT_ASSET_BUNDLE,
     DEFAULT_CHECKPOINT_FILENAME,
     DEFAULT_PCA_FILENAME,
@@ -219,6 +218,31 @@ def test_map_labels_cli_default_mapping_file_is_under_artifacts():
     args = build_map_labels_parser().parse_args([])
 
     assert args.mapping_file == "artifacts/pdb_uniprot_mapping.json"
+
+
+def test_map_labels_help_describes_required_processed_pdb_packages():
+    from protcross.cli.map_labels import build_parser as build_map_labels_parser
+
+    help_text = build_map_labels_parser().format_help()
+
+    assert "processed PDB .pt packages" in help_text
+    assert "Legacy compatibility option" not in help_text
+
+
+def test_inspect_json_failure_is_machine_readable(tmp_path, capsys):
+    missing = tmp_path / "missing.pdb"
+
+    exit_code = inspect_main([str(missing), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 1
+    assert captured.err == ""
+    assert payload == {
+        "ok": False,
+        "error": f"Input structure not found: {missing}",
+        "error_type": "FileNotFoundError",
+    }
 
 
 def test_af2_downloader_collects_text_pdb_ids_without_raw_pdb_dir(tmp_path):
@@ -456,39 +480,6 @@ def test_setup_assets_parser_uses_environment_asset_version(monkeypatch):
     args = setup_assets.build_parser().parse_args([])
 
     assert args.asset_version == "0.1.1-paper"
-
-
-def test_predict_discovers_default_asset_directory(tmp_path, monkeypatch):
-    _trust_managed_asset_hashes(monkeypatch)
-    for filename in (DEFAULT_CHECKPOINT_FILENAME, "esmc_600m_2024_12_v0.pth", DEFAULT_PCA_FILENAME):
-        (tmp_path / filename).write_bytes(b"asset")
-    monkeypatch.setenv("PROTCROSS_ASSETS_DIR", str(tmp_path))
-
-    assets = _resolve_asset_directory(None)
-
-    assert assets is not None
-    assert assets.checkpoint == tmp_path / DEFAULT_CHECKPOINT_FILENAME
-
-
-def test_predict_auto_installs_missing_default_assets(tmp_path, monkeypatch):
-    _trust_managed_asset_hashes(monkeypatch)
-    monkeypatch.setenv("PROTCROSS_ASSETS_DIR", str(tmp_path))
-
-    def fake_setup_assets(output_dir=None, **kwargs):
-        output_dir = Path(output_dir) if output_dir else tmp_path
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for filename in (DEFAULT_CHECKPOINT_FILENAME, "esmc_600m_2024_12_v0.pth", DEFAULT_PCA_FILENAME):
-            (output_dir / filename).write_bytes(b"asset")
-        (output_dir / ASSET_MANIFEST_FILENAME).write_text('{"asset_version": "0.1.2"}', encoding="utf-8")
-        return output_dir
-
-    monkeypatch.setattr("protcross.assets.setup_assets", fake_setup_assets)
-
-    assets = _resolve_asset_directory(None, auto_setup=True)
-
-    assert assets is not None
-    assert assets.is_complete()
-    assert assets.checkpoint == tmp_path / DEFAULT_CHECKPOINT_FILENAME
 
 
 def test_predict_partial_assets_do_not_download_explicit_esm(tmp_path, monkeypatch):

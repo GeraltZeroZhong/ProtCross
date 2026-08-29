@@ -129,9 +129,6 @@ class AF2Downloader:
                 pdb_ids.append(pdb_id)
         return pdb_ids
 
-    def process_pdb_file(self, pdb_file: Path) -> bool:
-        return self.process_pdb_id(pdb_file.stem.upper())
-
     def process_pdb_id(self, pdb_id: str) -> bool:
         preloaded_accessions = self._normalize_accessions(self.preloaded_mapping.get(pdb_id))
         uniprot_ids = preloaded_accessions or self.fetch_uniprot_ids(pdb_id)

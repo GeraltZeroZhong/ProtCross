@@ -140,7 +140,8 @@ def test_preprocess_failure_preserves_previous_output_and_writes_incomplete_mani
     assert not list(output_dir.glob(".*.part"))
 
 
-def test_preprocess_clean_run_writes_complete_manifest(tmp_path):
+def test_preprocess_clean_run_writes_complete_manifest(tmp_path, monkeypatch):
+    import protcross.data.preprocess as preprocess_module
     from protcross.data.preprocess import PREPROCESS_MANIFEST, PreprocessConfig, _process_files
 
     data_dir = tmp_path / "raw"
@@ -168,6 +169,14 @@ def test_preprocess_clean_run_writes_complete_manifest(tmp_path):
         def transform(self, embeddings):
             return embeddings
 
+    hash_calls = []
+    original_sha256 = preprocess_module._file_sha256
+
+    def counted_sha256(path):
+        hash_calls.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(preprocess_module, "_file_sha256", counted_sha256)
     count = _process_files(
         PreprocessConfig(
             data_dir=data_dir,
@@ -185,6 +194,7 @@ def test_preprocess_clean_run_writes_complete_manifest(tmp_path):
     assert manifest["complete"] is True
     assert manifest["input_hashes_complete"] is True
     assert manifest["produced_outputs"] == ["sample.pt"]
+    assert hash_calls == [input_path]
 
 
 def test_preprocess_interruption_invalidates_old_complete_manifest_before_output_mutation(tmp_path):
@@ -426,7 +436,7 @@ def test_small_dataset_splits_are_disjoint_and_cover_all_files(tmp_path):
     assert set.union(*splits.values()) == {str(path) for path in tmp_path.glob("*.pt")}
 
 
-def test_dataset_cache_signature_hashes_each_source_once(tmp_path, monkeypatch):
+def test_dataset_cache_signature_stats_each_source_once_without_content_hashes(tmp_path, monkeypatch):
     paths = [tmp_path / f"sample-{index}.pt" for index in range(3)]
     for path in paths:
         path.write_bytes(path.name.encode())
@@ -440,9 +450,10 @@ def test_dataset_cache_signature_hashes_each_source_once(tmp_path, monkeypatch):
         return original(path)
 
     monkeypatch.setattr(dataset, "_file_signature", counted)
-    dataset._cache_signature([str(paths[0]), str(paths[1])])
+    signature = dataset._cache_signature([str(paths[0]), str(paths[1])])
 
     assert sorted(calls) == sorted(str(path) for path in paths)
+    assert all("sha256" not in entry for entry in signature["all_files"])
 
 
 def test_dataset_rejects_nonfinite_or_misaligned_payload(tmp_path):

@@ -35,7 +35,19 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
     try:
         inspection = inspect_structure(args.input_structure, chain_id=args.chain_id, max_len=args.max_len)
     except Exception as exc:
-        print(f"ProtCross inspection failed: {exc}", file=sys.stderr)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"ProtCross inspection failed: {exc}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(inspection, indent=2))

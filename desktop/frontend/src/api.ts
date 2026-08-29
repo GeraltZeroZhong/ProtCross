@@ -161,13 +161,16 @@ export function inspectStructure(inputStructure: string, chainId?: string): Prom
     method: "POST",
     body: JSON.stringify({
       input_structure: inputStructure,
-      chain_id: chainId || undefined
+      chain_id: chainId === undefined ? undefined : chainId
     })
   });
 }
 
 export function submitBatch(payload: {
-  structures: string[];
+  items: Array<{
+    input_structure: string;
+    chain_id?: string;
+  }>;
   output_dir?: string;
   threshold: number;
   pocket_cluster_cutoff: number;
@@ -183,14 +186,28 @@ export function getBatch(jobId: string, limit = 500, offset = 0, signal?: AbortS
   return request<BatchJob>(`/batch/${jobId}?limit=${limit}&offset=${offset}`, { signal });
 }
 
-export function getBatchResult(jobId: string, inputStructure: string): Promise<BatchResultResponse> {
+export function getBatchResult(
+  jobId: string,
+  inputStructure: string,
+  chainId?: string | null
+): Promise<BatchResultResponse> {
+  const chainQuery = chainId === undefined || chainId === null
+    ? ""
+    : `&chain_id=${encodeURIComponent(chainId)}`;
   return request<BatchResultResponse>(
-    `/batch/${jobId}/result?input_structure=${encodeURIComponent(inputStructure)}`
+    `/batch/${jobId}/result?input_structure=${encodeURIComponent(inputStructure)}${chainQuery}`
   );
 }
 
 export function cancelBatch(jobId: string): Promise<BatchJob> {
   return request<BatchJob>(`/batch/${jobId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export function retryBatch(jobId: string): Promise<BatchJob> {
+  return request<BatchJob>(`/batch/${jobId}/retry`, {
     method: "POST",
     body: JSON.stringify({})
   });
