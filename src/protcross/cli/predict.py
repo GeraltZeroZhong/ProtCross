@@ -299,26 +299,6 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
     return 0
 
 
-def _resolve_asset_directory(
-    assets_dir: str | None,
-    *,
-    auto_setup: bool = False,
-    asset_version: str = "default",
-    refresh: bool = False,
-    accept_esm_license: bool = False,
-):
-    from protcross.assets import resolve_prediction_assets
-
-    resolved = resolve_prediction_assets(
-        assets_dir=assets_dir,
-        auto_setup_assets=auto_setup,
-        asset_version=asset_version,
-        refresh_assets=refresh,
-        accept_esm_license=accept_esm_license,
-    )
-    return resolved.assets
-
-
 def _resolve_prediction_asset_paths(args: argparse.Namespace, *, auto_setup: bool):
     from protcross.assets import resolve_prediction_assets
 

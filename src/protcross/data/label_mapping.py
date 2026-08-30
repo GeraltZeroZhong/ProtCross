@@ -21,6 +21,9 @@ from tqdm import tqdm
 from protcross.data.structure import StructureParser
 
 
+_AF2_MODEL_SUFFIX = re.compile(r"^(?P<accession>.+)-f\d+(?:-.*)?$")
+
+
 @dataclass
 class LabelMappingConfig:
     processed_pdb_dir: Path = Path("data/processed_pdb")
@@ -245,20 +248,15 @@ def _index_af2_files(
     """Resolve conventional AF2 filenames to exact known accessions."""
     by_path: dict[Path, str] = {}
     path_by_accession: dict[str, Path] = {}
-    known_accessions = sorted(uniprot_to_pdb, key=lambda value: (-len(value), value))
+    known_accessions = set(uniprot_to_pdb)
     for path in files:
         stem = path.stem.casefold()
-        matches = []
-        for accession in known_accessions:
-            for prefix in (f"af-{accession}", accession):
-                if stem == prefix:
-                    matches.append(accession)
-                    break
-                remainder = stem[len(prefix):] if stem.startswith(prefix) else ""
-                if remainder and re.fullmatch(r"-f\d+(?:-.*)?", remainder):
-                    matches.append(accession)
-                    break
-        matches = list(dict.fromkeys(matches))
+        normalized_stem = stem[3:] if stem.startswith("af-") else stem
+        candidates = [normalized_stem]
+        model_match = _AF2_MODEL_SUFFIX.fullmatch(normalized_stem)
+        if model_match:
+            candidates.append(model_match.group("accession"))
+        matches = list(dict.fromkeys(candidate for candidate in candidates if candidate in known_accessions))
         if len(matches) > 1:
             raise RuntimeError(
                 f"Ambiguous {description} filename {path.name}: matches UniProt accessions "
@@ -339,6 +337,17 @@ def sequence_from_processed_or_raw(af2_data: dict, raw_sequence: str | None) -> 
     return raw_sequence[: af2_data["pos"].shape[0]] if raw_sequence else None
 
 
+def _sequence_for_af2_data(
+    af2_data: dict,
+    parser: StructureParser,
+    raw_af2_path: str | Path,
+) -> str | None:
+    sequence = sequence_from_processed_or_raw(af2_data, None)
+    if sequence:
+        return sequence
+    return sequence_from_processed_or_raw(af2_data, parse_sequence(parser, raw_af2_path))
+
+
 def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
     if not config.mapping_file.exists():
         raise FileNotFoundError(f"Mapping file not found: {config.mapping_file}")
@@ -411,7 +420,7 @@ def map_labels(config: LabelMappingConfig) -> dict[str, float | int]:
 
         try:
             af2_data = torch.load(af2_path, weights_only=False)
-            af2_sequence = sequence_from_processed_or_raw(af2_data, parse_sequence(parser, raw_af2_files[0]))
+            af2_sequence = _sequence_for_af2_data(af2_data, parser, raw_af2_files[0])
             if not af2_sequence:
                 stats["failed"] += 1
                 continue

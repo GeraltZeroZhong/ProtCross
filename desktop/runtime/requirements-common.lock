@@ -11,4 +11,4 @@ torchtext==0.18.0
 tqdm==4.67.3
 esm==3.2.1.post1
 httpx==0.28.1
-protcross==0.2.2
+protcross==0.2.3

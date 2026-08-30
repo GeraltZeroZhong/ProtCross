@@ -86,6 +86,8 @@ def run_strategy_search() -> pd.DataFrame:
     logs_root = "logs/grand_comparison_multiseed"
     tasks = [(family, strategy) for family, strategies in STRATEGY_GRID.items() for strategy in strategies]
     results = []
+    pdb_data_signature = dir_signature(data_dir_pdb)
+    af2_data_signature = dir_signature(data_dir_af2)
 
     print("Multi-seed strategy analysis starting.")
     print(f"Seeds: {SEEDS}")
@@ -106,6 +108,8 @@ def run_strategy_search() -> pd.DataFrame:
                 seed=seed,
                 data_dir_pdb=data_dir_pdb,
                 data_dir_af2=data_dir_af2,
+                pdb_data_signature=pdb_data_signature,
+                af2_data_signature=af2_data_signature,
             )
 
             if os.path.exists(best_ckpt) and should_resume_checkpoint(best_ckpt, signature):
@@ -216,15 +220,23 @@ def checkpoint_manifest_path(checkpoint_path: str) -> str:
     return checkpoint_path + ".protcross-strategy.json"
 
 
-def strategy_run_signature(*, strategy: str, seed: int, data_dir_pdb: str, data_dir_af2: str) -> dict:
+def strategy_run_signature(
+    *,
+    strategy: str,
+    seed: int,
+    data_dir_pdb: str,
+    data_dir_af2: str,
+    pdb_data_signature: list[dict] | None = None,
+    af2_data_signature: list[dict] | None = None,
+) -> dict:
     return {
         "strategy": strategy,
         "seed": seed,
         "max_epochs": MAX_EPOCHS,
         "batch_size": BATCH_SIZE,
         "da_weight": DA_WEIGHT,
-        "data_dir_pdb": dir_signature(data_dir_pdb),
-        "data_dir_af2": dir_signature(data_dir_af2),
+        "data_dir_pdb": pdb_data_signature if pdb_data_signature is not None else dir_signature(data_dir_pdb),
+        "data_dir_af2": af2_data_signature if af2_data_signature is not None else dir_signature(data_dir_af2),
     }
 
 
@@ -242,7 +254,6 @@ def dir_signature(directory: str) -> list[dict]:
                 "name": name,
                 "size": int(stat.st_size),
                 "mtime_ns": int(stat.st_mtime_ns),
-                "sha256": file_sha256(path),
             }
         )
     return records

@@ -1,6 +1,6 @@
 [package]
 name = "protcross-desktop"
-version = "0.2.2"
+version = "0.2.3"
 description = "ProtCross Desktop for Windows and macOS"
 authors = ["ProtCross contributors"]
 license = "MIT"

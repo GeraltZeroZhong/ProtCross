@@ -60,9 +60,6 @@ def preprocess_directory(config: PreprocessConfig) -> int:
     require_esm_license_acceptance(config.accept_esm_license)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    _mark_preprocess_incomplete(config, raw_files)
-    if not config.append:
-        _quarantine_orphan_outputs(config.output_dir, raw_files)
     esm_extractor = ESMFeatureExtractor(model_path=config.model_name, device=config.device)
     structure_parser = StructureParser()
     pca_reducer = PCAReducer(n_components=config.pca_dim, random_state=config.seed)
@@ -135,10 +132,13 @@ def _process_files(
 ) -> int:
     print(f"Processing {len(raw_files)} files (is_af2={config.is_af2})...")
     _mark_preprocess_incomplete(config, raw_files)
+    if not config.append:
+        _quarantine_orphan_outputs(config.output_dir, raw_files)
     success_count = 0
     failures = []
     skipped = []
     produced_outputs = []
+    input_sha256_by_path: dict[Path, str] = {}
     for file_path in tqdm(raw_files, desc="Processing"):
         output_path = config.output_dir / f"{file_path.stem}.pt"
         output_path.with_suffix(output_path.suffix + ".part").unlink(missing_ok=True)
@@ -168,6 +168,8 @@ def _process_files(
             else:
                 plddt = torch.ones(len(parsed["coords"]))
 
+            source_sha256 = _file_sha256(file_path)
+            input_sha256_by_path[file_path] = source_sha256
             payload = {
                 "pos": torch.from_numpy(parsed["coords"]),
                 "x": reduced_embeddings,
@@ -179,7 +181,7 @@ def _process_files(
                 "original_length": int(parsed.get("original_length", len(parsed["sequence"]))),
                 "source_path": str(file_path),
                 "source_mtime_ns": file_path.stat().st_mtime_ns,
-                "source_sha256": _file_sha256(file_path),
+                "source_sha256": source_sha256,
             }
             residue_metadata = parsed.get("residue_metadata")
             if residue_metadata is not None:
@@ -212,6 +214,7 @@ def _process_files(
         failures,
         skipped,
         complete=complete,
+        input_sha256_by_path=input_sha256_by_path,
     )
     if success_count == 0:
         first = failures[0] if failures else skipped[0]
@@ -325,7 +328,9 @@ def _write_preprocess_manifest(
     *,
     complete: bool,
     include_input_hashes: bool = True,
+    input_sha256_by_path: dict[Path, str] | None = None,
 ) -> None:
+    input_sha256_by_path = input_sha256_by_path or {}
     manifest = {
         "schema_version": "protcross-preprocess-v1",
         "complete": bool(complete),
@@ -347,7 +352,11 @@ def _write_preprocess_manifest(
                 "output": f"{path.stem}.pt",
                 "size_bytes": path.stat().st_size,
                 "mtime_ns": path.stat().st_mtime_ns,
-                "sha256": _file_sha256(path) if include_input_hashes else None,
+                "sha256": (
+                    input_sha256_by_path.get(path) or _file_sha256(path)
+                    if include_input_hashes
+                    else None
+                ),
             }
             for path in raw_files
         ],

@@ -18,6 +18,7 @@ import {
   importPca,
   inspectStructure,
   openResult,
+  retryBatch,
   runPrediction,
   configureDesktopApi,
   submitBatch,
@@ -31,9 +32,11 @@ import type {
   PredictResponse,
   PocketJson,
   ResidueSummary,
+  SummaryJson,
   StructureInspection
 } from "./types";
 import { Icon, type IconName } from "./components/Icon";
+import { recomputeLocalResult } from "./localResults";
 
 type Tab = "setup" | "predict" | "batch" | "results" | "diagnostics";
 type ThemePreference = "system" | "light" | "dark";
@@ -42,11 +45,20 @@ interface BackendStartResult {
   port: number;
 }
 
+type BatchPreflightStatus = "checking" | "ready" | "failed";
+
+interface BatchPreflight {
+  status: BatchPreflightStatus;
+  chainId: string;
+  inspection?: StructureInspection;
+  error?: string;
+}
+
 const DEFAULT_THRESHOLD = 0.5;
 const DEFAULT_CLUSTER_CUTOFF = 8.0;
 const BATCH_PAGE_SIZE = 500;
 const ESM_LICENSE_URL = "https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement";
-const TECHNICAL_GUIDE_URL = "https://github.com/GeraltZeroZhong/ProtCross/blob/v0.2.2/README.md#model-and-inference-pipeline";
+const TECHNICAL_GUIDE_URL = "https://github.com/GeraltZeroZhong/ProtCross/blob/v0.2.3/README.md#model-and-inference-pipeline";
 const APP_VERSION = packageInfo.version;
 const ALL_CHAINS = "__all_chains__";
 const MolstarViewer = lazy(() =>
@@ -95,10 +107,11 @@ export default function App() {
   const [clusterCutoff, setClusterCutoff] = useState(() => storedNumber("protcross-cluster-cutoff", DEFAULT_CLUSTER_CUTOFF));
   const [allowTruncation, setAllowTruncation] = useState(false);
   const [batchInputs, setBatchInputs] = useState<string[]>([]);
+  const [batchPreflights, setBatchPreflights] = useState<Record<string, BatchPreflight>>({});
   const [batchJob, setBatchJob] = useState<BatchJob | null>(null);
+  const [batchHistory, setBatchHistory] = useState<BatchJob[]>([]);
   const [batchPageOffset, setBatchPageOffset] = useState(0);
   const [batchResult, setBatchResult] = useState<PredictResponse | null>(null);
-  const [selectedBatchInput, setSelectedBatchInput] = useState("");
   const [prediction, setPrediction] = useState<PredictResponse | null>(null);
   const [envTest, setEnvTest] = useState<Record<string, unknown> | null>(null);
   const [pendingAction, setPendingAction] = useState("");
@@ -151,6 +164,7 @@ export default function App() {
       return current;
     });
     const recentBatches = [...(next.activity?.batch_jobs ?? [])].reverse();
+    setBatchHistory(recentBatches);
     const activeBatch = recentBatches.find((job) => ["queued", "running"].includes(job.status));
     const recentBatch = activeBatch ?? recentBatches[0];
     setBatchJob((current) => {
@@ -169,6 +183,73 @@ export default function App() {
     if (!batchJob && activeBatch) {
       setTab("batch");
     }
+  }
+
+  function rememberBatchJob(job: BatchJob) {
+    const summary = { ...job, items: [], items_offset: 0, items_returned: 0 };
+    setBatchHistory((current) => current.some((item) => item.id === job.id)
+      ? current.map((item) => item.id === job.id ? summary : item)
+      : [summary, ...current]);
+  }
+
+  async function inspectBatchInputs(paths: string[]) {
+    for (let start = 0; start < paths.length; start += 4) {
+      const group = paths.slice(start, start + 4);
+      await Promise.all(group.map(async (path) => {
+        try {
+          const report = await inspectStructure(path);
+          if (!report.chain_summaries.some((chain) => chain.scorable_residue_count > 0)) {
+            throw new Error("No scorable chain with standard amino-acid Cα coordinates was found.");
+          }
+          setBatchPreflights((current) => {
+            const currentChain = current[path]?.chainId ?? ALL_CHAINS;
+            const chainId = currentChain === ALL_CHAINS
+              || report.chain_summaries.some((chain) => chain.chain_id === currentChain)
+              ? currentChain
+              : ALL_CHAINS;
+            return {
+              ...current,
+              [path]: { status: "ready", chainId, inspection: report }
+            };
+          });
+        } catch (exc) {
+          setBatchPreflights((current) => ({
+            ...current,
+            [path]: {
+              status: "failed",
+              chainId: current[path]?.chainId ?? ALL_CHAINS,
+              error: exc instanceof Error ? exc.message : String(exc)
+            }
+          }));
+        }
+      }));
+    }
+  }
+
+  function replaceBatchInputs(paths: string[]) {
+    const next = uniquePaths(paths);
+    const added = next.filter((path) => !batchInputs.includes(path));
+    setBatchInputs(next);
+    setBatchPreflights((current) => {
+      const retained = Object.fromEntries(
+        Object.entries(current).filter(([path]) => next.includes(path))
+      );
+      for (const path of added) {
+        retained[path] = { status: "checking", chainId: ALL_CHAINS };
+      }
+      return retained;
+    });
+    if (added.length) {
+      void inspectBatchInputs(added);
+    }
+  }
+
+  function recheckBatchInput(path: string) {
+    setBatchPreflights((current) => ({
+      ...current,
+      [path]: { status: "checking", chainId: current[path]?.chainId ?? ALL_CHAINS }
+    }));
+    void inspectBatchInputs([path]);
   }
 
   async function refresh() {
@@ -296,7 +377,6 @@ export default function App() {
       const result = await openResult(selected);
       setPrediction(result);
       setBatchResult(null);
-      setSelectedBatchInput("");
       setMessage(`Opened ${fileName(selected)}.`);
       setTab("results");
     } catch (exc) {
@@ -319,7 +399,7 @@ export default function App() {
           setBatchInputs(preview.batchJob.items.map((item) => item.input_structure));
         }
         if (UI_PREVIEW_TAB === "diagnostics") {
-          setEnvTest({ ok: true, device: "cpu", checks: { protcross: "0.2.2", torch: "2.3.1" } });
+          setEnvTest({ ok: true, device: "cpu", checks: { protcross: APP_VERSION, torch: "2.3.1" } });
         }
         return;
       }
@@ -327,7 +407,12 @@ export default function App() {
         const backend = await invoke<BackendStartResult>("start_backend", { port: 0 });
         configureDesktopApi(backend.token, backend.port);
         const next = await waitForBackendStatus();
-        if (next?.readiness?.ready) {
+        const batchNeedsAttention = next.activity?.batch_jobs?.some((job) => (
+          ["queued", "running", "interrupted"].includes(job.status)
+        ));
+        if (batchNeedsAttention) {
+          setTab("batch");
+        } else if (next?.readiness?.ready) {
           setTab("predict");
         }
       } catch (exc) {
@@ -452,6 +537,7 @@ export default function App() {
         consecutiveFailures = 0;
         setBackendConnectionLost(false);
         setBatchJob(next);
+        rememberBatchJob(next);
         setBatchPageOffset(next.items_offset ?? batchPageOffset);
       } catch (exc) {
         if (cancelled) {
@@ -481,6 +567,35 @@ export default function App() {
     };
   }, [batchJob?.id, batchJob?.status, batchPageOffset]);
 
+  useEffect(() => {
+    if (
+      !batchJob
+      || ["queued", "running"].includes(batchJob.status)
+      || (batchJob.item_count ?? 0) === 0
+      || batchJob.items.length > 0
+    ) {
+      return;
+    }
+    const jobId = batchJob.id;
+    let cancelled = false;
+    getBatch(jobId, BATCH_PAGE_SIZE, 0)
+      .then((job) => {
+        if (!cancelled) {
+          setBatchJob(job);
+          rememberBatchJob(job);
+          setBatchPageOffset(job.items_offset ?? 0);
+        }
+      })
+      .catch((exc) => {
+        if (!cancelled) {
+          setError(exc instanceof Error ? exc.message : String(exc));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [batchJob?.id, batchJob?.status, batchJob?.item_count, batchJob?.items.length]);
+
   async function loadBatchPage(offset: number) {
     if (!batchJob) {
       return;
@@ -489,6 +604,7 @@ export default function App() {
     try {
       const next = await getBatch(batchJob.id, BATCH_PAGE_SIZE, Math.max(0, offset));
       setBatchJob(next);
+      rememberBatchJob(next);
       setBatchPageOffset(next.items_offset ?? Math.max(0, offset));
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -498,13 +614,11 @@ export default function App() {
   const setupIssues = useMemo(() => readinessIssues(status), [status]);
   const ready = setupIssues.length === 0;
   const batchActive = batchJob ? ["queued", "running"].includes(batchJob.status) : false;
-  const resultBatchItem =
-    batchJob?.items.find((item) => item.input_structure === selectedBatchInput)
-    ?? batchJob?.items.find((item) => item.output_files?.structure);
-  const resultStructure = prediction?.output_files.structure ?? batchResult?.output_files.structure ?? resultBatchItem?.output_files?.structure;
-  const resultOutputFiles = prediction?.output_files ?? batchResult?.output_files ?? resultBatchItem?.output_files;
+  const resultStructure = prediction?.output_files.structure ?? batchResult?.output_files.structure;
+  const resultOutputFiles = prediction?.output_files ?? batchResult?.output_files;
   const resultSummary = prediction?.summary ?? batchResult?.summary ?? null;
   const resultPockets = prediction?.pockets ?? batchResult?.pockets ?? null;
+  const resultScores = prediction?.scores ?? batchResult?.scores ?? [];
   const resultResidues = prediction?.top_pocket_residues ?? batchResult?.top_pocket_residues ?? [];
   const topResidues = useMemo(() => {
     const residues = resultResidues.length ? resultResidues : ((resultSummary?.top_residues ?? []) as ResidueSummary[]);
@@ -765,7 +879,6 @@ export default function App() {
                 });
                 setPrediction(result);
                 setBatchResult(null);
-                setSelectedBatchInput("");
                 setMessage("Prediction finished.");
                 setTab("results");
               } catch (exc) {
@@ -783,7 +896,13 @@ export default function App() {
             setupIssues={setupIssues}
             busy={Boolean(pendingAction)}
             batchInputs={batchInputs}
-            setBatchInputs={setBatchInputs}
+            setBatchInputs={replaceBatchInputs}
+            batchPreflights={batchPreflights}
+            setBatchChain={(path, chainId) => setBatchPreflights((current) => ({
+              ...current,
+              [path]: { ...current[path], chainId }
+            }))}
+            onRecheckInput={recheckBatchInput}
             outputDir={outputDir}
             setOutputDir={setOutputDir}
             defaultOutputRoot={status?.paths.outputs_dir}
@@ -794,6 +913,7 @@ export default function App() {
             allowTruncation={allowTruncation}
             setAllowTruncation={setAllowTruncation}
             batchJob={batchJob}
+            batchHistory={batchHistory}
             batchActive={batchActive}
             batchPageSize={BATCH_PAGE_SIZE}
             batchPageOffset={batchPageOffset}
@@ -803,13 +923,12 @@ export default function App() {
               }
               setError("");
               try {
-                const detail = await getBatchResult(batchJob.id, item.input_structure);
+                const detail = await getBatchResult(batchJob.id, item.input_structure, item.chain_id);
                 setBatchResult(detail);
               } catch (exc) {
                 setError(exc instanceof Error ? exc.message : String(exc));
                 return;
               }
-              setSelectedBatchInput(item.input_structure);
               setPrediction(null);
               setTab("results");
             }}
@@ -822,6 +941,10 @@ export default function App() {
                 if (batchInputs.length === 0) {
                   throw new Error("Select at least one structure for batch prediction.");
                 }
+                const unchecked = batchInputs.filter((path) => batchPreflights[path]?.status !== "ready");
+                if (unchecked.length) {
+                  throw new Error("Finish the structure checks and resolve every failed precheck before starting the batch.");
+                }
                 validatePredictionInputs(batchInputs[0], threshold, clusterCutoff);
               } catch (exc) {
                 setError(exc instanceof Error ? exc.message : String(exc));
@@ -830,23 +953,66 @@ export default function App() {
               setPendingAction("Starting batch...");
               try {
                 const job = await submitBatch({
-                  structures: batchInputs,
+                  items: batchInputs.map((path) => ({
+                    input_structure: path,
+                    chain_id: batchPreflights[path].chainId === ALL_CHAINS
+                      ? undefined
+                      : batchPreflights[path].chainId
+                  })),
                   output_dir: outputDir || undefined,
                   threshold,
                   pocket_cluster_cutoff: clusterCutoff,
                   allow_truncation: allowTruncation
                 });
                 setBatchJob(job);
+                rememberBatchJob(job);
                 setBatchPageOffset(job.items_offset ?? 0);
                 setBatchResult(null);
-                setSelectedBatchInput("");
               } catch (exc) {
                 setError(exc instanceof Error ? exc.message : String(exc));
               } finally {
                 setPendingAction("");
               }
             }}
-            onCancel={() => batchJob && cancelBatch(batchJob.id).then(setBatchJob).catch((exc) => setError(String(exc)))}
+            onCancel={() => batchJob && cancelBatch(batchJob.id).then((job) => {
+              setBatchJob(job);
+              rememberBatchJob(job);
+            }).catch((exc) => setError(String(exc)))}
+            onRetryFailed={async () => {
+              if (!batchJob || pendingAction || batchActive) {
+                return;
+              }
+              setError("");
+              setPendingAction("Retrying failed structures...");
+              try {
+                const retry = await retryBatch(batchJob.id);
+                setBatchJob(retry);
+                setBatchPageOffset(retry.items_offset ?? 0);
+                rememberBatchJob(retry);
+                setMessage(`Started retry batch ${retry.id}.`);
+              } catch (exc) {
+                setError(exc instanceof Error ? exc.message : String(exc));
+              } finally {
+                setPendingAction("");
+              }
+            }}
+            onSelectHistory={async (jobId) => {
+              if (pendingAction || batchActive && batchJob?.id !== jobId) {
+                return;
+              }
+              setError("");
+              setPendingAction("Loading batch history...");
+              try {
+                const selected = await getBatch(jobId, BATCH_PAGE_SIZE, 0);
+                setBatchJob(selected);
+                rememberBatchJob(selected);
+                setBatchPageOffset(selected.items_offset ?? 0);
+              } catch (exc) {
+                setError(exc instanceof Error ? exc.message : String(exc));
+              } finally {
+                setPendingAction("");
+              }
+            }}
             onPageChange={(offset) => void loadBatchPage(offset)}
           />
         ) : null}
@@ -857,6 +1023,7 @@ export default function App() {
             outputFiles={resultOutputFiles}
             summary={resultSummary}
             pockets={resultPockets}
+            scores={resultScores}
             residues={topResidues}
             darkMode={themePreference === "dark" || (themePreference === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches)}
             onOpenExisting={() => void openExistingResult()}
@@ -886,6 +1053,7 @@ export default function App() {
               try {
                 const result = await exportDiagnostics();
                 setMessage(`Diagnostic package written: ${result.path}`);
+                await invoke("open_path", { path: parentPath(result.path) });
               } catch (exc) {
                 setError(exc instanceof Error ? exc.message : String(exc));
               }
@@ -1271,6 +1439,9 @@ function BatchPanel(props: {
   busy: boolean;
   batchInputs: string[];
   setBatchInputs: (value: string[]) => void;
+  batchPreflights: Record<string, BatchPreflight>;
+  setBatchChain: (path: string, chainId: string) => void;
+  onRecheckInput: (path: string) => void;
   outputDir: string;
   setOutputDir: (value: string) => void;
   defaultOutputRoot?: string;
@@ -1281,12 +1452,15 @@ function BatchPanel(props: {
   allowTruncation: boolean;
   setAllowTruncation: (value: boolean) => void;
   batchJob: BatchJob | null;
+  batchHistory: BatchJob[];
   batchActive: boolean;
   batchPageSize: number;
   batchPageOffset: number;
   onViewItem: (item: BatchJob["items"][number]) => void | Promise<void>;
   onSubmit: () => void;
   onCancel: () => void;
+  onRetryFailed: () => void;
+  onSelectHistory: (jobId: string) => void;
   onPageChange: (offset: number) => void;
 }) {
   const pageOffset = props.batchJob?.items_offset ?? props.batchPageOffset;
@@ -1300,6 +1474,18 @@ function BatchPanel(props: {
   const successful = Math.max(0, processed - (props.batchJob?.failed ?? 0));
   const progressLabel = props.batchJob ? `${processed}/${itemCount} processed · ${props.batchJob.failed} failed` : "";
   const progress = itemCount ? Math.min(100, (processed / itemCount) * 100) : 0;
+  const preflightsReady = props.batchInputs.length > 0
+    && props.batchInputs.every((path) => props.batchPreflights[path]?.status === "ready");
+  const truncationBlocked = !props.allowTruncation
+    && props.batchInputs.some((path) => batchScopeRequiresTruncation(props.batchPreflights[path]));
+  const retryable = Boolean(
+    props.batchJob
+    && (
+      props.batchJob.failed > 0
+      || (props.batchJob.status === "interrupted" && processed < itemCount)
+    )
+    && !["queued", "running"].includes(props.batchJob.status)
+  );
   return (
     <div className="batch-layout">
       {!props.ready ? <div className="callout warning span-all"><Icon name="warning" /><div><strong>Batch prediction is unavailable</strong><span>{props.setupIssues[0] ?? "Complete environment setup first."}</span></div></div> : null}
@@ -1323,15 +1509,52 @@ function BatchPanel(props: {
           </div>
         </div>
         {props.batchInputs.length ? (
-          <div className="staging-list" aria-label={`${props.batchInputs.length} selected structures`}>
+          <div className="staging-list" aria-label={`${props.batchInputs.length} selected structures`} tabIndex={0}>
             <div className="staging-summary"><strong>{props.batchInputs.length} structure{props.batchInputs.length === 1 ? "" : "s"}</strong><span>Duplicates are removed automatically</span></div>
-            {props.batchInputs.map((path) => (
-              <div className="staging-item" key={path}>
-                <span className="file-type">{fileExtension(path)}</span>
-                <span className="file-copy"><strong>{fileName(path)}</strong><small title={path}>{parentPath(path)}</small></span>
-                <button aria-label={`Remove ${fileName(path)}`} className="icon-button subtle" disabled={props.batchActive} onClick={() => props.setBatchInputs(props.batchInputs.filter((item) => item !== path))}><Icon name="close" /></button>
-              </div>
-            ))}
+            {props.batchInputs.map((path) => {
+              const preflight = props.batchPreflights[path];
+              const scorableChains = preflight?.inspection?.chain_summaries.filter(
+                (chain) => chain.scorable_residue_count > 0
+              ) ?? [];
+              const requiresTruncation = batchScopeRequiresTruncation(preflight);
+              return (
+                <div className="staging-item" key={path}>
+                  <span className="file-type">{fileExtension(path)}</span>
+                  <span className="file-copy"><strong>{fileName(path)}</strong><small title={path}>{parentPath(path)}</small></span>
+                  <div className="staging-preflight">
+                    {preflight?.status === "checking" || !preflight ? (
+                      <span className="preflight-state checking"><span className="button-spinner" /> Checking structure</span>
+                    ) : null}
+                    {preflight?.status === "ready" ? (
+                      <label className="compact-field batch-chain-field">
+                        <span>Scorable chain</span>
+                        <select
+                          aria-label={`Scorable chain for ${fileName(path)}`}
+                          value={preflight.chainId}
+                          disabled={props.batchActive}
+                          onChange={(event) => props.setBatchChain(path, event.target.value)}
+                        >
+                          <option value={ALL_CHAINS}>All scorable chains</option>
+                          {scorableChains.map((chain) => (
+                            <option value={chain.chain_id} key={chain.chain_id}>
+                              {displayChain(chain.chain_id)} · {chain.scorable_residue_count} residues
+                            </option>
+                          ))}
+                        </select>
+                        {requiresTruncation ? <small>The selected scope exceeds 1,022 residues in a chain; enable long-chain truncation below.</small> : null}
+                      </label>
+                    ) : null}
+                    {preflight?.status === "failed" ? (
+                      <div className="preflight-failure" role="alert">
+                        <span>{preflight.error}</span>
+                        <button disabled={props.batchActive} onClick={() => props.onRecheckInput(path)}>Check again</button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <button aria-label={`Remove ${fileName(path)}`} className="icon-button subtle" disabled={props.batchActive} onClick={() => props.setBatchInputs(props.batchInputs.filter((item) => item !== path))}><Icon name="close" /></button>
+                </div>
+              );
+            })}
           </div>
         ) : (
           <div className="empty-dropzone"><div className="empty-icon"><Icon name="batch" size={26} /></div><strong>Your queue is empty</strong><span>Add one or more structures to begin a batch.</span></div>
@@ -1345,7 +1568,7 @@ function BatchPanel(props: {
         <details className="disclosure settings-disclosure">
           <summary><Icon name="settings" /> Advanced settings <span>{props.threshold.toFixed(2)} · {props.clusterCutoff.toFixed(1)} Å</span></summary>
           <div className="disclosure-content">
-            <div className="callout neutral compact-callout"><Icon name="info" /><div><strong>Chain scope</strong><span>Each batch structure uses all scorable chains in one geometry graph. Use single prediction or a prepared subset file for chain-specific analysis.</span></div></div>
+            <div className="callout neutral compact-callout"><Icon name="info" /><div><strong>Per-structure chain scope</strong><span>Select all scorable chains or one chain beside each checked input.</span></div></div>
             <div className="inline-fields">
               <NumberInput label="Model-score cutoff" value={props.threshold} setValue={props.setThreshold} min={0} max={1} step={0.01} />
               <NumberInput label="Cluster distance (Å)" value={props.clusterCutoff} setValue={props.setClusterCutoff} min={0.1} max={40} step={0.5} />
@@ -1353,19 +1576,42 @@ function BatchPanel(props: {
             <label className="checkbox-line"><input type="checkbox" checked={props.allowTruncation} onChange={(event) => props.setAllowTruncation(event.target.checked)} /><span><strong>Allow long-chain truncation</strong><small>Applied only where an ESM-C chain context exceeds 1,022 residues.</small></span></label>
           </div>
         </details>
-        <div className="batch-submit-summary"><span>{props.batchInputs.length} queued</span><span>Bounded microbatch execution</span></div>
-        <button className="primary-action run-action full-width" disabled={props.busy || props.batchActive || !props.ready || props.batchInputs.length === 0} onClick={props.onSubmit}>
+        <div className="batch-submit-summary"><span>{props.batchInputs.length} queued</span><span>{!preflightsReady ? "Checking inputs" : truncationBlocked ? "Long-chain approval needed" : "Checks complete"}</span></div>
+        <button className="primary-action run-action full-width" disabled={props.busy || props.batchActive || !props.ready || !preflightsReady || truncationBlocked} onClick={props.onSubmit}>
           {props.batchActive ? <><span className="button-spinner" /> Batch running</> : props.busy ? "Starting batch…" : <><Icon name="play" /> Start batch prediction</>}
         </button>
       </section>
+
+      {props.batchHistory.length ? (
+        <section className="panel batch-history span-all">
+          <div className="section-heading"><span className="step-kicker">Recovered activity</span><h3>Recent batches</h3><p>Open a previous or restored queue to review completed files and failures.</p></div>
+          <div className="batch-history-list">
+            {props.batchHistory.map((job) => (
+              <button
+                className={job.id === props.batchJob?.id ? "selected" : ""}
+                disabled={props.busy || props.batchActive && job.id !== props.batchJob?.id}
+                key={job.id}
+                onClick={() => props.onSelectHistory(job.id)}
+              >
+                <StatusPill status={job.status} />
+                <span><strong>{formatBatchTime(job.created_at)}</strong><small>{job.completed}/{job.item_count ?? job.items.length} processed · {job.failed} failed</small></span>
+                {job.retry_of ? <small>Retry of {shortJobId(job.retry_of)}</small> : <small>{shortJobId(job.id)}</small>}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {props.batchJob ? (
         <section className="panel batch-monitor span-all">
           <div className="batch-monitor-header">
             <div><span className="step-kicker">Current run</span><h3>{humanizeStatus(props.batchJob.status)}</h3><p>{progressLabel}</p></div>
-            <button className="danger-action" disabled={props.batchJob.cancel_requested || !["queued", "running"].includes(props.batchJob.status)} onClick={props.onCancel}>
-              <Icon name="pause" /> {props.batchJob.cancel_requested ? "Stopping after current group" : "Stop after current group"}
-            </button>
+            <div className="button-row">
+              {retryable ? <button className="primary-action" disabled={props.busy} onClick={props.onRetryFailed}><Icon name="refresh" /> Retry failed</button> : null}
+              <button className="danger-action" disabled={props.batchJob.cancel_requested || !["queued", "running"].includes(props.batchJob.status)} onClick={props.onCancel}>
+                <Icon name="pause" /> {props.batchJob.cancel_requested ? "Stopping after current group" : "Stop after current group"}
+              </button>
+            </div>
           </div>
           <div className="batch-progress">
             <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
@@ -1376,7 +1622,8 @@ function BatchPanel(props: {
               <Metric label="Remaining" value={String(Math.max(0, itemCount - processed))} />
             </div>
           </div>
-          {props.batchJob.error ? <div className="inline-error batch-error" role="alert"><Icon name="warning" />{String(props.batchJob.error).split("\n")[0]}</div> : null}
+          {props.batchJob.status === "interrupted" ? <div className="callout warning compact-callout"><Icon name="warning" /><div><strong>Recovered interrupted batch</strong><span>The backend restarted before this queue finished. Completed outputs remain available; retry the unfinished items when ready.</span></div></div> : null}
+          {props.batchJob.error ? <div className="inline-error batch-error" role="alert"><Icon name="warning" /><pre>{String(props.batchJob.error)}</pre></div> : null}
           {props.batchJob.cancel_requested && ["queued", "running"].includes(props.batchJob.status) ? <div className="callout warning compact-callout"><Icon name="info" /><div><strong>Stop requested</strong><span>The active microbatch will finish; queued structures will remain untouched.</span></div></div> : null}
           <div className="table-wrap" tabIndex={0} aria-label="Batch prediction results">
             <table>
@@ -1384,10 +1631,10 @@ function BatchPanel(props: {
               <thead><tr><th scope="col">Status</th><th scope="col">Structure</th><th scope="col">Output or error</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
                 {props.batchJob.items.map((item) => (
-                  <tr key={item.input_structure}>
+                  <tr key={`${item.input_structure}\u0000${item.chain_id ?? ALL_CHAINS}`}>
                     <td><StatusPill status={item.status} /></td>
-                    <td><span className="table-file"><strong>{fileName(item.input_structure)}</strong><small title={item.input_structure}>{parentPath(item.input_structure)}</small></span></td>
-                    <td className={item.error ? "error-copy" : "path-copy"}>{item.error ? firstLine(item.error) : item.output_dir ?? parentPath(item.output_files?.summary_json ?? "")}</td>
+                    <td><span className="table-file"><strong>{fileName(item.input_structure)}</strong><small title={item.input_structure}>{parentPath(item.input_structure)} · {item.chain_id === null || item.chain_id === undefined ? "all chains" : displayChain(item.chain_id)}</small></span></td>
+                    <td className={item.error ? "error-copy" : "path-copy"}>{item.error ? <pre>{item.error}</pre> : item.output_dir ?? parentPath(item.output_files?.summary_json ?? "")}</td>
                     <td><button disabled={item.status !== "completed" || !item.output_files?.summary_json || props.busy} onClick={() => void props.onViewItem(item)}>View <Icon name="arrow-right" /></button></td>
                   </tr>
                 ))}
@@ -1405,11 +1652,24 @@ function BatchPanel(props: {
   );
 }
 
+function batchScopeRequiresTruncation(preflight?: BatchPreflight): boolean {
+  if (preflight?.status !== "ready" || !preflight.inspection) {
+    return false;
+  }
+  if (preflight.chainId === ALL_CHAINS) {
+    return preflight.inspection.requires_truncation;
+  }
+  return preflight.inspection.chain_summaries.some((chain) => (
+    chain.chain_id === preflight.chainId && chain.exceeds_esm_context
+  ));
+}
+
 function ResultsPanel(props: {
   structurePath?: string;
   outputFiles?: Record<string, string>;
-  summary: any;
+  summary: SummaryJson | null;
   pockets: PocketJson | null;
+  scores: ResidueSummary[];
   residues: ResidueSummary[];
   darkMode: boolean;
   onOpenExisting: () => void;
@@ -1417,12 +1677,54 @@ function ResultsPanel(props: {
   onError: (message: string) => void;
 }) {
   const [selectedClusterIndex, setSelectedClusterIndex] = useState(0);
-  const clusters = props.pockets?.clustered_pockets ?? [];
+  const originalThreshold = finiteNumber(props.summary?.threshold, finiteNumber(props.pockets?.threshold, DEFAULT_THRESHOLD));
+  const originalClusterCutoff = finiteNumber(
+    props.summary?.cluster_cutoff,
+    finiteNumber(props.pockets?.cluster_cutoff, DEFAULT_CLUSTER_CUTOFF)
+  );
+  const resultIdentity = String(
+    props.outputFiles?.summary_json
+    ?? props.summary?.input_file?.sha256
+    ?? props.summary?.input_structure
+    ?? props.structurePath
+    ?? "result"
+  );
+  const [displayThreshold, setDisplayThreshold] = useState(originalThreshold);
+  const [displayClusterCutoff, setDisplayClusterCutoff] = useState(originalClusterCutoff);
+  const [rankingPage, setRankingPage] = useState(0);
+  useEffect(() => {
+    setDisplayThreshold(originalThreshold);
+    setDisplayClusterCutoff(originalClusterCutoff);
+    setSelectedClusterIndex(0);
+    setRankingPage(0);
+  }, [resultIdentity, originalThreshold, originalClusterCutoff]);
+  const localView = useMemo(
+    () => recomputeLocalResult(props.scores, displayThreshold, displayClusterCutoff, props.pockets),
+    [props.scores, props.pockets, displayThreshold, displayClusterCutoff]
+  );
+  const displayedPockets = localView.pockets;
+  const clusters = displayedPockets?.clustered_pockets ?? [];
   const selectedCluster = clusters[selectedClusterIndex] ?? null;
-  const displayedPocket = selectedCluster ?? props.summary?.top_pocket ?? null;
-  const displayedResidues = selectedCluster?.residues ?? props.residues;
+  const displayedPocket = selectedCluster ?? (localView.available ? null : props.summary?.top_pocket) ?? null;
+  const displayedResidues = selectedCluster?.residues ?? (localView.available ? [] : props.residues);
   const center = displayedPocket?.center as number[] | undefined;
-  useEffect(() => setSelectedClusterIndex(0), [props.pockets]);
+  useEffect(() => setSelectedClusterIndex(0), [displayedPockets]);
+  const rankingPageSize = 100;
+  const rankingPageCount = Math.max(1, Math.ceil(localView.records.length / rankingPageSize));
+  const boundedRankingPage = Math.min(rankingPage, rankingPageCount - 1);
+  const rankingStart = boundedRankingPage * rankingPageSize;
+  const rankingRows = localView.records.slice(rankingStart, rankingStart + rankingPageSize);
+  const parametersChanged = displayThreshold !== originalThreshold
+    || displayClusterCutoff !== originalClusterCutoff;
+  const scoredResidueKeys = useMemo(
+    () => props.scores.some((residue) => Boolean(residue.residue_key))
+      ? props.scores
+        .filter((residue) => Number(residue.is_scored ?? 1) !== 0)
+        .map((residue) => residue.residue_key)
+        .filter((key): key is string => Boolean(key))
+      : undefined,
+    [props.scores]
+  );
   const outputAnchor = props.outputFiles?.summary_json ?? props.outputFiles?.structure ?? props.summary?.output_files?.summary_json;
   const outputDir = outputAnchor
     ? String(outputAnchor).replace(/[\\/][^\\/]+$/, "")
@@ -1450,7 +1752,7 @@ function ResultsPanel(props: {
   return (
     <div className="results-page">
       <section className="result-identity">
-        <div><span className="eyebrow">Prediction result</span><h3>{fileName(String(props.summary?.input_structure ?? props.structurePath ?? "ProtCross result"))}</h3><p>{displayedResidues.length} residues in the displayed cluster · {clusters.length} predicted cluster{clusters.length === 1 ? "" : "s"}</p></div>
+        <div><span className="eyebrow">Prediction result</span><h3>{fileName(String(props.summary?.input_structure ?? props.structurePath ?? "ProtCross result"))}</h3><p>{localView.selectedResidueCount} selected residues · {clusters.length} displayed cluster{clusters.length === 1 ? "" : "s"} · {localView.records.length} ranked residues</p></div>
         <div className="button-row">
           <button onClick={props.onOpenExisting}><Icon name="folder" /> Open another result</button>
           <button className="primary-action" disabled={!outputDir} onClick={() => outputDir && invoke("open_path", { path: outputDir }).catch((exc) => props.onError(String(exc)))}><Icon name="external" /> Show in folder</button>
@@ -1461,8 +1763,9 @@ function ResultsPanel(props: {
         <MolstarViewer
           structurePath={props.structurePath}
           summary={props.summary}
-          pockets={props.pockets}
+          pockets={displayedPockets}
           selectedClusterIndex={selectedClusterIndex}
+          scoredResidueKeys={scoredResidueKeys}
           darkMode={props.darkMode}
         />
       </Suspense>
@@ -1472,6 +1775,27 @@ function ResultsPanel(props: {
           <h3>Binding-site scores</h3>
           <p>Select a predicted-residue cluster to focus it in the structure viewer.</p>
         </div>
+        <section className="result-parameters" aria-label="Displayed result parameters">
+          <div className="inline-fields">
+            <NumberInput label="Displayed score cutoff" value={displayThreshold} setValue={setDisplayThreshold} min={0} max={1} step={0.01} disabled={localView.unavailableReason === "missing-data"} />
+            <NumberInput label="Displayed cluster distance (Å)" value={displayClusterCutoff} setValue={setDisplayClusterCutoff} min={0.1} max={40} step={0.5} disabled={localView.unavailableReason === "missing-data"} />
+          </div>
+          <div className="parameter-comparison">
+            <span><strong>Current display</strong> score &gt; {displayThreshold.toFixed(2)} · distance ≤ {displayClusterCutoff.toFixed(1)} Å</span>
+            <span><strong>Original run</strong> score &gt; {originalThreshold.toFixed(2)} · distance ≤ {originalClusterCutoff.toFixed(1)} Å</span>
+            <button disabled={!parametersChanged} onClick={() => {
+              setDisplayThreshold(originalThreshold);
+              setDisplayClusterCutoff(originalClusterCutoff);
+            }}>Reset display</button>
+          </div>
+          {localView.available ? (
+            <p className="field-help">Changes update this view locally without model inference or output-file changes.</p>
+          ) : localView.unavailableReason === "invalid-parameters" ? (
+            <div className="callout warning compact-callout"><Icon name="warning" /><div><strong>Display settings are invalid</strong><span>Use a score cutoff from 0 to 1 and a cluster distance greater than 0 Å, or reset the display.</span></div></div>
+          ) : (
+            <div className="callout warning compact-callout"><Icon name="warning" /><div><strong>Local regrouping unavailable</strong><span>This result does not include complete residue scores and Cα coordinates. The original run settings remain visible.</span></div></div>
+          )}
+        </section>
         {props.summary?.warnings?.length ? (
           <div className="warning-list">
             {props.summary.warnings.map((warning: string) => <div key={warning}><Icon name="warning" />{warning}</div>)}
@@ -1529,6 +1853,33 @@ function ResultsPanel(props: {
             </tbody>
           </table>
         </div>
+        <details className="disclosure result-rankings" open>
+          <summary><Icon name="results" /> All residue rankings <span>{localView.records.length} scored</span></summary>
+          <div className="disclosure-content">
+            <div className="table-wrap all-residue-table" tabIndex={0}>
+              <table>
+                <caption className="sr-only">All scored residues in global model-score rank order</caption>
+                <thead><tr><th scope="col">Rank</th><th scope="col">Residue</th><th scope="col">Chain</th><th scope="col">Cluster</th><th scope="col">Model score</th></tr></thead>
+                <tbody>
+                  {rankingRows.map((residue, index) => (
+                    <tr key={`${residue.residue_key ?? residue.residue_id}-${rankingStart + index}`}>
+                      <td>{Number.isFinite(Number(residue.rank_global)) ? Number(residue.rank_global) : rankingStart + index + 1}</td>
+                      <td>{residue.residue_id}</td>
+                      <td>{displayChain(String(residue.chain_id ?? residue.auth_asym_id ?? ""))}</td>
+                      <td>{residue.cluster_id ?? "—"}</td>
+                      <td><ScoreBar value={Number(residue.score ?? residue.probability)} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="pager">
+                <button disabled={boundedRankingPage === 0} onClick={() => setRankingPage(Math.max(0, boundedRankingPage - 1))}>Previous</button>
+                <span>{localView.records.length ? `${rankingStart + 1}–${Math.min(localView.records.length, rankingStart + rankingRows.length)}` : "0"} of {localView.records.length}</span>
+                <button disabled={boundedRankingPage + 1 >= rankingPageCount} onClick={() => setRankingPage(Math.min(rankingPageCount - 1, boundedRankingPage + 1))}>Next</button>
+              </div>
+            </div>
+          </div>
+        </details>
         <details className="disclosure result-details">
           <summary><Icon name="info" /> Result details and files</summary>
           <div className="disclosure-content">
@@ -1579,7 +1930,7 @@ function DiagnosticsPanel(props: {
       <section className="panel support-panel">
         <div className="section-heading"><span className="step-kicker">Support</span><h3>Resolve an issue</h3><p>Run the health check first. Exported diagnostics include versions, configuration, and local logs.</p></div>
         <div className="support-actions">
-          <button className="support-action" onClick={props.onExport}><span className="action-icon"><Icon name="download" /></span><span><strong>Export diagnostics</strong><small>Create a local ZIP for an issue report</small></span><Icon name="chevron-right" /></button>
+          <button className="support-action" onClick={props.onExport}><span className="action-icon"><Icon name="download" /></span><span><strong>Export diagnostics</strong><small>Create a local ZIP and open its folder</small></span><Icon name="chevron-right" /></button>
           <button className="support-action" onClick={props.onOpenScientificGuide}><span className="action-icon"><Icon name="help" /></span><span><strong>Technical guide</strong><small>Inputs, outputs, and inference details</small></span><Icon name="external" /></button>
           <button className="support-action" onClick={props.onOpenReleases}><span className="action-icon"><Icon name="refresh" /></span><span><strong>Check releases</strong><small>View current Desktop downloads</small></span><Icon name="external" /></button>
         </div>
@@ -1634,7 +1985,7 @@ function PathInput({ label, value, setValue, kind, prominent = false }: { label:
   );
 }
 
-function NumberInput(props: { label: string; value: number; setValue: (value: number) => void; min: number; max: number; step: number }) {
+function NumberInput(props: { label: string; value: number; setValue: (value: number) => void; min: number; max: number; step: number; disabled?: boolean }) {
   const id = useId();
   return (
     <div className="field">
@@ -1646,6 +1997,7 @@ function NumberInput(props: { label: string; value: number; setValue: (value: nu
         max={props.max}
         step={props.step}
         value={props.value}
+        disabled={props.disabled}
         onChange={(event) => props.setValue(Number(event.target.value))}
       />
     </div>
@@ -1671,7 +2023,15 @@ function StepHeader({ id, number, complete, title, subtitle }: { id: string; num
 }
 
 function StatusPill({ status }: { status: string }) {
-  const tone = status === "completed" ? "success" : status === "failed" ? "danger" : status === "running" ? "active" : status === "cancelled" ? "neutral" : "queued";
+  const tone = status === "completed"
+    ? "success"
+    : ["failed", "completed_with_errors", "interrupted"].includes(status)
+      ? "danger"
+      : status === "running"
+        ? "active"
+        : status === "cancelled"
+          ? "neutral"
+          : "queued";
   return <span className={`status-pill ${tone}`}><span className="status-dot" aria-hidden="true" />{humanizeStatus(status)}</span>;
 }
 
@@ -1898,12 +2258,24 @@ function uniquePaths(paths: string[]): string[] {
   });
 }
 
-function firstLine(value: string): string {
-  return value.split(/\r?\n/, 1)[0];
-}
-
 function humanizeStatus(status: string): string {
   return status.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function formatBatchTime(createdAt?: number): string {
+  if (!createdAt || !Number.isFinite(createdAt)) {
+    return "Batch run";
+  }
+  return new Date(createdAt * 1000).toLocaleString();
+}
+
+function shortJobId(jobId: string): string {
+  return jobId.length > 12 ? `${jobId.slice(0, 8)}…` : jobId;
 }
 
 function outputFileLabel(key: string): string {
@@ -1924,7 +2296,8 @@ function previewState(tab: Tab): { status: DesktopStatus; prediction?: PredictRe
   const fileStatus = (name: string) => ({ path: `/data/protcross/assets/${name}`, present: true, verified: true });
   const batchJob: BatchJob | undefined = tab === "batch" ? {
     id: "preview-batch",
-    status: "running",
+    created_at: 1_758_729_600,
+    status: "interrupted",
     completed: 3,
     failed: 1,
     cancel_requested: false,
@@ -1932,12 +2305,12 @@ function previewState(tab: Tab): { status: DesktopStatus; prediction?: PredictRe
     items_offset: 0,
     items_returned: 6,
     items: [
-      { input_structure: "/data/proteins/6fhu.pdb", status: "completed", output_dir: "/data/results/6fhu", output_files: { summary_json: "/data/results/6fhu/6fhu.protcross.summary.json" } },
-      { input_structure: "/data/proteins/7abc.cif", status: "completed", output_dir: "/data/results/7abc", output_files: { summary_json: "/data/results/7abc/7abc.protcross.summary.json" } },
-      { input_structure: "/data/proteins/8xyz.pdb", status: "failed", error: "No scorable standard amino-acid residues with Cα coordinates were found." },
-      { input_structure: "/data/proteins/complex_alpha.cif", status: "running" },
-      { input_structure: "/data/proteins/complex_beta.pdb", status: "queued" },
-      { input_structure: "/data/proteins/target_042.cif", status: "queued" }
+      { input_structure: "/data/proteins/6fhu.pdb", chain_id: "A", status: "completed", output_dir: "/data/results/6fhu", output_files: { summary_json: "/data/results/6fhu/6fhu.protcross.summary.json" } },
+      { input_structure: "/data/proteins/7abc.cif", chain_id: null, status: "completed", output_dir: "/data/results/7abc", output_files: { summary_json: "/data/results/7abc/7abc.protcross.summary.json" } },
+      { input_structure: "/data/proteins/8xyz.pdb", chain_id: "B", status: "failed", error: "StructureParserError: No scorable standard amino-acid residues were found.\nCheck that chain B contains Cα coordinates." },
+      { input_structure: "/data/proteins/complex_alpha.cif", chain_id: "A", status: "interrupted" },
+      { input_structure: "/data/proteins/complex_beta.pdb", chain_id: null, status: "interrupted" },
+      { input_structure: "/data/proteins/target_042.cif", chain_id: "C", status: "interrupted" }
     ]
   } : undefined;
   const status: DesktopStatus = {
@@ -1976,6 +2349,9 @@ function previewState(tab: Tab): { status: DesktopStatus; prediction?: PredictRe
     },
     activity: { batch_jobs: batchJob ? [batchJob] : [], asset_downloads: [] }
   };
+  const firstPreviewCluster = previewResidues(1, [0.962, 0.901, 0.835, 0.744, 0.663], 0, 1);
+  const secondPreviewCluster = previewResidues(2, [0.817, 0.694, 0.601], 30, 6);
+  const belowThreshold = previewResidues(0, [0.481, 0.302, 0.177, 0.052], 60, 9);
   const prediction: PredictResponse | undefined = tab === "results" ? {
     ok: true,
     summary: {
@@ -1984,16 +2360,22 @@ function previewState(tab: Tab): { status: DesktopStatus; prediction?: PredictRe
       protcross_version: APP_VERSION,
       asset_version: "0.1.2",
       geometry_backend: "torch",
+      threshold: 0.5,
+      cluster_cutoff: 8.0,
       top_pocket: { cluster_id: 1, center: [12.442, -4.102, 8.774], residue_count: 5, score_mean: 0.821, score_max: 0.962 }
     },
     pockets: {
       schema_version: "protcross-pocket-v2",
+      threshold: 0.5,
+      cluster_cutoff: 8.0,
+      selected_residue_count: 8,
       clustered_pockets: [
-        { cluster_id: 1, center: [12.442, -4.102, 8.774], residue_count: 5, score_mean: 0.821, score_max: 0.962, residues: previewResidues(1, [0.962, 0.901, 0.835, 0.744, 0.663]) },
-        { cluster_id: 2, center: [-3.201, 14.702, 22.118], residue_count: 3, score_mean: 0.704, score_max: 0.817, residues: previewResidues(2, [0.817, 0.694, 0.601]) }
+        { cluster_id: 1, center: [12.442, -4.102, 8.774], residue_count: 5, score_mean: 0.821, score_max: 0.962, residues: firstPreviewCluster },
+        { cluster_id: 2, center: [-3.201, 14.702, 22.118], residue_count: 3, score_mean: 0.704, score_max: 0.817, residues: secondPreviewCluster }
       ]
     },
-    top_pocket_residues: previewResidues(1, [0.962, 0.901, 0.835, 0.744, 0.663]),
+    scores: [...firstPreviewCluster, ...secondPreviewCluster, ...belowThreshold],
+    top_pocket_residues: firstPreviewCluster,
     output_files: {
       scores_tsv: "/data/results/6fhu/6fhu.protcross.scores.tsv",
       pockets_json: "/data/results/6fhu/6fhu.protcross.pockets.json",
@@ -2003,13 +2385,19 @@ function previewState(tab: Tab): { status: DesktopStatus; prediction?: PredictRe
   return { status, prediction, batchJob };
 }
 
-function previewResidues(clusterId: number, scores: number[]): ResidueSummary[] {
+function previewResidues(clusterId: number, scores: number[], xOrigin: number, rankStart: number): ResidueSummary[] {
   return scores.map((score, index) => ({
     residue_id: `A_${120 + clusterId * 10 + index}`,
+    residue_key: `model:0|chain:A|het:ATOM|resseq:${120 + clusterId * 10 + index}|icode:|resname:ALA`,
     chain_id: "A",
     residue_number: 120 + clusterId * 10 + index,
     score,
     probability: score,
-    cluster_id: clusterId
+    cluster_id: clusterId || null,
+    x: xOrigin + index * 2,
+    y: clusterId * 2,
+    z: 0,
+    rank_global: rankStart + index,
+    is_scored: 1
   }));
 }

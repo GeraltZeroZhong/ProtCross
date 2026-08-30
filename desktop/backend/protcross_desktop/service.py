@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import os
-import shutil
+import csv
 import hashlib
 import json
+import os
+import shutil
 import sys
 import threading
+import time
 import traceback
 import uuid
-import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
@@ -33,11 +35,14 @@ PredictorFactory = Callable[..., Any]
 DEFAULT_BATCH_STATUS_LIMIT = 500
 MAX_RETAINED_FINISHED_JOBS = 20
 DEFAULT_PREDICTION_MICROBATCH_SIZE = 4
+BATCH_HISTORY_FILENAME = "batch-jobs.json"
+BATCH_HISTORY_SCHEMA = "protcross-desktop-batch-history-v1"
 
 
 @dataclass
 class QueueItem:
     input_structure: str
+    chain_id: str | None = None
     status: str = "queued"
     output_dir: str | None = None
     output_files: dict[str, str] = field(default_factory=dict)
@@ -47,11 +52,23 @@ class QueueItem:
     def to_status_dict(self) -> dict[str, Any]:
         return {
             "input_structure": self.input_structure,
+            "chain_id": self.chain_id,
             "status": self.status,
             "output_dir": self.output_dir,
             "output_files": dict(self.output_files),
             "error": self.error,
         }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "QueueItem":
+        return cls(
+            input_structure=str(payload["input_structure"]),
+            chain_id=_optional_chain_id(payload.get("chain_id")),
+            status=str(payload.get("status", "queued")),
+            output_dir=str(payload["output_dir"]) if payload.get("output_dir") else None,
+            output_files={str(key): str(value) for key, value in dict(payload.get("output_files") or {}).items()},
+            error=str(payload["error"]) if payload.get("error") is not None else None,
+        )
 
 
 @dataclass
@@ -64,6 +81,13 @@ class BatchJob:
     failed: int = 0
     cancel_requested: bool = False
     error: str | None = None
+    output_dir: str | None = None
+    threshold: float = 0.5
+    pocket_cluster_cutoff: float = 8.0
+    allow_truncation: bool = False
+    device: str | None = None
+    retry_of: str | None = None
+    completed_at: float | None = None
 
     def to_dict(self, *, limit: int | None = DEFAULT_BATCH_STATUS_LIMIT, offset: int = 0) -> dict[str, Any]:
         bounded_offset = max(0, int(offset))
@@ -74,15 +98,51 @@ class BatchJob:
             "id": self.id,
             "status": self.status,
             "created_at": self.created_at,
+            "completed_at": self.completed_at,
             "completed": self.completed,
             "failed": self.failed,
             "cancel_requested": self.cancel_requested,
             "error": self.error,
+            "retry_of": self.retry_of,
+            "settings": {
+                "output_dir": self.output_dir,
+                "threshold": self.threshold,
+                "pocket_cluster_cutoff": self.pocket_cluster_cutoff,
+                "allow_truncation": self.allow_truncation,
+                "device": self.device,
+            },
             "item_count": len(self.items),
             "items_offset": bounded_offset,
             "items_returned": len(items),
             "items": [item.to_status_dict() for item in items],
         }
+
+    def to_persistence_dict(self) -> dict[str, Any]:
+        payload = self.to_dict(limit=None)
+        payload.pop("items_offset", None)
+        payload.pop("items_returned", None)
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "BatchJob":
+        settings = dict(payload.get("settings") or {})
+        return cls(
+            id=str(payload["id"]),
+            items=[QueueItem.from_dict(item) for item in list(payload.get("items") or [])],
+            status=str(payload.get("status", "queued")),
+            created_at=float(payload.get("created_at", 0.0)),
+            completed=int(payload.get("completed", 0)),
+            failed=int(payload.get("failed", 0)),
+            cancel_requested=bool(payload.get("cancel_requested", False)),
+            error=str(payload["error"]) if payload.get("error") is not None else None,
+            output_dir=str(settings["output_dir"]) if settings.get("output_dir") else None,
+            threshold=float(settings.get("threshold", 0.5)),
+            pocket_cluster_cutoff=float(settings.get("pocket_cluster_cutoff", 8.0)),
+            allow_truncation=bool(settings.get("allow_truncation", False)),
+            device=str(settings["device"]) if settings.get("device") else None,
+            retry_of=str(payload["retry_of"]) if payload.get("retry_of") else None,
+            completed_at=float(payload["completed_at"]) if payload.get("completed_at") is not None else None,
+        )
 
 
 @dataclass
@@ -144,6 +204,8 @@ class DesktopBackend:
         self._file_status_cache: dict[tuple[str, int, int, str | None], dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._predict_lock = threading.Lock()
+        self._batch_history_path = self.paths.root / BATCH_HISTORY_FILENAME
+        self._load_batch_history()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -501,6 +563,7 @@ class DesktopBackend:
             "ok": True,
             "summary": result.to_summary_dict(),
             "pockets": pockets,
+            "scores": result.to_records(),
             "top_pocket_residues": top_pocket_residues,
             "output_files": {key: str(path) for key, path in output_paths.items()},
         }
@@ -519,25 +582,50 @@ class DesktopBackend:
 
     def submit_batch(
         self,
-        structures: list[str | Path],
+        structures: list[str | Path] | None = None,
         *,
+        items: list[Mapping[str, Any]] | None = None,
         output_dir: str | Path | None = None,
         threshold: float = 0.5,
         pocket_cluster_cutoff: float = 8.0,
         allow_truncation: bool = False,
         device: str | None = None,
     ) -> dict[str, Any]:
-        if not structures:
+        return self._submit_batch(
+            structures=structures,
+            items=items,
+            output_dir=output_dir,
+            threshold=threshold,
+            pocket_cluster_cutoff=pocket_cluster_cutoff,
+            allow_truncation=allow_truncation,
+            device=device,
+            retry_of=None,
+        )
+
+    def _submit_batch(
+        self,
+        *,
+        structures: list[str | Path] | None,
+        items: list[Mapping[str, Any]] | None,
+        output_dir: str | Path | None,
+        threshold: float,
+        pocket_cluster_cutoff: float,
+        allow_truncation: bool,
+        device: str | None,
+        retry_of: str | None,
+    ) -> dict[str, Any]:
+        batch_inputs = _normalize_batch_inputs(structures=structures, items=items)
+        if not batch_inputs:
             raise ValueError("Batch requires at least one input structure.")
-        input_paths = [_validate_structure_path(path) for path in structures]
+        input_paths = [(_validate_structure_path(path), chain_id) for path, chain_id in batch_inputs]
         _validate_prediction_options(threshold, pocket_cluster_cutoff)
         from protcross.data import inspect_structure
 
         input_errors = []
         inspections: list[dict[str, Any] | None] = []
-        for path in input_paths:
+        for path, chain_id in input_paths:
             try:
-                report = inspect_structure(path)
+                report = inspect_structure(path, chain_id=chain_id)
                 inspections.append(report)
                 if report["requires_truncation"] and not allow_truncation:
                     input_errors.append(
@@ -554,15 +642,24 @@ class DesktopBackend:
                 "Batch structure check failed before model loading:\n- " + "\n- ".join(shown) + suffix
             )
         self._require_ready()
-        import time
 
         job = BatchJob(
             id=str(uuid.uuid4()),
             items=[
-                QueueItem(input_structure=str(path), structure_inspection=inspection)
-                for path, inspection in zip(input_paths, inspections)
+                QueueItem(
+                    input_structure=str(path),
+                    chain_id=chain_id,
+                    structure_inspection=inspection,
+                )
+                for (path, chain_id), inspection in zip(input_paths, inspections)
             ],
             created_at=time.time(),
+            output_dir=str(Path(output_dir).expanduser()) if output_dir is not None else None,
+            threshold=float(threshold),
+            pocket_cluster_cutoff=float(pocket_cluster_cutoff),
+            allow_truncation=bool(allow_truncation),
+            device=device,
+            retry_of=retry_of,
         )
         with self._lock:
             self._prune_finished_jobs_locked(self._jobs)
@@ -570,20 +667,43 @@ class DesktopBackend:
             if active:
                 raise RuntimeError(f"Batch job already running: {active[0]}")
             self._jobs[job.id] = job
+            self._persist_batch_jobs_locked()
         thread = threading.Thread(
             target=self._run_batch,
             args=(job.id,),
-            kwargs={
-                "output_dir": output_dir,
-                "threshold": threshold,
-                "pocket_cluster_cutoff": pocket_cluster_cutoff,
-                "allow_truncation": allow_truncation,
-                "device": device,
-            },
             daemon=True,
         )
         thread.start()
         return job.to_dict()
+
+    def retry_failed_batch(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            if job_id not in self._jobs:
+                raise KeyError(f"Unknown batch job: {job_id}")
+            original = self._jobs[job_id]
+            retry_items = [
+                {
+                    "input_structure": item.input_structure,
+                    "chain_id": item.chain_id,
+                }
+                for item in original.items
+                if item.status in {"failed", "interrupted"}
+            ]
+            settings = {
+                "output_dir": original.output_dir,
+                "threshold": original.threshold,
+                "pocket_cluster_cutoff": original.pocket_cluster_cutoff,
+                "allow_truncation": original.allow_truncation,
+                "device": original.device,
+            }
+        if not retry_items:
+            raise ValueError(f"Batch job {job_id} has no failed or interrupted items to retry.")
+        return self._submit_batch(
+            structures=None,
+            items=retry_items,
+            retry_of=job_id,
+            **settings,
+        )
 
     def batch_status(self, job_id: str, *, limit: int | None = DEFAULT_BATCH_STATUS_LIMIT, offset: int = 0) -> dict[str, Any]:
         with self._lock:
@@ -591,33 +711,49 @@ class DesktopBackend:
                 raise KeyError(f"Unknown batch job: {job_id}")
             return self._jobs[job_id].to_dict(limit=limit, offset=offset)
 
-    def batch_item_result(self, job_id: str, input_structure: str) -> dict[str, Any]:
+    def batch_item_result(
+        self,
+        job_id: str,
+        input_structure: str,
+        *,
+        chain_id: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             if job_id not in self._jobs:
                 raise KeyError(f"Unknown batch job: {job_id}")
             item = next(
-                (candidate for candidate in self._jobs[job_id].items if candidate.input_structure == input_structure),
+                (
+                    candidate
+                    for candidate in self._jobs[job_id].items
+                    if candidate.input_structure == input_structure and candidate.chain_id == chain_id
+                ),
                 None,
             )
             if item is None:
-                raise KeyError(f"Unknown batch item for job {job_id}: {input_structure}")
+                raise KeyError(
+                    f"Unknown batch item for job {job_id}: {input_structure} (chain_id={chain_id!r})"
+                )
             if item.status != "completed":
                 raise RuntimeError(f"Batch item is not completed: {item.status}")
             output_files = dict(item.output_files)
         summary_path = output_files.get("summary_json")
         pockets_path = output_files.get("pockets_json")
-        if not summary_path or not pockets_path:
-            raise FileNotFoundError("Batch item result JSON files are missing.")
+        scores_path = output_files.get("scores_tsv")
+        if not summary_path or not pockets_path or not scores_path:
+            raise FileNotFoundError("Batch item result package is missing summary, pockets, or scores files.")
         summary = _read_json_file(summary_path)
         pockets = _read_json_file(pockets_path)
+        scores = _read_scores_tsv(scores_path)
         structure_path = output_files.get("structure")
         if structure_path:
             self.register_readable_output(structure_path)
         return {
             "ok": True,
             "input_structure": input_structure,
+            "chain_id": item.chain_id,
             "summary": summary,
             "pockets": pockets,
+            "scores": scores,
             "top_pocket_residues": _top_pocket_residues(pockets),
             "output_files": output_files,
         }
@@ -650,11 +786,27 @@ class DesktopBackend:
         structure_path = output_files.get("structure")
         if not structure_path:
             raise FileNotFoundError("The summary does not reference an annotated structure file.")
+        scores_path = output_files.get("scores_tsv")
+        if not scores_path:
+            candidate = summary_path.with_name(summary_path.name.replace(".summary.json", ".scores.tsv"))
+            scores_path = str(candidate)
+            output_files["scores_tsv"] = scores_path
+        try:
+            scores = _read_scores_tsv(scores_path)
+        except (FileNotFoundError, ValueError) as exc:
+            scores = []
+            summary = dict(summary)
+            summary["warnings"] = [
+                *list(summary.get("warnings") or []),
+                "Complete canonical residue scores are unavailable. Interactive regrouping is disabled, "
+                f"and the 3D viewer uses neutral gray. Details: {exc}",
+            ]
         self.register_readable_output(structure_path)
         return {
             "ok": True,
             "summary": summary,
             "pockets": pockets,
+            "scores": scores,
             "top_pocket_residues": _top_pocket_residues(pockets),
             "output_files": output_files,
         }
@@ -664,6 +816,7 @@ class DesktopBackend:
             if job_id not in self._jobs:
                 raise KeyError(f"Unknown batch job: {job_id}")
             self._jobs[job_id].cancel_requested = True
+            self._persist_batch_jobs_locked()
             return self._jobs[job_id].to_dict()
 
     def export_diagnostics(self, output_zip: str | Path | None = None) -> str:
@@ -680,6 +833,7 @@ class DesktopBackend:
             manifest=self.manifest.to_dict(),
             env_results=env_results,
             extra={"status": self.status()},
+            logs_dir=self.paths.logs_dir,
         )
         return str(path)
 
@@ -700,25 +854,26 @@ class DesktopBackend:
     def _run_batch(
         self,
         job_id: str,
-        *,
-        output_dir: str | Path | None,
-        threshold: float,
-        pocket_cluster_cutoff: float,
-        allow_truncation: bool,
-        device: str | None,
     ) -> None:
         with self._lock:
             job = self._jobs[job_id]
             job.status = "running"
+            self._persist_batch_jobs_locked()
         try:
             with self._predict_lock:
-                predictor = self._get_predictor(device=device)
+                predictor = self._get_predictor(device=job.device)
             supports_microbatch = callable(getattr(predictor, "predict_many", None))
             microbatch_size = DEFAULT_PREDICTION_MICROBATCH_SIZE if supports_microbatch else 1
             for batch_start in range(0, len(job.items), microbatch_size):
                 with self._lock:
                     if job.cancel_requested:
                         job.status = "cancelled"
+                        job.completed_at = time.time()
+                        for item in job.items:
+                            if item.status in {"queued", "running"}:
+                                item.status = "cancelled"
+                        self._prune_finished_jobs_locked(self._jobs)
+                        self._persist_batch_jobs_locked()
                         return
                 batch_items = job.items[batch_start : batch_start + microbatch_size]
                 planned: list[tuple[QueueItem, Path, dict[str, Path]]] = []
@@ -726,8 +881,8 @@ class DesktopBackend:
                 for item in batch_items:
                     input_path = Path(item.input_structure)
                     batch_root = (
-                        Path(output_dir).expanduser()
-                        if output_dir
+                        Path(job.output_dir).expanduser()
+                        if job.output_dir
                         else self.paths.outputs_dir / "batch" / job.id
                     )
                     item_output = _unique_batch_output_dir(batch_root, input_path)
@@ -736,20 +891,24 @@ class DesktopBackend:
                         item_output = _next_available_run_dir(item_output)
                         paths = _desktop_output_paths(input_path, item_output)
                     reserved_outputs.update(path.resolve(strict=False) for path in paths.values())
-                    with self._lock:
-                        item.status = "running"
                     planned.append((item, item_output, paths))
+                with self._lock:
+                    for item, _, _ in planned:
+                        item.status = "running"
+                        item.error = None
+                    self._persist_batch_jobs_locked()
 
                 if supports_microbatch:
                     try:
                         with self._predict_lock:
                             batch_results = predictor.predict_many(
                                 [item.input_structure for item, _, _ in planned],
-                                threshold=threshold,
-                                pocket_cluster_cutoff=pocket_cluster_cutoff,
+                                chain_ids=[item.chain_id for item, _, _ in planned],
+                                threshold=job.threshold,
+                                pocket_cluster_cutoff=job.pocket_cluster_cutoff,
                                 output_paths=[paths for _, _, paths in planned],
                                 structure_inspections=[item.structure_inspection for item, _, _ in planned],
-                                allow_truncation=allow_truncation,
+                                allow_truncation=job.allow_truncation,
                                 batch_size=len(planned),
                                 return_exceptions=True,
                             )
@@ -762,13 +921,15 @@ class DesktopBackend:
                             with self._predict_lock:
                                 result = predictor.predict(
                                     item.input_structure,
-                                    threshold=threshold,
-                                    pocket_cluster_cutoff=pocket_cluster_cutoff,
+                                    chain_id=item.chain_id,
+                                    threshold=job.threshold,
+                                    pocket_cluster_cutoff=job.pocket_cluster_cutoff,
                                     output_pdb=paths["structure"],
                                     scores_tsv=paths["scores_tsv"],
                                     pocket_json=paths["pockets_json"],
                                     summary_json=paths["summary_json"],
-                                    allow_truncation=allow_truncation,
+                                    allow_truncation=job.allow_truncation,
+                                    structure_inspection=item.structure_inspection,
                                 )
                             batch_results.append(result)
                         except Exception as exc:
@@ -780,23 +941,28 @@ class DesktopBackend:
                     )
                     batch_results = [mismatch] * len(planned)
 
-                for offset, ((item, item_output, paths), result) in enumerate(zip(planned, batch_results), start=1):
-                    completed_index = batch_start + offset
-                    if not isinstance(result, Exception):
-                        with self._lock:
+                with self._lock:
+                    for offset, ((item, item_output, paths), result) in enumerate(
+                        zip(planned, batch_results), start=1
+                    ):
+                        completed_index = batch_start + offset
+                        if not isinstance(result, Exception):
                             item.status = "completed"
                             item.output_dir = str(item_output)
                             item.output_files = {key: str(path) for key, path in paths.items()}
                             self._readable_output_files.add(_resolve_output_file(paths["structure"]))
                             job.completed = completed_index
-                    else:
-                        with self._lock:
+                        else:
                             item.status = "failed"
                             item.error = f"{type(result).__name__}: {result}"
                             job.completed = completed_index
                             job.failed += 1
+                    self._persist_batch_jobs_locked()
             with self._lock:
                 job.status = "completed" if job.failed == 0 else "completed_with_errors"
+                job.completed_at = time.time()
+                self._prune_finished_jobs_locked(self._jobs)
+                self._persist_batch_jobs_locked()
         except Exception as exc:
             with self._lock:
                 job.status = "failed"
@@ -806,6 +972,67 @@ class DesktopBackend:
                         item.status = "failed"
                         item.error = f"{type(exc).__name__}: {exc}"
                         job.failed += 1
+                job.completed = sum(item.status in {"completed", "failed"} for item in job.items)
+                job.completed_at = time.time()
+                self._prune_finished_jobs_locked(self._jobs)
+                self._persist_batch_jobs_locked()
+
+    def _load_batch_history(self) -> None:
+        if not self._batch_history_path.exists():
+            return
+        try:
+            payload = json.loads(self._batch_history_path.read_text(encoding="utf-8"))
+            if payload.get("schema_version") != BATCH_HISTORY_SCHEMA:
+                return
+            jobs = {
+                job.id: job
+                for job in (BatchJob.from_dict(item) for item in list(payload.get("jobs") or []))
+            }
+        except (OSError, TypeError, ValueError, KeyError):
+            return
+
+        self._jobs = jobs
+        changed = False
+        interrupted_at = time.time()
+        for job in self._jobs.values():
+            if job.status in {"queued", "running"}:
+                job.status = "interrupted"
+                job.cancel_requested = False
+                job.completed_at = interrupted_at
+                job.error = "Desktop backend restarted before this batch finished."
+                for item in job.items:
+                    if item.status in {"queued", "running"}:
+                        item.status = "interrupted"
+                        item.error = "Desktop backend restarted before this item finished."
+                changed = True
+            for item in job.items:
+                structure_path = item.output_files.get("structure")
+                if item.status == "completed" and structure_path:
+                    path = Path(structure_path).expanduser()
+                    if path.exists() and path.is_file():
+                        self._readable_output_files.add(path.resolve())
+
+        retained_before = len(self._jobs)
+        self._prune_finished_jobs_locked(self._jobs)
+        if changed or len(self._jobs) != retained_before:
+            self._persist_batch_jobs_locked()
+
+    def _persist_batch_jobs_locked(self) -> None:
+        payload = {
+            "schema_version": BATCH_HISTORY_SCHEMA,
+            "jobs": [job.to_persistence_dict() for job in self._jobs.values()],
+        }
+        temporary = self._batch_history_path.with_name(
+            f".{self._batch_history_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False),
+                encoding="utf-8",
+            )
+            temporary.replace(self._batch_history_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _get_predictor(self, *, device: str | None) -> Any:
         checkpoint_path = Path(str(self.manifest.checkpoint_path)).expanduser()
@@ -952,6 +1179,36 @@ def _is_usable_file_status(status: dict[str, Any]) -> bool:
     return bool(status["present"] and status["verified"] is not False)
 
 
+def _normalize_batch_inputs(
+    *,
+    structures: list[str | Path] | None,
+    items: list[Mapping[str, Any]] | None,
+) -> list[tuple[str | Path, str | None]]:
+    if structures is not None and items is not None:
+        raise ValueError("Specify either batch items or legacy structures, not both.")
+    if items is None:
+        return [(value, None) for value in structures or []]
+    normalized = []
+    for item in items:
+        if not item.get("input_structure"):
+            raise ValueError("Each batch item requires input_structure.")
+        normalized.append(
+            (
+                str(item["input_structure"]),
+                _optional_chain_id(item.get("chain_id")),
+            )
+        )
+    return normalized
+
+
+def _optional_chain_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Batch item chain_id must be a string or null.")
+    return value
+
+
 def _desktop_output_paths(input_structure: Path, output_dir: str | Path) -> dict[str, Path]:
     from protcross.cli.predict import _default_output_paths
 
@@ -970,6 +1227,102 @@ def _read_json_file(path: str | Path) -> dict[str, Any]:
     if not file_path.exists() or not file_path.is_file():
         raise FileNotFoundError(f"JSON result file not found: {file_path}")
     return json.loads(file_path.read_text(encoding="utf-8"))
+
+
+def _read_scores_tsv(path: str | Path) -> list[dict[str, Any]]:
+    file_path = Path(path).expanduser()
+    if not file_path.exists() or not file_path.is_file():
+        raise FileNotFoundError(
+            f"Scores TSV not found: {file_path}. Complete residue scores are required to open this result."
+        )
+    with file_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        columns = set(reader.fieldnames or [])
+        required = {
+            "residue_id",
+            "residue_key",
+            "chain_id",
+            "residue_number",
+            "is_scored",
+            "x",
+            "y",
+            "z",
+            "rank_global",
+        }
+        missing = sorted(required - columns)
+        score_column = next((name for name in ("model_score", "score", "probability") if name in columns), None)
+        if missing or score_column is None:
+            details = missing + ([] if score_column else ["model_score/score/probability"])
+            raise ValueError(
+                f"Scores TSV uses an unsupported schema; missing extended column(s): {', '.join(details)}."
+            )
+
+        records = []
+        for line_number, row in enumerate(reader, start=2):
+            try:
+                score = _required_tsv_float(row.get(score_column), score_column)
+                probability = _optional_tsv_float(row.get("probability"))
+                records.append(
+                    {
+                        "residue_id": str(row.get("residue_id") or ""),
+                        "residue_key": str(row.get("residue_key") or ""),
+                        "residue_id_namespace": _optional_tsv_text(row.get("residue_id_namespace")),
+                        "model_id": _optional_tsv_text(row.get("model_id")),
+                        "chain_id": str(row.get("chain_id") or ""),
+                        "auth_asym_id": _optional_tsv_text(row.get("auth_asym_id")),
+                        "label_asym_id": _optional_tsv_text(row.get("label_asym_id")),
+                        "residue_number": _required_tsv_int(row.get("residue_number"), "residue_number"),
+                        "auth_seq_id": _optional_tsv_int(row.get("auth_seq_id")),
+                        "label_seq_id": _optional_tsv_int(row.get("label_seq_id")),
+                        "insertion_code": str(row.get("insertion_code") or ""),
+                        "resname": str(row.get("resname") or ""),
+                        "one_letter_code": str(row.get("one_letter_code") or ""),
+                        "input_bfactor": _optional_tsv_float(row.get("input_bfactor")),
+                        "score": score,
+                        "probability": score if probability is None else probability,
+                        "is_binding": _optional_tsv_int(row.get("is_binding")),
+                        "x": _optional_tsv_float(row.get("x")),
+                        "y": _optional_tsv_float(row.get("y")),
+                        "z": _optional_tsv_float(row.get("z")),
+                        "cluster_id": _optional_tsv_int(row.get("cluster_id")),
+                        "is_scored": _required_tsv_int(row.get("is_scored"), "is_scored"),
+                        "rank_global": _required_tsv_int(row.get("rank_global"), "rank_global"),
+                        "rank_within_chain": _optional_tsv_int(row.get("rank_within_chain")),
+                    }
+                )
+            except ValueError as exc:
+                raise ValueError(f"Invalid scores TSV row {line_number} in {file_path}: {exc}") from exc
+    return records
+
+
+def _optional_tsv_text(value: str | None) -> str | None:
+    return value if value not in {None, ""} else None
+
+
+def _optional_tsv_int(value: str | None) -> int | None:
+    return int(value) if value not in {None, ""} else None
+
+
+def _required_tsv_int(value: str | None, field: str) -> int:
+    if value in {None, ""}:
+        raise ValueError(f"{field} is empty")
+    return int(value)
+
+
+def _optional_tsv_float(value: str | None) -> float | None:
+    if value in {None, ""}:
+        return None
+    number = float(value)
+    if not isfinite(number):
+        raise ValueError(f"non-finite floating-point value {value!r}")
+    return number
+
+
+def _required_tsv_float(value: str | None, field: str) -> float:
+    number = _optional_tsv_float(value)
+    if number is None:
+        raise ValueError(f"{field} is empty")
+    return number
 
 
 def _resolve_result_reference(summary_path: Path, value: object) -> Path:

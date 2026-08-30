@@ -112,7 +112,8 @@ def test_inspect_pdb_explicit_chain_and_invalid_or_ligand_only_chain(tmp_path: P
 
     with pytest.raises(ValueError, match=r"Chain 'Q' was not found") as error:
         inspect_structure(input_pdb, chain_id="Q")
-    assert "Available chains: A, B, <blank>" in str(error.value)
+    assert "Available chains: A, B" in str(error.value)
+    assert "<blank>" not in str(error.value)
 
     with pytest.raises(ValueError, match=r"No standard amino-acid residues with CA atoms found for chain ' '"):
         inspect_structure(input_pdb, chain_id=" ")

@@ -6,7 +6,12 @@ import { MolScriptBuilder as MS } from "molstar/lib/mol-script/language/builder"
 import { Script } from "molstar/lib/mol-script/script";
 import { fetchDesktopFile } from "../api";
 import type { PocketJson, ResidueSummary, SummaryJson } from "../types";
-import { ProtcrossScoreColorThemeProvider } from "./ProtcrossScoreTheme";
+import {
+  configureProtcrossScoreTheme,
+  PROTCROSS_UNSCORED_COLOR_CSS,
+  ProtcrossScoreColorThemeProvider,
+  type ProtcrossScoreCoverage
+} from "./ProtcrossScoreTheme";
 import { Icon } from "./Icon";
 
 interface Props {
@@ -14,10 +19,18 @@ interface Props {
   summary?: SummaryJson | null;
   pockets?: PocketJson | null;
   selectedClusterIndex?: number;
+  scoredResidueKeys?: readonly string[];
   darkMode?: boolean;
 }
 
-export function MolstarViewer({ structurePath, summary, pockets, selectedClusterIndex = 0, darkMode = false }: Props) {
+export function MolstarViewer({
+  structurePath,
+  summary,
+  pockets,
+  selectedClusterIndex = 0,
+  scoredResidueKeys,
+  darkMode = false
+}: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<any>(null);
   const operationQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -29,8 +42,10 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
   const [showControls, setShowControls] = useState(false);
   const [webglAvailable, setWebglAvailable] = useState<boolean | null>(null);
   const [loadedStructureRequest, setLoadedStructureRequest] = useState(0);
+  const [scoreCoverage, setScoreCoverage] = useState<ProtcrossScoreCoverage | null>(null);
   const selectedCluster = pockets?.clustered_pockets?.[selectedClusterIndex] ?? null;
   const displayedCluster = selectedCluster ?? summary?.top_pocket ?? null;
+  const scoredResidueKeySignature = stableScoredResidueKeySignature(scoredResidueKeys);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,6 +113,7 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
   useEffect(() => {
     if (!viewerReady || !viewerRef.current || !structurePath) {
       setLoadedStructureRequest(0);
+      setScoreCoverage(null);
       return;
     }
     const request = structureRequestRef.current + 1;
@@ -105,6 +121,7 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
     structureRequestRef.current = request;
     selectionRequestRef.current += 1;
     setLoadedStructureRequest(0);
+    setScoreCoverage(null);
     setError(null);
     setSelectionMessage(null);
 
@@ -131,8 +148,13 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
         } finally {
           URL.revokeObjectURL(url);
         }
+        const loadedStructures = (viewer.plugin.managers.structure.hierarchy.current.structures ?? [])
+          .map((entry: any) => entry?.cell?.obj?.data)
+          .filter(Boolean);
+        const coverage = configureProtcrossScoreTheme(loadedStructures, scoredResidueKeys);
         await applyScoreTheme(viewer);
         if (request === structureRequestRef.current && viewerRef.current) {
+          setScoreCoverage(coverage);
           setLoadedStructureRequest(request);
         }
       } catch (exc) {
@@ -148,7 +170,7 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
         structureRequestRef.current += 1;
       }
     };
-  }, [structurePath, viewerReady]);
+  }, [structurePath, viewerReady, scoredResidueKeySignature]);
 
   useEffect(() => {
     if (
@@ -220,20 +242,46 @@ export function MolstarViewer({ structurePath, summary, pockets, selectedCluster
             <p>Restart ProtCross with hardware acceleration enabled. Cluster metrics, residue scores, and exported files remain available in the inspector.</p>
           </div>
         ) : null}
-        <div className="score-legend" aria-label="ProtCross model score color scale from zero to one">
+        <div className="score-legend" aria-label="ProtCross model score color scale from zero to one; residues not scored by the model are neutral gray">
           <span>Model score</span>
           <div className="score-gradient" aria-hidden="true" />
+          <div style={{ alignItems: "center", color: "var(--text-secondary)", display: "flex", fontSize: 9, gap: 5 }}>
+            <span
+              aria-hidden="true"
+              style={{ background: PROTCROSS_UNSCORED_COLOR_CSS, borderRadius: 2, display: "inline-block", height: 8, width: 12 }}
+            />
+            <span>Not scored</span>
+          </div>
           <div><span>0.00</span><span>0.50</span><span>1.00</span></div>
         </div>
       </div>
       {error ? <div className="inline-error" role="alert">{error}</div> : null}
       <div className="viewer-note">
         {selectionMessage ? <span role="status">{selectionMessage} </span> : null}
+        {scoreCoverage ? <span role="status">{scoreCoverageMessage(scoreCoverage)} </span> : null}
         The structure color scale maps ProtCross model scores from 0 to 1. Ball-and-stick residues mark the selected
-        predicted-residue cluster. The score-weighted Cα centroid is reported numerically above.
+        predicted-residue cluster. Residues absent from the scored result are neutral gray; a genuine score of 0 uses
+        the 0.00 end of the color scale. The score-weighted Cα centroid is reported numerically above.
       </div>
     </section>
   );
+}
+
+function stableScoredResidueKeySignature(keys: readonly string[] | undefined): string {
+  if (keys === undefined) {
+    return "metadata-fallback";
+  }
+  return `result-keys\u0000${[...new Set(keys.map((key) => key.trim()).filter(Boolean))].sort().join("\u0000")}`;
+}
+
+function scoreCoverageMessage(coverage: ProtcrossScoreCoverage): string {
+  if (coverage.source === "result-keys") {
+    return `${coverage.scoredResidueCount} scored residues mapped; ${coverage.unscoredResidueCount} structure residues are neutral gray.`;
+  }
+  if (coverage.source === "result-keys-partial") {
+    return `${coverage.scoredResidueCount} of ${coverage.expectedScoredResidueCount ?? "the expected"} scored residue identities mapped; ${coverage.unmatchedScoredResidueCount} did not match the loaded structure.`;
+  }
+  return "Scored-residue identities are unavailable. Residues are neutral gray, while a genuine score of 0 remains on the color scale.";
 }
 
 async function applyScoreTheme(viewer: any): Promise<void> {

@@ -9,6 +9,7 @@ from typing import Dict, Optional
 import numpy as np
 from Bio.PDB import MMCIFParser, NeighborSearch, PDBParser, Selection
 from Bio.PDB.MMCIF2Dict import MMCIF2Dict
+from Bio.PDB.PDBExceptions import PDBConstructionException
 from Bio.SeqUtils import seq1
 
 MAX_ESM_RESIDUES = 1022
@@ -273,10 +274,12 @@ class StructureParser:
 
         try:
             structure = parser.get_structure("protein", str(file_path))
-            models = list(structure)
-            model = models[0]
-        except Exception:
+        except (KeyError, ValueError, PDBConstructionException) as exc:
+            raise ValueError(f"Could not parse structure {file_path}: {exc}") from exc
+        models = list(structure)
+        if not models:
             return None
+        model = models[0]
         structure_warnings = []
         if len(models) > 1:
             structure_warnings.append(
@@ -296,7 +299,7 @@ class StructureParser:
         coords, seq_chars, plddts, residue_ids, residue_metadata, labels = [], [], [], [], [], []
 
         for chain in model:
-            if chain_id and chain.id != chain_id:
+            if chain_id is not None and chain.id != chain_id:
                 continue
 
             for residue in chain:
@@ -314,11 +317,8 @@ class StructureParser:
                 residue_id = f"{chain.id}_{residue_suffix}"
                 residue_ids.append(residue_id)
 
-                try:
-                    aa = seq1(res_name)
-                except Exception:
-                    aa = "X"
-                seq_chars.append(aa if len(aa) == 1 else "X")
+                aa = seq1(res_name)
+                seq_chars.append(aa)
                 metadata = {
                     "residue_id": residue_id,
                     "residue_key": self._residue_key(model.id, chain.id, residue.id, res_name),
@@ -332,7 +332,7 @@ class StructureParser:
                     "label_seq_id": None,
                     "insertion_code": insertion_code,
                     "resname": res_name,
-                    "one_letter_code": aa if len(aa) == 1 else "X",
+                    "one_letter_code": aa,
                     "input_bfactor": float(ca_atom.get_bfactor()),
                 }
                 if is_mmcif:

@@ -19,6 +19,8 @@ def test_desktop_design_system_supports_platform_appearance_and_accessibility():
     assert "button:focus-visible" in styles
     assert "select:focus-visible" in styles
     assert "min-height: 36px" in styles
+    assert ".banner > span" in styles
+    assert "white-space: pre-line" in styles
 
 
 def test_desktop_shell_exposes_navigation_and_async_state_semantics():
@@ -46,8 +48,17 @@ def test_result_view_uses_protcross_score_theme_and_legend():
     assert "ProtcrossScoreColorThemeProvider" in viewer
     assert 'color: "protcross-score"' in viewer
     assert 'className="score-legend"' in viewer
+    assert "scoredResidueKeys?: readonly string[]" in viewer
+    assert "configureProtcrossScoreTheme(loadedStructures, scoredResidueKeys)" in viewer
+    assert "Not scored" in viewer
+    assert "a genuine score of 0" in viewer
     assert "B_iso_or_equiv.value(element)" in theme
     assert "domain: [0, 1]" in theme
+    assert "normalizeProtcrossResidueKey" in theme
+    assert "scoredResiduesByModel" in theme
+    assert "if (scoredResidueKeys === undefined)" in theme
+    assert "score === undefined ? PROTCROSS_UNSCORED_COLOR : scale.color(score)" in theme
+    assert 'minLabel: "0.00 (scored)"' in theme
 
 
 def test_desktop_window_supports_compact_resizable_workspaces():
@@ -78,6 +89,49 @@ def test_desktop_polling_recovers_from_backend_loss_without_permanent_active_sta
     assert 'status: "interrupted"' in app
     assert "backendConnectionLost" in app
     assert "signal?: AbortSignal" in api
+
+
+def test_diagnostic_export_opens_the_created_package_folder():
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+
+    assert 'await invoke("open_path", { path: parentPath(result.path) });' in app
+    assert "Create a local ZIP and open its folder" in app
+
+
+def test_batch_ui_supports_per_item_chains_retry_and_restored_history():
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    api = (FRONTEND / "api.ts").read_text(encoding="utf-8")
+
+    assert "batchPreflights" in app
+    assert "Scorable chain for" in app
+    assert "chain_id: batchPreflights[path].chainId" in app
+    assert "Retry failed" in app
+    assert "Recovered interrupted batch" in app
+    assert '["queued", "running", "interrupted"].includes(job.status)' in app
+    assert "Recent batches" in app
+    assert "firstLine(item.error)" not in app
+    assert "retryBatch(jobId" in api
+    assert "chain_id=${encodeURIComponent(chainId)}" in api
+    assert "chainId === undefined ? undefined : chainId" in api
+
+
+def test_results_ui_reclusters_locally_and_exposes_all_ranked_residues():
+    app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    local_results = (FRONTEND / "localResults.ts").read_text(encoding="utf-8")
+
+    assert "recomputeLocalResult" in app
+    assert "Displayed score cutoff" in app
+    assert "Original run" in app
+    assert "without model inference or output-file changes" in app
+    assert "All residue rankings" in app
+    assert "rank_global" in app
+    assert "cutoffSquared" in local_results
+    assert "<= cutoffSquared" in local_results
+    assert "score > threshold" in local_results
+    assert "connectedComponents" in local_results
+    assert "is_scored ?? 1" in local_results
+    assert "resultBatchItem" not in app
+    assert "selectedBatchInput" not in app
 
 
 def test_tauri_security_disables_unused_asset_protocol_and_sets_strict_csp():

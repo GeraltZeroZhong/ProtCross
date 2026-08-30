@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import protcross.assets as assets_module
 
+from protcross import __version__
 from protcross.assets import (
     ASSET_MANIFEST_FILENAME,
     AssetSpec,
@@ -97,7 +98,7 @@ def test_predictor_assets_completion(tmp_path):
 def test_setup_assets_writes_manifest_without_network(tmp_path, monkeypatch):
     downloaded = []
 
-    def fake_download(spec, output_path, *, force=False, verify=True):
+    def fake_download(spec, output_path, *, force=False, verify=True, known_sha256=None):
         downloaded.append((spec.filename, force, verify))
         output_path.write_bytes(b"asset")
 
@@ -107,7 +108,7 @@ def test_setup_assets_writes_manifest_without_network(tmp_path, monkeypatch):
 
     manifest = json.loads((output_dir / ASSET_MANIFEST_FILENAME).read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "protcross-assets-v1"
-    assert manifest["package_version"] == "0.2.2"
+    assert manifest["package_version"] == __version__
     assert manifest["asset_version"] == "0.1.2"
     assert manifest["asset_bundle_version"] == "0.1.2"
     assert manifest["checkpoint_filename"] == DEFAULT_CHECKPOINT_FILENAME
@@ -122,6 +123,23 @@ def test_setup_assets_writes_manifest_without_network(tmp_path, monkeypatch):
         DEFAULT_CHECKPOINT_FILENAME,
         DEFAULT_PCA_FILENAME,
     }
+
+
+def test_setup_assets_hashes_each_existing_asset_once(tmp_path, monkeypatch):
+    expected_by_name = {spec.filename: spec.sha256 for spec in DEFAULT_ASSET_BUNDLE.assets}
+    for spec in DEFAULT_ASSET_BUNDLE.assets:
+        (tmp_path / spec.filename).write_bytes(spec.filename.encode("utf-8"))
+    hash_calls = []
+
+    def fake_sha256(path):
+        hash_calls.append(Path(path).name)
+        return expected_by_name[Path(path).name]
+
+    monkeypatch.setattr("protcross.assets.sha256_file", fake_sha256)
+
+    setup_assets(tmp_path, accept_esm_license=True)
+
+    assert sorted(hash_calls) == sorted(expected_by_name)
 
 
 def test_manifestless_legacy_assets_are_detected(tmp_path):
@@ -269,7 +287,7 @@ def test_resolve_rejects_bad_managed_assets_without_auto_download(tmp_path, monk
         resolve_prediction_assets(assets_dir=tmp_path, auto_setup_assets=False, offline=True)
 
 
-def test_resolve_rejects_forged_verified_manifest_for_managed_assets(tmp_path):
+def test_resolve_reuses_unchanged_verified_manifest_hashes(tmp_path, monkeypatch):
     files = {}
     for spec in DEFAULT_ASSET_BUNDLE.assets:
         path = tmp_path / spec.filename
@@ -286,9 +304,14 @@ def test_resolve_rejects_forged_verified_manifest_for_managed_assets(tmp_path):
         json.dumps({"asset_version": "0.1.2", "files": files}),
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        "protcross.assets.sha256_file",
+        lambda path: (_ for _ in ()).throw(AssertionError(f"unexpected rehash: {path}")),
+    )
 
-    with pytest.raises(RuntimeError, match="SHA256"):
-        resolve_prediction_assets(assets_dir=tmp_path, auto_setup_assets=False)
+    resolved = resolve_prediction_assets(assets_dir=tmp_path, auto_setup_assets=False)
+
+    assert resolved.asset_metadata["all_assets_verified"] is True
 
 
 def test_resolve_labels_all_explicit_assets_as_custom(tmp_path):
@@ -365,6 +388,39 @@ def test_resolve_records_verified_managed_asset_metadata_without_rehashing(tmp_p
         assert entry["source"] == "managed"
         assert entry["source_label"] == "managed asset directory"
     assert sorted(hash_calls) == sorted(expected_by_name)
+
+
+def test_resolve_rehashes_only_managed_asset_changed_since_manifest(tmp_path, monkeypatch):
+    files = {}
+    expected_by_name = {spec.filename: spec.sha256 for spec in DEFAULT_ASSET_BUNDLE.assets}
+    for spec in DEFAULT_ASSET_BUNDLE.assets:
+        path = tmp_path / spec.filename
+        path.write_bytes(spec.filename.encode("utf-8"))
+        files[spec.name] = {
+            "filename": spec.filename,
+            "expected_sha256": spec.sha256,
+            "actual_sha256": spec.sha256,
+            "size_bytes": path.stat().st_size,
+            "mtime_ns": path.stat().st_mtime_ns,
+            "verified": True,
+        }
+    (tmp_path / ASSET_MANIFEST_FILENAME).write_text(
+        json.dumps({"asset_version": "0.1.2", "files": files}),
+        encoding="utf-8",
+    )
+    changed = tmp_path / DEFAULT_CHECKPOINT_FILENAME
+    changed.write_bytes(changed.read_bytes() + b"changed")
+    hash_calls = []
+
+    def fake_sha256(path):
+        hash_calls.append(Path(path).name)
+        return expected_by_name[Path(path).name]
+
+    monkeypatch.setattr("protcross.assets.sha256_file", fake_sha256)
+
+    resolve_prediction_assets(assets_dir=tmp_path, auto_setup_assets=False)
+
+    assert hash_calls == [DEFAULT_CHECKPOINT_FILENAME]
 
 
 def test_resolve_all_explicit_official_assets_ignores_bad_managed_manifest(tmp_path, monkeypatch):
@@ -795,7 +851,7 @@ def test_download_space_preflight_fails_before_large_transfer(tmp_path, monkeypa
 def test_setup_assets_reuses_persisted_esm_license_acceptance(tmp_path, monkeypatch):
     downloads = []
 
-    def fake_download(spec, output_path, *, force=False, verify=True):
+    def fake_download(spec, output_path, *, force=False, verify=True, known_sha256=None):
         downloads.append((spec.filename, force, verify))
         output_path.write_bytes(b"asset")
 

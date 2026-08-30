@@ -87,6 +87,53 @@ def validate_version_consistency(
         except Exception as exc:
             errors.append(f"{label} could not be read: {exc}")
 
+    literal_checks = (
+        (
+            "project Documentation tag",
+            root / "pyproject.toml",
+            rf'^Documentation\s*=\s*["\'][^"\']+/blob/v({VERSION_RE})/README\.md["\']\s*$',
+        ),
+        (
+            "Desktop technical guide tag",
+            root / "desktop" / "frontend" / "src" / "App.tsx",
+            rf"/blob/v({VERSION_RE})/README\.md#model-and-inference-pipeline",
+        ),
+        (
+            "README version badge",
+            root / "README.md",
+            rf"shields\.io/badge/version-({VERSION_RE})-",
+        ),
+        (
+            "README compatibility release",
+            root / "README.md",
+            rf"^\| Application and Desktop \| `({VERSION_RE})` \|$",
+        ),
+        (
+            "README Desktop release link",
+            root / "README.md",
+            rf"/releases/tag/v({VERSION_RE})",
+        ),
+    )
+    for label, path, pattern in literal_checks:
+        try:
+            actual = _required_match(path.read_text(encoding="utf-8"), pattern, path)
+            _expect(errors, label, actual, expected)
+        except Exception as exc:
+            errors.append(f"{label} could not be read: {exc}")
+
+    try:
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        history = readme.split("## Version history", 1)[1]
+        latest_history = _required_match(history, rf"^### ({VERSION_RE})$", root / "README.md")
+        _expect(errors, "README latest history release", latest_history, expected)
+        artifact_versions = re.findall(rf"ProtCross_Desktop_({VERSION_RE})_", readme)
+        if not artifact_versions:
+            errors.append("README contains no literal versioned Desktop artifact names")
+        for actual in sorted(set(artifact_versions)):
+            _expect(errors, "README Desktop artifact version", actual, expected)
+    except Exception as exc:
+        errors.append(f"README release surfaces could not be read: {exc}")
+
     workflow = root / ".github" / "workflows" / "desktop-release.yml"
     try:
         workflow_text = workflow.read_text(encoding="utf-8")

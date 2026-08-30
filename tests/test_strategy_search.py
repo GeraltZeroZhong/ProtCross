@@ -67,3 +67,40 @@ def test_strategy_checkpoint_resume_requires_env_and_matching_manifest(monkeypat
     assert strategy_search.should_resume_checkpoint(str(checkpoint), {"strategy": "other"}) is False
     checkpoint.write_bytes(b"changed checkpoint")
     assert strategy_search.should_resume_checkpoint(str(checkpoint), signature) is False
+
+
+def test_strategy_data_signature_uses_metadata_without_content_hash(tmp_path):
+    sample = tmp_path / "sample.pt"
+    sample.write_bytes(b"sample")
+
+    signature = strategy_search.dir_signature(str(tmp_path))
+
+    assert signature == [
+        {
+            "name": "sample.pt",
+            "size": sample.stat().st_size,
+            "mtime_ns": sample.stat().st_mtime_ns,
+        }
+    ]
+
+
+def test_strategy_run_signature_accepts_precomputed_data_signatures(monkeypatch):
+    pdb_signature = [{"name": "pdb.pt", "size": 1, "mtime_ns": 2}]
+    af2_signature = [{"name": "af2.pt", "size": 3, "mtime_ns": 4}]
+    monkeypatch.setattr(
+        strategy_search,
+        "dir_signature",
+        lambda path: (_ for _ in ()).throw(AssertionError(f"unexpected rescan: {path}")),
+    )
+
+    signature = strategy_search.strategy_run_signature(
+        strategy="pLDDT^4",
+        seed=42,
+        data_dir_pdb="pdb",
+        data_dir_af2="af2",
+        pdb_data_signature=pdb_signature,
+        af2_data_signature=af2_signature,
+    )
+
+    assert signature["data_dir_pdb"] == pdb_signature
+    assert signature["data_dir_af2"] == af2_signature

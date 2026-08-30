@@ -79,6 +79,23 @@ def test_structure_parser_unlabeled_path_preserves_all_model_inputs(tmp_path: Pa
             assert actual == expected
 
 
+def test_structure_parser_selects_blank_chain_exactly(tmp_path: Path):
+    input_pdb = tmp_path / "blank-chain.pdb"
+    input_pdb.write_text(
+        "ATOM      1  CA  ALA     1       0.000   0.000   0.000  1.00 20.00           C\n"
+        "TER\n"
+        "ATOM      2  CA  GLY A   2       5.000   0.000   0.000  1.00 20.00           C\n"
+        "TER\nEND\n",
+        encoding="utf-8",
+    )
+
+    parsed = StructureParser().parse_file(input_pdb, chain_id=" ")
+
+    assert parsed is not None
+    assert parsed["residue_ids"] == [" _1"]
+    assert parsed["residue_metadata"][0]["chain_id"] == " "
+
+
 def test_structure_parser_selects_equal_occupancy_altloc_deterministically(tmp_path: Path):
     records = {
         "A": "ATOM      2  CA AALA A   1       1.000   0.000   0.000  0.50 21.00           C\n",
@@ -109,6 +126,17 @@ def test_structure_parser_rejects_nonfinite_ca_coordinates(tmp_path: Path):
 
     with pytest.raises(ValueError, match="non-finite"):
         StructureParser().parse_file(input_pdb)
+
+
+def test_structure_parser_reports_malformed_coordinate_files(tmp_path: Path):
+    input_cif = tmp_path / "malformed.cif"
+    input_cif.write_text(
+        "data_bad\nloop_\n_atom_site.group_PDB\nATOM\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Could not parse structure .*malformed\.cif"):
+        StructureParser().parse_file(input_cif)
 
 
 def test_structure_parser_preserves_raw_coordinates_for_pocket_reporting(tmp_path: Path):

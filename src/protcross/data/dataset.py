@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import glob
-import hashlib
 import json
 import os
 import random
@@ -17,7 +16,7 @@ from tqdm import tqdm
 
 
 PREPROCESS_MANIFEST = "protcross-preprocess-manifest.json"
-DATASET_CACHE_SCHEMA = "protcross-dataset-cache-v2"
+DATASET_CACHE_SCHEMA = "protcross-dataset-cache-v3"
 
 
 class EvoPointDataset(InMemoryDataset):
@@ -224,16 +223,7 @@ class EvoPointDataset(InMemoryDataset):
             "path": os.path.basename(path),
             "size": int(stat.st_size),
             "mtime_ns": int(stat.st_mtime_ns),
-            "sha256": EvoPointDataset._file_sha256(path),
         }
-
-    @staticmethod
-    def _file_sha256(path: str) -> str:
-        digest = hashlib.sha256()
-        with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     def _load_data_file(self, file_path: str) -> Data | None:
         try:

@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+from protcross import __version__
 from protcross.assets import DEFAULT_ASSET_BUNDLE
 from protcross.cli.main import COMMANDS
 from protcross.cli.predict import _default_output_paths
@@ -32,6 +33,23 @@ def test_readme_prediction_examples_acknowledge_esm_license_gate():
     existing_esm_example = existing_assets.split("Explicit release assets", 1)[0]
     assert "--esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth" in existing_esm_example
     assert "--accept-esm-license" in existing_esm_example
+
+
+def test_readme_batch_example_discovers_every_supported_structure_format():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    batch_example = readme.split("## Batch inference", 1)[1].split("### Scheduler controls", 1)[0]
+
+    assert 'path.suffix.lower() in {".pdb", ".cif", ".mmcif"}' in batch_example
+    assert "if not inputs:" in batch_example
+    assert "result_dir = output_dir" in batch_example
+
+
+def test_readme_documents_python_helper_asset_download_behavior():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    python_api = readme.split("## Python API", 1)[1].split("## Assets", 1)[0]
+
+    assert "`predict_pdb` resolves and downloads missing managed assets" in python_api
+    assert "`offline=True`" in python_api
 
 
 def test_repository_has_one_project_markdown_document():
@@ -98,7 +116,22 @@ def test_readme_front_matter_exposes_install_surfaces_and_project_significance()
     assert "residue-level binding-site scores" in intro
 
 
-def test_readme_022_history_has_at_most_three_entries():
+def test_readme_current_history_has_at_most_three_entries():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    history = readme.split("## Version history", 1)[1]
+    headings = re.findall(
+        r"^### ([0-9]+\.[0-9]+\.[0-9]+(?:[^\s]*)?)$",
+        history,
+        re.MULTILINE,
+    )
+    assert headings[0] == __version__
+    release = history.split(f"### {__version__}", 1)[1].split(f"### {headings[1]}", 1)[0]
+    entries = [line for line in release.splitlines() if line.startswith("- ")]
+
+    assert 1 <= len(entries) <= 3
+
+
+def test_readme_022_history_remains_compact():
     readme = Path("README.md").read_text(encoding="utf-8")
     release = readme.split("### 0.2.2", 1)[1].split("### 0.2.1", 1)[0]
     entries = [line for line in release.splitlines() if line.startswith("- ")]

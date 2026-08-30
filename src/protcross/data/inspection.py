@@ -67,7 +67,7 @@ def inspect_structure(
         key=_chain_sort_key,
     )
     if chain_id is not None and chain_id not in coordinate_chains:
-        available = ", ".join(_display_chain(value) for value in coordinate_chains) or "none"
+        available = ", ".join(_display_chain(value) for value in available_chains) or "none"
         raise ValueError(f"Chain {chain_id!r} was not found. Available chains: {available}.")
 
     selected_chains = [chain_id] if chain_id is not None else available_chains

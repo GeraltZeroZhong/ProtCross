@@ -6,7 +6,7 @@ on:
       tag:
         description: "Release tag to create or update"
         required: true
-        default: "v0.2.2"
+        default: "v0.2.3"
 
 permissions:
   contents: read
@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DESKTOP_VERSION: "0.2.2"
+  DESKTOP_VERSION: "0.2.3"
 
 jobs:
   validate-input:
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - name: Require the canonical 0.2.2 tag
+      - name: Require the canonical 0.2.3 tag
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -318,23 +318,27 @@ jobs:
           test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos-aarch64.dmg"
           (cd release-assets && sha256sum * > SHA256SUMS.txt)
           cat > release-notes.txt <<'NOTES'
-          # ProtCross Desktop 0.2.2
+          # ProtCross Desktop 0.2.3
 
           Windows and macOS desktop packages are currently unsigned. Windows SmartScreen and macOS Gatekeeper may display a warning during installation.
 
           ## Downloads
 
-          - Windows 10/11 x64: `ProtCross_Desktop_0.2.2_x64-setup.exe`
-          - macOS 12+ on Apple Silicon (arm64): `ProtCross_Desktop_0.2.2_macos-aarch64.dmg`
+          - Windows 10/11 x64: `ProtCross_Desktop_0.2.3_x64-setup.exe`
+          - macOS 12+ on Apple Silicon (arm64): `ProtCross_Desktop_0.2.3_macos-aarch64.dmg`
           - Checksums: `SHA256SUMS.txt`
 
-          ## What is included
+          ## Highlights
 
-          - Tauri + React desktop interface.
-          - Mol* protein viewer with predicted-residue cluster selection, score-weighted Cα centroids, and residue tables.
-          - Local CPU prediction backend setup flow.
-          - Optional GPU or existing conda backend detection path.
-          - Bundled ProtCross checkpoint/PCA assets from the stable `0.1.2` asset bundle.
+          - Choose a scorable chain independently for every file in a Desktop batch.
+          - Retry failed or interrupted batch items with the original run settings.
+          - Recover recent batch history after restarting Desktop while preserving completed outputs.
+          - Adjust the displayed score cutoff and Cα clustering distance for immediate local regrouping.
+          - Distinguish unscored residues with neutral gray while keeping genuine zero scores on the score scale.
+          - Reuse verified assets and streamlined data paths for faster repeated startup and preparation.
+          - Review clearer CLI/Desktop errors and sanitized diagnostic log excerpts.
+
+          The release uses the stable `0.1.2` checkpoint/PCA bundle. Install the Python package with `python -m pip install protcross==0.2.3`.
 
           ESM-C weights are not bundled. Users must confirm the ESM-C license in the app and then download or import the ESM-C weights separately.
           NOTES

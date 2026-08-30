@@ -13,7 +13,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--processed-pdb-dir",
         default="data/processed_pdb",
-        help="Legacy compatibility option; current mapping reads labels from --raw-pdb-dir structures.",
+        help="Directory containing processed PDB .pt packages whose coordinates and labels are mapped to AF2 samples.",
     )
     parser.add_argument("--processed-af2-dir", default="data/processed_af2")
     parser.add_argument("--raw-pdb-dir", default="data/raw_pdb")

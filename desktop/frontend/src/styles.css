@@ -660,7 +660,7 @@ pre,
 .banner > svg { margin-top: 3px; }
 .banner.success { background: var(--success-soft); border-color: color-mix(in oklab, var(--success) 45%, var(--border-subtle)); color: var(--success); }
 .banner.error { background: var(--danger-soft); border-color: color-mix(in oklab, var(--danger) 45%, var(--border-subtle)); color: var(--danger); }
-.banner > span { color: var(--text-primary); overflow-wrap: anywhere; }
+.banner > span { color: var(--text-primary); overflow-wrap: anywhere; white-space: pre-line; }
 .banner-close { color: currentColor; height: 28px; min-height: 28px; padding: 0; width: 28px; }
 
 .content {
@@ -1201,7 +1201,7 @@ pre,
 }
 
 .staging-summary span { color: var(--text-muted); font-size: 11px; }
-.staging-item { align-items: center; border-bottom: 1px solid var(--border-subtle); display: grid; gap: 10px; grid-template-columns: 42px minmax(0, 1fr) auto; min-height: 54px; padding: 7px 9px; }
+.staging-item { align-items: center; border-bottom: 1px solid var(--border-subtle); display: grid; gap: 10px; grid-template-columns: 42px minmax(150px, 1fr) minmax(210px, 0.8fr) auto; min-height: 68px; padding: 8px 9px; }
 .staging-item:last-child { border-bottom: 0; }
 .file-type { background: var(--accent-soft); border-radius: 6px; color: var(--accent); font-size: 9px; font-weight: 800; padding: 5px; text-align: center; }
 .file-copy,
@@ -1210,6 +1210,16 @@ pre,
 .table-file strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-copy small,
 .table-file small { color: var(--text-muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.staging-preflight { min-width: 0; }
+.preflight-state { align-items: center; color: var(--text-secondary); display: flex; font-size: 11.5px; gap: 7px; }
+.preflight-state .button-spinner { height: 13px; width: 13px; }
+.batch-chain-field { display: grid; gap: 3px; }
+.batch-chain-field > span { color: var(--text-muted); font-size: 10px; font-weight: 700; }
+.batch-chain-field select { min-height: 32px; width: 100%; }
+.batch-chain-field small { color: var(--warning); font-size: 10px; }
+.preflight-failure { align-items: flex-start; display: flex; flex-direction: column; gap: 5px; }
+.preflight-failure span { color: var(--danger); font-size: 11px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.preflight-failure button { min-height: 30px; padding-block: 4px; }
 
 .batch-submit-summary { color: var(--text-secondary); display: flex; font-size: 11.5px; justify-content: space-between; margin: 18px 0 7px; }
 .batch-monitor { min-width: 0; }
@@ -1217,6 +1227,15 @@ pre,
 .batch-monitor-header h3 { font-size: 18px; margin: 3px 0; }
 .batch-monitor-header p { margin: 0; }
 .batch-progress { margin: 16px 0; }
+.batch-error pre,
+.error-copy pre { color: inherit; font: inherit; margin: 0; overflow: visible; overflow-wrap: anywhere; white-space: pre-wrap; }
+.batch-history { min-width: 0; }
+.batch-history-list { display: grid; gap: 7px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.batch-history-list > button { align-items: center; background: var(--surface-subtle); border-color: var(--border-subtle); display: grid; gap: 8px; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 58px; text-align: left; }
+.batch-history-list > button.selected { background: var(--accent-soft); border-color: var(--accent-border); }
+.batch-history-list > button > span:nth-child(2) { display: grid; min-width: 0; }
+.batch-history-list > button > span:nth-child(2) strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-history-list > button small { color: var(--text-muted); font-size: 10px; }
 .progress-track { background: var(--surface-subtle); border-radius: 99px; height: 7px; margin-bottom: 11px; overflow: hidden; }
 .progress-track > span { background: linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent) 68%, var(--success))); border-radius: inherit; display: block; height: 100%; transition: width 300ms ease; }
 
@@ -1334,6 +1353,11 @@ tbody tr:hover { background: color-mix(in oklab, var(--accent-soft) 42%, transpa
 
 .result-panel { max-height: clamp(570px, calc(100vh - 230px), 760px); overflow: auto; }
 .cluster-select select { width: 100%; }
+.result-parameters { background: var(--surface-subtle); border: 1px solid var(--border-subtle); border-radius: 11px; margin-bottom: 13px; padding: 11px; }
+.result-parameters .field-help { margin-bottom: 0; }
+.parameter-comparison { align-items: center; display: grid; gap: 5px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; margin-top: 8px; }
+.parameter-comparison span { color: var(--text-secondary); display: grid; font-size: 10.5px; }
+.parameter-comparison strong { color: var(--text-primary); }
 .centroid-card { align-items: center; background: var(--surface-subtle); border: 1px solid var(--border-subtle); border-radius: 10px; display: flex; justify-content: space-between; margin: 10px 0; padding: 9px 10px; }
 .centroid-card > div { display: grid; min-width: 0; }
 .centroid-card span { color: var(--text-muted); font-size: 10.5px; }
@@ -1343,6 +1367,9 @@ tbody tr:hover { background: color-mix(in oklab, var(--accent-soft) 42%, transpa
 .table-heading span { color: var(--text-muted); font-size: 10.5px; }
 .table-heading > div { display: grid; }
 .residue-table { margin-top: 7px; max-height: 275px; }
+.result-rankings { margin-top: 12px; }
+.all-residue-table { max-height: 390px; }
+.all-residue-table td:first-child { font-variant-numeric: tabular-nums; width: 56px; }
 .score-cell { align-items: center; display: grid; gap: 8px; grid-template-columns: minmax(50px, 1fr) auto; min-width: 110px; }
 .score-bar { background: var(--surface-subtle); border-radius: 99px; display: block; height: 6px; overflow: hidden; }
 .score-bar > span { background: linear-gradient(90deg, var(--score-30), var(--score-78), var(--score-100)); border-radius: inherit; display: block; height: 100%; }
@@ -1436,6 +1463,8 @@ tbody tr:hover { background: color-mix(in oklab, var(--accent-soft) 42%, transpa
   .span-all { grid-column: 1; }
   .batch-settings { order: 2; }
   .batch-monitor { order: 3; }
+  .staging-item { grid-template-columns: 42px minmax(0, 1fr) auto; }
+  .staging-preflight { grid-column: 2; }
 }
 
 @media (max-width: 620px) {
@@ -1465,6 +1494,9 @@ tbody tr:hover { background: color-mix(in oklab, var(--accent-soft) 42%, transpa
   .inspection-summary,
   .inspection-metrics,
   .batch-stats { grid-template-columns: 1fr; }
+  .parameter-comparison { grid-template-columns: 1fr; }
+  .parameter-comparison button { width: 100%; }
+  .batch-history-list { grid-template-columns: 1fr; }
   .structure-check-heading { align-items: stretch; flex-direction: column; }
   .compact-field select { width: 100%; }
   .path-row { align-items: stretch; flex-direction: column; }
