@@ -17,7 +17,7 @@ from protcross.assets import (
 
 APP_NAME = "ProtCross"
 DESKTOP_MANIFEST = "protcross-desktop-assets.json"
-ESM_LICENSE_URL = "https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement"
+ESM_LICENSE_URL = "https://huggingface.co/biohub/esmc-600m-2024-12"
 ESM_MODEL_URL = DEFAULT_ESM_URL
 ESM_FILENAME = DEFAULT_ASSETS[0].filename
 ESM_EXPECTED_SHA256 = DEFAULT_ASSETS[0].sha256

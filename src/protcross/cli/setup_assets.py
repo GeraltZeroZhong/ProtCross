@@ -20,7 +20,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
             "ESM-C download: about 2.14 GiB; keep at least 2.4 GiB free on the asset target "
             "(about 5 GiB total if the Python environment shares that disk). Interrupted downloads "
             "retain a .part file and resume on the next identical command.\n"
-            f"Review the ESM-C license before accepting: {ESM_LICENSE_URL}"
+            f"ESM-C MIT license: {ESM_LICENSE_URL}"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -55,7 +55,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--accept-esm-license",
         action="store_true",
-        help="Confirm that you reviewed the upstream ESM-C license; acceptance is recorded in the asset manifest.",
+        help="Deprecated compatibility option; ESM-C uses the MIT license and needs no acceptance.",
     )
     return parser
 

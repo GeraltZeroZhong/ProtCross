@@ -39,7 +39,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--accept-esm-license",
         action="store_true",
-        help="Confirm that you reviewed and accept the ESM-C model license before using local ESM-C weights.",
+        help="Deprecated compatibility option; ESM-C uses the MIT license and needs no acceptance.",
     )
     return parser
 

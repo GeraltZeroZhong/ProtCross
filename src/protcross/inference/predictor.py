@@ -35,7 +35,7 @@ from protcross.data import (
     parsed_structure_sequence_chunks,
     truncate_parsed_structure_by_chain,
 )
-from protcross.data.esm import ESMFeatureExtractor
+from protcross.data.esm import ESMFeatureExtractor, load_esm_dependencies
 from protcross.models import EvoPointDALitModule
 
 from .pdb import write_bfactor_pdb
@@ -1850,6 +1850,7 @@ def predict_pdb(
         max_len=max_len,
         allow_truncation=allow_truncation,
     )
+    load_esm_dependencies()
     resolved = resolve_prediction_assets(
         ckpt_path,
         esm_weights,

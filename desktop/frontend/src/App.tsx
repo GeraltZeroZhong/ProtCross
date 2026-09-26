@@ -1,17 +1,17 @@
 import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import packageInfo from "../package.json";
 import {
   cancelBatch,
   cancelEsmDownload,
   configureBackend,
-  confirmLicense,
   downloadEsm,
   exportDiagnostics,
   getBatch,
   getBatchResult,
   getEsmDownload,
+  getPredictionProgress,
   getStatus,
   importCheckpoint,
   importEsm,
@@ -57,8 +57,7 @@ interface BatchPreflight {
 const DEFAULT_THRESHOLD = 0.5;
 const DEFAULT_CLUSTER_CUTOFF = 8.0;
 const BATCH_PAGE_SIZE = 500;
-const ESM_LICENSE_URL = "https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement";
-const TECHNICAL_GUIDE_URL = "https://github.com/GeraltZeroZhong/ProtCross/blob/v0.2.3/README.md#model-and-inference-pipeline";
+const TECHNICAL_GUIDE_URL = "https://github.com/GeraltZeroZhong/ProtCross/blob/v0.2.4/README.md#model-and-inference-pipeline";
 const APP_VERSION = packageInfo.version;
 const ALL_CHAINS = "__all_chains__";
 const MolstarViewer = lazy(() =>
@@ -102,6 +101,11 @@ export default function App() {
   const [inspection, setInspection] = useState<StructureInspection | null>(null);
   const [inspectionError, setInspectionError] = useState("");
   const [inspecting, setInspecting] = useState(false);
+  const [inspectionRevision, setInspectionRevision] = useState(0);
+  const [singleRunning, setSingleRunning] = useState(false);
+  const [singleProgress, setSingleProgress] = useState("");
+  const [singleElapsed, setSingleElapsed] = useState(0);
+  const predictionRequest = useRef<{ controller: AbortController; cancelled: boolean } | null>(null);
   const [outputDir, setOutputDir] = useState(() => window.localStorage.getItem("protcross-output-dir") ?? "");
   const [threshold, setThreshold] = useState(() => storedNumber("protcross-threshold", DEFAULT_THRESHOLD));
   const [clusterCutoff, setClusterCutoff] = useState(() => storedNumber("protcross-cluster-cutoff", DEFAULT_CLUSTER_CUTOFF));
@@ -146,6 +150,7 @@ export default function App() {
       setBackendMode(next.backend.mode);
     }
     setProxyUrl(next.backend.proxy_url ?? "");
+    setCondaPython(next.backend.mode === "conda" ? next.backend.python ?? "" : "");
     const downloads = next.activity?.asset_downloads ?? [];
     const activeDownload = [...downloads]
       .reverse()
@@ -281,16 +286,13 @@ export default function App() {
     setPendingAction(`Installing ${mode.toUpperCase()} backend...`);
     try {
       await invoke("install_backend", { mode, proxyUrl: proxyUrl || undefined });
+      setPendingAction("Starting the installed runtime...");
       await invoke("stop_backend");
-      let backend = await invoke<BackendStartResult>("start_backend", { port: 0 });
+      const backend = await invoke<BackendStartResult>("start_backend", { port: 0, mode });
       configureDesktopApi(backend.token, backend.port);
       await waitForBackendStatus();
       await configureBackend(mode, undefined, proxyUrl);
-      // Restart once more so the sidecar itself runs inside the selected environment.
-      await invoke("stop_backend");
-      backend = await invoke<BackendStartResult>("start_backend", { port: 0 });
-      configureDesktopApi(backend.token, backend.port);
-      await waitForBackendStatus();
+      setPendingAction("Checking runtime dependencies and device...");
       const test = await testBackend(mode);
       setEnvTest(test);
       if (test.ok !== true) {
@@ -359,6 +361,62 @@ export default function App() {
     }
   }
 
+  async function openLogs() {
+    try {
+      await invoke("open_logs");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
+
+  async function cancelSinglePrediction() {
+    const operation = predictionRequest.current;
+    if (!operation || operation.cancelled) return;
+    if (!await confirm("Cancel this prediction and restart the runtime? Completed results are kept. Model loading will run again for the next prediction.", { title: "Cancel prediction", kind: "warning" })) return;
+    // The prediction may have finished while the confirmation was open.
+    if (predictionRequest.current !== operation) return;
+    operation.cancelled = true;
+    operation.controller.abort();
+    setSingleRunning(false);
+    setPendingAction("Cancelling prediction and restarting runtime...");
+    setStatus(null);
+    try {
+      await invoke("stop_backend");
+      const backend = await invoke<BackendStartResult>("start_backend", { port: 0 });
+      configureDesktopApi(backend.token, backend.port);
+      await waitForBackendStatus();
+      setMessage("Prediction cancelled. The runtime is ready for another prediction.");
+    } catch (exc) {
+      setBackendConnectionLost(true);
+      setError(`Prediction stopped. Restart or reinstall the runtime from Setup. ${String(exc)}`);
+    } finally {
+      predictionRequest.current = null;
+      setPendingAction("");
+    }
+  }
+
+  useEffect(() => {
+    if (!singleRunning) return;
+    let stopped = false;
+    let inFlight = false;
+    const started = Date.now();
+    setSingleElapsed(0);
+    const timer = window.setInterval(async () => {
+      setSingleElapsed(Math.floor((Date.now() - started) / 1000));
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const progress = await withRequestDeadline((signal) => getPredictionProgress(signal));
+        if (!stopped) setSingleProgress(progress.stage);
+      } catch {
+        if (!stopped) setSingleProgress("Waiting for the runtime. You can cancel and restart if it is unresponsive.");
+      } finally {
+        inFlight = false;
+      }
+    }, 1000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [singleRunning]);
+
   async function openExistingResult() {
     if (pendingAction) {
       return;
@@ -417,8 +475,9 @@ export default function App() {
         }
       } catch (exc) {
         const detail = exc instanceof Error ? exc.message : String(exc);
+        setBackendConnectionLost(true);
         setError(
-          "The prediction backend is not running yet. Start with ‘Install recommended CPU backend’ below; " +
+          "The prediction backend is not running yet. Open Setup and choose ‘Install recommended runtime’; " +
           `ProtCross will then start and test it automatically. Details: ${detail}`
         );
       }
@@ -512,7 +571,7 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [inputPath, chainSelection, Boolean(status)]);
+  }, [inputPath, chainSelection, Boolean(status), inspectionRevision]);
 
   useEffect(() => {
     if (!batchJob || !["queued", "running"].includes(batchJob.status)) {
@@ -611,7 +670,10 @@ export default function App() {
     }
   }
 
-  const setupIssues = useMemo(() => readinessIssues(status), [status]);
+  const setupIssues = useMemo(
+    () => backendConnectionLost ? ["The runtime is offline. Restart or reinstall it from Setup."] : readinessIssues(status),
+    [status, backendConnectionLost]
+  );
   const ready = setupIssues.length === 0;
   const batchActive = batchJob ? ["queued", "running"].includes(batchJob.status) : false;
   const resultStructure = prediction?.output_files.structure ?? batchResult?.output_files.structure;
@@ -628,6 +690,12 @@ export default function App() {
   const activityLabel = pendingAction
     || (downloadActive && assetDownload ? downloadStatusLabel(assetDownload.status) : "")
     || (batchActive && batchJob ? `Batch prediction · ${batchJob.completed}/${batchJob.item_count ?? batchJob.items.length}` : "");
+
+  useEffect(() => {
+    if (!UI_PREVIEW_TAB) {
+      void invoke("set_activity", { active: Boolean(activityLabel) }).catch((exc) => console.error("Could not update task activity", exc));
+    }
+  }, [Boolean(activityLabel)]);
 
   return (
     <div className="app-shell">
@@ -741,18 +809,13 @@ export default function App() {
             setBackendMode={setBackendMode}
             busy={Boolean(pendingAction)}
             pendingAction={pendingAction}
+            onOpenLogs={openLogs}
             assetDownload={assetDownload}
             setupIssues={setupIssues}
             condaPython={condaPython}
             setCondaPython={setCondaPython}
             proxyUrl={proxyUrl}
             setProxyUrl={setProxyUrl}
-            onConfirmLicense={() => runAction(() => confirmLicense(), "ESM-C license confirmation recorded.")}
-            onOpenLicense={() =>
-              invoke("open_url", { url: ESM_LICENSE_URL }).catch((exc) =>
-                setError(exc instanceof Error ? exc.message : String(exc))
-              )
-            }
             onConfigureBackend={() =>
               runAction(
                 () => configureBackend(backendMode, backendMode === "conda" ? condaPython : undefined, proxyUrl),
@@ -844,7 +907,18 @@ export default function App() {
               setChainSelection(ALL_CHAINS);
               setInspection(null);
               setInspectionError("");
+              setInspectionRevision((revision) => revision + 1);
             }}
+            onRecheck={() => {
+              setInspection(null);
+              setInspectionError("");
+              setInspectionRevision((revision) => revision + 1);
+            }}
+            singleRunning={singleRunning}
+            singleProgress={singleProgress}
+            singleElapsed={singleElapsed}
+            onCancel={cancelSinglePrediction}
+            otherTaskActive={batchActive || downloadActive}
             chainSelection={chainSelection}
             setChainSelection={setChainSelection}
             inspection={inspection}
@@ -861,12 +935,14 @@ export default function App() {
             setAllowTruncation={setAllowTruncation}
             onOpenSetup={() => setTab("setup")}
             onRun={async () => {
-              if (pendingAction) {
-                return;
-              }
+              if (pendingAction || batchActive || downloadActive) return;
+              const operation = { controller: new AbortController(), cancelled: false };
+              predictionRequest.current = operation;
               setError("");
               setMessage("");
               setPendingAction("Running prediction...");
+              setSingleRunning(true);
+              setSingleProgress("Preparing prediction...");
               try {
                 validatePredictionInputs(inputPath, threshold, clusterCutoff);
                 const result = await runPrediction({
@@ -876,15 +952,20 @@ export default function App() {
                   pocket_cluster_cutoff: clusterCutoff,
                   chain_id: chainSelection === ALL_CHAINS ? undefined : chainSelection,
                   allow_truncation: allowTruncation
-                });
+                }, operation.controller.signal);
+                if (operation.cancelled) return;
                 setPrediction(result);
                 setBatchResult(null);
                 setMessage("Prediction finished.");
                 setTab("results");
               } catch (exc) {
-                setError(exc instanceof Error ? exc.message : String(exc));
+                if (!operation.cancelled) setError(exc instanceof Error ? exc.message : String(exc));
               } finally {
-                setPendingAction("");
+                if (!operation.cancelled) {
+                  predictionRequest.current = null;
+                  setSingleRunning(false);
+                  setPendingAction("");
+                }
               }
             }}
           />
@@ -983,7 +1064,7 @@ export default function App() {
                 return;
               }
               setError("");
-              setPendingAction("Retrying failed structures...");
+              setPendingAction("Starting unfinished structures...");
               try {
                 const retry = await retryBatch(batchJob.id);
                 setBatchJob(retry);
@@ -1036,6 +1117,8 @@ export default function App() {
           <DiagnosticsPanel
             status={status}
             envTest={envTest}
+            connected={Boolean(status) && !backendConnectionLost}
+            onOpenLogs={openLogs}
             onTest={async () => {
               setError("");
               setMessage("");
@@ -1082,14 +1165,13 @@ function SetupPanel(props: {
   setBackendMode: (mode: BackendMode) => void;
   busy: boolean;
   pendingAction: string;
+  onOpenLogs: () => void;
   assetDownload: AssetDownloadJob | null;
   setupIssues: string[];
   condaPython: string;
   setCondaPython: (value: string) => void;
   proxyUrl: string;
   setProxyUrl: (value: string) => void;
-  onConfirmLicense: () => void;
-  onOpenLicense: () => void;
   onConfigureBackend: () => void;
   onInstallBackend: (mode: "cpu" | "gpu") => void;
   onImportEsm: () => void;
@@ -1105,14 +1187,13 @@ function SetupPanel(props: {
   onTestBackend: () => void;
 }) {
   const condaPythonId = useId();
-  const licenseConfirmed = Boolean(props.status?.assets.esm.license_confirmed);
   const condaNeedsPath = props.backendMode === "conda" && !props.condaPython;
   const busyLabel = props.pendingAction || "Working...";
   const downloadActive = ["queued", "running", "cancelling"].includes(props.assetDownload?.status ?? "");
-  const backendReady = backendIsHealthy(props.status);
+  const backendReady = !props.backendConnectionLost && backendIsHealthy(props.status);
   const assetsReady = Boolean(props.status?.assets.ready);
-  const completeCount = [backendReady, licenseConfirmed, assetsReady].filter(Boolean).length;
-  const overallReady = props.status?.readiness?.ready === true;
+  const completeCount = [backendReady, assetsReady].filter(Boolean).length;
+  const overallReady = !props.backendConnectionLost && props.status?.readiness?.ready === true;
   const locked = props.busy || props.runtimeLocked;
   const acceleratorLabel = isMacPlatform() ? "Apple silicon acceleration" : "NVIDIA CUDA acceleration";
   return (
@@ -1120,12 +1201,12 @@ function SetupPanel(props: {
       <section className={`setup-overview ${overallReady ? "complete" : ""}`}>
         <div className="setup-overview-copy">
           <span className="eyebrow">Environment readiness</span>
-          <h3>{overallReady ? "ProtCross is ready" : `${completeCount} of 3 steps complete`}</h3>
+          <h3>{overallReady ? "ProtCross is ready" : `${completeCount} of 2 steps complete`}</h3>
           <p>{overallReady
             ? "The runtime and assets have passed their readiness checks."
             : "Complete the guided setup once. ProtCross reuses this local environment for future sessions."}</p>
-          <div className="setup-progress" aria-label="Setup progress" aria-valuemax={3} aria-valuemin={0} aria-valuenow={completeCount} role="progressbar">
-            {[0, 1, 2].map((step) => <span className={step < completeCount ? "complete" : ""} key={step} />)}
+          <div className="setup-progress" aria-label="Setup progress" aria-valuemax={2} aria-valuemin={0} aria-valuenow={completeCount} role="progressbar">
+            {[0, 1].map((step) => <span className={step < completeCount ? "complete" : ""} key={step} />)}
           </div>
         </div>
         {overallReady ? (
@@ -1140,6 +1221,7 @@ function SetupPanel(props: {
           <div>
             <h3>{busyLabel}</h3>
             <p>This operation can take several minutes. You can continue viewing other workspace pages.</p>
+            <button onClick={props.onOpenLogs}>Open logs</button>
           </div>
         </section>
       ) : null}
@@ -1147,6 +1229,7 @@ function SetupPanel(props: {
         <div className="callout warning"><Icon name="warning" /><div><strong>Environment controls are locked</strong><span>Finish the active batch or pause the asset download before changing its runtime.</span></div></div>
       ) : null}
 
+      <div className="button-row"><button onClick={props.onOpenLogs}>Open runtime logs</button></div>
       <section aria-labelledby="setup-runtime-title" className="panel setup-step setup-backend">
         <StepHeader id="setup-runtime-title" number={1} complete={backendReady} title="Prediction runtime" subtitle={backendReady ? `${backendDisplayName(props.status?.backend.mode)} is active and tested` : "Install the recommended local CPU runtime"} />
         {!backendReady ? (
@@ -1203,27 +1286,15 @@ function SetupPanel(props: {
         </details>
       </section>
 
-      <section aria-labelledby="setup-license-title" className="panel setup-step setup-license">
-        <StepHeader id="setup-license-title" number={2} complete={licenseConfirmed} title="ESM-C model terms" subtitle={licenseConfirmed ? "License confirmation recorded" : "Review the Cambrian Non-Commercial License"} />
-        <p>ESM-C weights use EvolutionaryScale's Cambrian Non-Commercial License.</p>
-        <div className="button-row">
-          <button disabled={props.busy} onClick={props.onOpenLicense}>Read license <Icon name="external" /></button>
-          <button className={!licenseConfirmed ? "primary-action" : ""} disabled={props.busy || licenseConfirmed || !props.status} onClick={props.onConfirmLicense}>
-            {licenseConfirmed ? <><Icon name="check" /> Accepted</> : "I have reviewed and accept the terms"}
-          </button>
-        </div>
-        {!props.status ? <p className="field-help">The local runtime must be available before this confirmation can be saved.</p> : null}
-      </section>
-
       <section aria-labelledby="setup-assets-title" className="panel setup-step setup-assets">
-        <StepHeader id="setup-assets-title" number={3} complete={assetsReady} title="Model assets" subtitle={assetsReady ? "All three assets are present and verified" : "Download the 2.14 GiB ESM-C weights"} />
+        <StepHeader id="setup-assets-title" number={2} complete={assetsReady} title="Model assets" subtitle={assetsReady ? "All three assets are present and verified" : "Download the 2.14 GiB ESM-C weights"} />
         <div className="asset-grid">
           <AssetLine label="Checkpoint" status={props.status?.assets.checkpoint} />
           <AssetLine label="PCA" status={props.status?.assets.pca} />
           <AssetLine label="ESM-C" status={props.status?.assets.esm} />
         </div>
         <div className="button-row">
-          <button className={!assetsReady ? "primary-action" : ""} disabled={props.busy || !licenseConfirmed || downloadActive} onClick={props.onDownloadEsm}>
+          <button className={!assetsReady ? "primary-action" : ""} disabled={props.busy || !props.status || downloadActive} onClick={props.onDownloadEsm}>
             <Icon name="download" />
             {["cancelled", "failed"].includes(props.assetDownload?.status ?? "") ? "Resume ESM-C download" : assetsReady ? "Verify ESM-C again" : "Download ESM-C · 2.14 GiB"}
           </button>
@@ -1237,8 +1308,8 @@ function SetupPanel(props: {
           <div className="button-row disclosure-content">
             <button disabled={props.busy || !props.status} onClick={props.onImportCheckpoint}>Import checkpoint</button>
             <button disabled={props.busy || !props.status} onClick={props.onImportPca}>Import PCA</button>
-            <button disabled={props.busy || !licenseConfirmed || downloadActive} onClick={props.onImportEsm}>Import ESM-C .pth</button>
-            <button disabled={props.busy || !licenseConfirmed || downloadActive} onClick={props.onRefreshEsm}><Icon name="refresh" /> Redownload and verify</button>
+            <button disabled={props.busy || !props.status || downloadActive} onClick={props.onImportEsm}>Import ESM-C .pth</button>
+            <button disabled={props.busy || !props.status || downloadActive} onClick={props.onRefreshEsm}><Icon name="refresh" /> Redownload and verify</button>
           </div>
         </details>
       </section>
@@ -1277,6 +1348,12 @@ function PredictPanel(props: {
   ready: boolean;
   setupIssues: string[];
   busy: boolean;
+  onRecheck: () => void;
+  singleRunning: boolean;
+  singleProgress: string;
+  singleElapsed: number;
+  onCancel: () => void;
+  otherTaskActive: boolean;
   inputPath: string;
   setInputPath: (value: string) => void;
   chainSelection: string;
@@ -1306,6 +1383,8 @@ function PredictPanel(props: {
           <button onClick={props.onOpenSetup}>Open setup <Icon name="arrow-right" /></button>
         </div>
       ) : null}
+      {props.otherTaskActive ? <p className="field-help span-all">Finish the batch or pause the asset download before starting a single prediction.</p> : null}
+      {props.singleRunning ? <div className="callout neutral span-all" role="status"><Icon name="activity" /><div><strong>{props.singleProgress}</strong><span>Elapsed: {props.singleElapsed}s</span></div><button onClick={props.onCancel}>Cancel prediction</button></div> : null}
       <section className="panel prediction-form">
         <div className="section-heading">
           <span className="step-kicker">Step 1</span>
@@ -1323,8 +1402,9 @@ function PredictPanel(props: {
         {!props.outputDir ? <p className="field-help">Automatic location: <code>{props.defaultOutputRoot ? `${props.defaultOutputRoot}${pathSeparator()}<structure>` : "ProtCross application-data outputs"}</code>. Existing names receive a unique run suffix.</p> : null}
 
         <details className="disclosure settings-disclosure">
-          <summary><Icon name="settings" /> Prediction settings <span>Defaults: {props.threshold.toFixed(2)} · {props.clusterCutoff.toFixed(1)} Å</span></summary>
+          <summary><Icon name="settings" /> Prediction settings <span>Current settings: {props.threshold.toFixed(2)} · {props.clusterCutoff.toFixed(1)} Å</span></summary>
           <div className="disclosure-content">
+            <button disabled={props.busy} onClick={() => { props.setThreshold(DEFAULT_THRESHOLD); props.setClusterCutoff(DEFAULT_CLUSTER_CUTOFF); props.setAllowTruncation(false); }}>Restore defaults</button>
             <div className="inline-fields">
               <NumberInput label="Model-score cutoff" value={props.threshold} setValue={props.setThreshold} min={0} max={1} step={0.01} />
               <NumberInput label="Cluster distance (Å)" value={props.clusterCutoff} setValue={props.setClusterCutoff} min={0.1} max={40} step={0.5} />
@@ -1345,7 +1425,7 @@ function PredictPanel(props: {
           <button
             className="primary-action run-action"
             disabled={
-              props.busy || !props.ready || !props.inputPath || props.inspecting ||
+              props.busy || props.otherTaskActive || !props.ready || !props.inputPath || props.inspecting ||
               Boolean(props.inspectionError) || !props.inspection || truncationBlocked
             }
             onClick={props.onRun}
@@ -1359,6 +1439,7 @@ function PredictPanel(props: {
           <span className="step-kicker">Preflight</span>
           <h3>Structure check</h3>
           <p>Review chain selection and coordinate quality before inference.</p>
+          <button disabled={!props.inputPath || props.inspecting || props.busy} onClick={props.onRecheck}>Check again</button>
         </div>
         <StructureInspectionCard
           inspection={props.inspection}
@@ -1482,7 +1563,7 @@ function BatchPanel(props: {
     props.batchJob
     && (
       props.batchJob.failed > 0
-      || (props.batchJob.status === "interrupted" && processed < itemCount)
+      || (["interrupted", "cancelled"].includes(props.batchJob.status) && processed < itemCount)
     )
     && !["queued", "running"].includes(props.batchJob.status)
   );
@@ -1607,7 +1688,7 @@ function BatchPanel(props: {
           <div className="batch-monitor-header">
             <div><span className="step-kicker">Current run</span><h3>{humanizeStatus(props.batchJob.status)}</h3><p>{progressLabel}</p></div>
             <div className="button-row">
-              {retryable ? <button className="primary-action" disabled={props.busy} onClick={props.onRetryFailed}><Icon name="refresh" /> Retry failed</button> : null}
+              {retryable ? <button className="primary-action" disabled={props.busy} onClick={props.onRetryFailed}><Icon name="refresh" /> {props.batchJob.status === "cancelled" ? "Continue remaining" : "Retry failed"}</button> : null}
               <button className="danger-action" disabled={props.batchJob.cancel_requested || !["queued", "running"].includes(props.batchJob.status)} onClick={props.onCancel}>
                 <Icon name="pause" /> {props.batchJob.cancel_requested ? "Stopping after current group" : "Stop after current group"}
               </button>
@@ -1896,20 +1977,22 @@ function ResultsPanel(props: {
 
 function DiagnosticsPanel(props: {
   status: DesktopStatus | null;
+  connected: boolean;
+  onOpenLogs: () => void;
   envTest: Record<string, unknown> | null;
   onTest: () => void;
   onExport: () => void;
   onOpenReleases: () => void;
   onOpenScientificGuide: () => void;
 }) {
-  const backendReady = backendIsHealthy(props.status);
+  const backendReady = props.connected && backendIsHealthy(props.status);
   const testOk = props.envTest?.ok === true || props.status?.backend.backend_test_ok === true;
   const assetsReady = Boolean(props.status?.assets.ready);
   return (
     <div className="diagnostics-layout">
       <section className="health-overview span-all">
         <div><span className="eyebrow">System health</span><h3>{backendReady && assetsReady ? "Environment is operational" : "Environment needs attention"}</h3><p>ProtCross Desktop {APP_VERSION} · {backendDisplayName(props.status?.backend.mode)}</p></div>
-        <button className="primary-action" onClick={props.onTest}><Icon name="activity" /> Run environment test</button>
+        <button className="primary-action" disabled={!props.connected} onClick={props.onTest}><Icon name="activity" /> Run environment test</button>
       </section>
       <section className="panel health-panel">
         <div className="section-heading"><span className="step-kicker">Runtime</span><h3>Backend health</h3></div>
@@ -1929,8 +2012,10 @@ function DiagnosticsPanel(props: {
       </section>
       <section className="panel support-panel">
         <div className="section-heading"><span className="step-kicker">Support</span><h3>Resolve an issue</h3><p>Run the health check first. Exported diagnostics include versions, configuration, and local logs.</p></div>
+        {!props.connected ? <p role="status">The runtime is offline. Environment tests and ZIP export need a running backend; local logs are still available.</p> : null}
         <div className="support-actions">
-          <button className="support-action" onClick={props.onExport}><span className="action-icon"><Icon name="download" /></span><span><strong>Export diagnostics</strong><small>Create a local ZIP and open its folder</small></span><Icon name="chevron-right" /></button>
+          <button className="support-action" onClick={props.onOpenLogs}><span className="action-icon"><Icon name="folder" /></span><span><strong>Open logs</strong><small>Installation and runtime logs, available even offline</small></span></button>
+          <button className="support-action" disabled={!props.connected} onClick={props.onExport}><span className="action-icon"><Icon name="download" /></span><span><strong>Export diagnostics</strong><small>Create a local ZIP and open its folder</small></span><Icon name="chevron-right" /></button>
           <button className="support-action" onClick={props.onOpenScientificGuide}><span className="action-icon"><Icon name="help" /></span><span><strong>Technical guide</strong><small>Inputs, outputs, and inference details</small></span><Icon name="external" /></button>
           <button className="support-action" onClick={props.onOpenReleases}><span className="action-icon"><Icon name="refresh" /></span><span><strong>Check releases</strong><small>View current Desktop downloads</small></span><Icon name="external" /></button>
         </div>
@@ -2086,9 +2171,6 @@ function readinessIssues(status: DesktopStatus | null): string[] {
     return status.readiness.issues;
   }
   const issues: string[] = [];
-  if (!status.assets.esm.license_confirmed) {
-    issues.push("Confirm the ESM-C license.");
-  }
   if (!status.backend.mode) {
     issues.push("Select and save a backend.");
   } else if (!status.backend.python_present) {
@@ -2345,7 +2427,7 @@ function previewState(tab: Tab): { status: DesktopStatus; prediction?: PredictRe
     },
     readiness: ready ? { ready: true, issues: [] } : {
       ready: false,
-      issues: ["Install the selected backend environment.", "Confirm the ESM-C license.", "Download or import ESM-C weights."]
+      issues: ["Install the selected backend environment.", "Download or import ESM-C weights."]
     },
     activity: { batch_jobs: batchJob ? [batchJob] : [], asset_downloads: [] }
   };

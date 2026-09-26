@@ -424,6 +424,19 @@ def test_predict_pdb_missing_input_does_not_resolve_assets(tmp_path, monkeypatch
         predict_pdb(tmp_path / "missing.pdb")
 
 
+def test_predict_pdb_missing_dependencies_fail_before_resolving_assets(tmp_path, monkeypatch):
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "esm.models.esmc", None)
+
+    def fail_resolve_assets(*args, **kwargs):
+        raise AssertionError("dependency validation must run before asset downloads")
+
+    monkeypatch.setattr("protcross.inference.predictor.resolve_prediction_assets", fail_resolve_assets)
+    with pytest.raises(ImportError, match=r'pip install "protcross\[predict\]"'):
+        predict_pdb(input_pdb, device="cpu")
+
+
 def test_predict_pdb_invalid_options_do_not_resolve_assets(tmp_path, monkeypatch):
     input_pdb = tmp_path / "input.pdb"
     input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
@@ -590,6 +603,7 @@ def test_predict_pdb_forwards_resolved_asset_metadata(tmp_path, monkeypatch):
         return FakePredictor()
 
     monkeypatch.setattr("protcross.inference.predictor.resolve_prediction_assets", lambda *args, **kwargs: resolved)
+    monkeypatch.setattr("protcross.inference.predictor.load_esm_dependencies", lambda: None)
     monkeypatch.setattr(ProtCrossPredictor, "from_files", staticmethod(fake_from_files))
 
     result = predict_pdb(input_pdb)
@@ -856,7 +870,7 @@ def test_predictor_rejects_invalid_pca_dim():
         )
 
 
-def test_predictor_from_files_requires_esm_license_acceptance(tmp_path, monkeypatch):
+def test_predictor_from_files_needs_no_esm_license_acceptance(tmp_path, monkeypatch):
     monkeypatch.delenv("PROTCROSS_ACCEPT_ESM_LICENSE", raising=False)
     ckpt = tmp_path / "model.ckpt"
     esm = tmp_path / "esm.pth"
@@ -864,8 +878,13 @@ def test_predictor_from_files_requires_esm_license_acceptance(tmp_path, monkeypa
     for path in (ckpt, esm, pca):
         path.write_bytes(b"asset")
 
-    with pytest.raises(RuntimeError, match="accept-esm-license"):
-        ProtCrossPredictor.from_files(ckpt, esm, pca)
+    extractor = _FakeESM()
+    monkeypatch.setattr("protcross.inference.predictor.ESMFeatureExtractor", lambda *args: extractor)
+    monkeypatch.setattr(ProtCrossPredictor, "_load_pca", lambda *args: _FakePCA())
+    monkeypatch.setattr(ProtCrossPredictor, "_load_model", lambda *args: _FakeModel())
+
+    predictor = ProtCrossPredictor.from_files(ckpt, esm, pca, device="cpu")
+    assert predictor.esm_extractor is extractor
 
 
 def test_predictor_from_assets_builds_traceable_metadata(tmp_path, monkeypatch):

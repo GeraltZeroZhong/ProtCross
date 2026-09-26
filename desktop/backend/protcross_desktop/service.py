@@ -204,6 +204,7 @@ class DesktopBackend:
         self._file_status_cache: dict[tuple[str, int, int, str | None], dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._predict_lock = threading.Lock()
+        self._prediction_progress: dict[str, Any] | None = None
         self._batch_history_path = self.paths.root / BATCH_HISTORY_FILENAME
         self._load_batch_history()
 
@@ -270,7 +271,6 @@ class DesktopBackend:
         return self.backend_status()
 
     def import_esm_weights(self, path: str | Path, *, copy_to_cache: bool = False) -> dict[str, Any]:
-        self._require_license()
         source_path = Path(path).expanduser()
         if not source_path.exists():
             raise FileNotFoundError(f"ESM-C weights not found: {source_path}")
@@ -319,7 +319,6 @@ class DesktopBackend:
         _progress_callback: Callable[[int, int | None], None] | None = None,
         _cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
-        self._require_license()
         spec = AssetSpec(
             name="ESM-C 600M weights",
             filename=ESM_FILENAME,
@@ -345,7 +344,6 @@ class DesktopBackend:
 
     def start_esm_download(self, *, force: bool = False) -> dict[str, Any]:
         """Start the large ESM-C download without blocking the desktop API."""
-        self._require_license()
         with self._lock:
             self._prune_finished_jobs_locked(self._asset_downloads)
             running = next(
@@ -406,7 +404,7 @@ class DesktopBackend:
         except Exception as exc:
             with self._lock:
                 job.status = "failed"
-                job.error = str(exc)
+                job.error = str(exc).replace("Rerun the same command to resume.", "Click Resume to continue.")
                 job.completed_at = time.time()
             return
         with self._lock:
@@ -428,7 +426,6 @@ class DesktopBackend:
             "ready": bool(
                 _is_usable_file_status(checkpoint_status)
                 and _is_usable_file_status(pca_status)
-                and esm["license_confirmed"]
                 and esm["present"]
                 and esm["verified"] is True
             ),
@@ -459,8 +456,6 @@ class DesktopBackend:
         package_version = _required_package_version()
         status = status or self.asset_status()
         issues: list[str] = []
-        if not status["esm"]["license_confirmed"]:
-            issues.append("Confirm the ESM-C license before configuring weights.")
         if not self.manifest.backend_mode:
             issues.append("Select a backend mode: cpu, gpu, or conda.")
         else:
@@ -540,22 +535,30 @@ class DesktopBackend:
         if output_dir is None:
             output_dir = self.paths.outputs_dir / input_path.stem
         with self._predict_lock:
-            output_paths = _desktop_output_paths(input_path, output_dir)
-            if any(path.exists() for path in output_paths.values()):
-                output_dir = _next_available_run_dir(Path(output_dir).expanduser())
+            with self._lock:
+                self._prediction_progress = {"stage": "Loading prediction models"}
+            try:
                 output_paths = _desktop_output_paths(input_path, output_dir)
-            predictor = self._get_predictor(device=device)
-            result = predictor.predict(
-                input_path,
-                chain_id=chain_id,
-                threshold=threshold,
-                pocket_cluster_cutoff=pocket_cluster_cutoff,
-                output_pdb=output_paths["structure"],
-                scores_tsv=output_paths["scores_tsv"],
-                pocket_json=output_paths["pockets_json"],
-                summary_json=output_paths["summary_json"],
-                allow_truncation=allow_truncation,
-            )
+                if any(path.exists() for path in output_paths.values()):
+                    output_dir = _next_available_run_dir(Path(output_dir).expanduser())
+                    output_paths = _desktop_output_paths(input_path, output_dir)
+                predictor = self._get_predictor(device=device)
+                with self._lock:
+                    self._prediction_progress = {"stage": "Computing residue scores and writing results"}
+                result = predictor.predict(
+                    input_path,
+                    chain_id=chain_id,
+                    threshold=threshold,
+                    pocket_cluster_cutoff=pocket_cluster_cutoff,
+                    output_pdb=output_paths["structure"],
+                    scores_tsv=output_paths["scores_tsv"],
+                    pocket_json=output_paths["pockets_json"],
+                    summary_json=output_paths["summary_json"],
+                    allow_truncation=allow_truncation,
+                )
+            finally:
+                with self._lock:
+                    self._prediction_progress = None
         pockets = result.to_pocket_dict()
         top_pocket_residues = _top_pocket_residues(pockets)
         self.register_readable_output(output_paths["structure"])
@@ -567,6 +570,10 @@ class DesktopBackend:
             "top_pocket_residues": top_pocket_residues,
             "output_files": {key: str(path) for key, path in output_paths.items()},
         }
+
+    def prediction_status(self) -> dict[str, Any]:
+        # Each update replaces the snapshot. Do not wait for the model-loading lock.
+        return dict(self._prediction_progress or {"stage": "Preparing prediction"})
 
     def inspect_input_structure(
         self,
@@ -687,7 +694,7 @@ class DesktopBackend:
                     "chain_id": item.chain_id,
                 }
                 for item in original.items
-                if item.status in {"failed", "interrupted"}
+                if item.status in {"failed", "interrupted", "cancelled"}
             ]
             settings = {
                 "output_dir": original.output_dir,
@@ -697,7 +704,7 @@ class DesktopBackend:
                 "device": original.device,
             }
         if not retry_items:
-            raise ValueError(f"Batch job {job_id} has no failed or interrupted items to retry.")
+            raise ValueError(f"Batch job {job_id} has no unfinished items to retry.")
         return self._submit_batch(
             structures=None,
             items=retry_items,
@@ -1126,10 +1133,6 @@ class DesktopBackend:
             "pca": status["pca"],
             "esm": status["esm"],
         }
-
-    def _require_license(self) -> None:
-        if not self.manifest.esm_license_confirmed:
-            raise RuntimeError("ESM-C license must be reviewed and confirmed before configuring weights.")
 
     def _require_ready(self) -> None:
         issues = self.readiness_issues()

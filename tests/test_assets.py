@@ -451,14 +451,23 @@ def test_resolve_all_explicit_official_assets_ignores_bad_managed_manifest(tmp_p
     assert resolved.assets.asset_version == "0.1.2"
 
 
-def test_setup_assets_requires_esm_license_acceptance(tmp_path, monkeypatch):
-    def fail_download(*args, **kwargs):
-        raise AssertionError("download should not start before license acceptance")
+@pytest.mark.parametrize("legacy_flag", [False, True])
+def test_setup_assets_needs_no_esm_license_acceptance(tmp_path, monkeypatch, legacy_flag):
+    downloads = []
 
-    monkeypatch.setattr("protcross.assets.download_asset", fail_download)
+    def fake_download(spec, output_path, **kwargs):
+        downloads.append(spec.filename)
+        output_path.write_bytes(b"asset")
 
-    with pytest.raises(RuntimeError, match="accept-esm-license"):
-        setup_assets(tmp_path, force=True)
+    monkeypatch.delenv("PROTCROSS_ACCEPT_ESM_LICENSE", raising=False)
+    monkeypatch.setattr("protcross.assets.download_asset", fake_download)
+
+    setup_assets(tmp_path, force=True, accept_esm_license=legacy_flag)
+
+    assert downloads == [spec.filename for spec in DEFAULT_ASSET_BUNDLE.assets]
+    manifest = json.loads((tmp_path / ASSET_MANIFEST_FILENAME).read_text())
+    assert manifest["esm_license"]["accepted"] is False
+    assert manifest["esm_license"]["accepted_at"] is None
 
 
 def test_resolve_explicit_missing_asset_fails_before_auto_setup(tmp_path, monkeypatch):
@@ -848,7 +857,7 @@ def test_download_space_preflight_fails_before_large_transfer(tmp_path, monkeypa
         )
 
 
-def test_setup_assets_reuses_persisted_esm_license_acceptance(tmp_path, monkeypatch):
+def test_setup_assets_preserves_historical_esm_license_metadata(tmp_path, monkeypatch):
     downloads = []
 
     def fake_download(spec, output_path, *, force=False, verify=True, known_sha256=None):
@@ -858,7 +867,10 @@ def test_setup_assets_reuses_persisted_esm_license_acceptance(tmp_path, monkeypa
     monkeypatch.delenv("PROTCROSS_ACCEPT_ESM_LICENSE", raising=False)
     monkeypatch.setattr("protcross.assets.download_asset", fake_download)
 
-    setup_assets(tmp_path, force=True, accept_esm_license=True)
+    (tmp_path / ASSET_MANIFEST_FILENAME).write_text(json.dumps({
+        "esm_license": {"accepted": True, "accepted_at": "2026-01-01T00:00:00+00:00"},
+    }))
+    setup_assets(tmp_path, force=True)
     first_manifest = json.loads((tmp_path / ASSET_MANIFEST_FILENAME).read_text(encoding="utf-8"))
     accepted_at = first_manifest["esm_license"]["accepted_at"]
 
@@ -904,7 +916,7 @@ def test_setup_assets_refresh_quarantines_corrupt_manifest(tmp_path, monkeypatch
     assert len(list(tmp_path.glob(f"{ASSET_MANIFEST_FILENAME}.corrupt-*"))) == 1
 
 
-def test_prediction_acceptance_is_persisted_for_existing_managed_assets(tmp_path, monkeypatch):
+def test_prediction_ignores_acceptance_flags_for_existing_managed_assets(tmp_path, monkeypatch):
     expected_by_name = {spec.filename: spec.sha256 for spec in DEFAULT_ASSET_BUNDLE.assets}
     for spec in DEFAULT_ASSET_BUNDLE.assets:
         (tmp_path / spec.filename).write_bytes(spec.filename.encode("utf-8"))
@@ -930,8 +942,8 @@ def test_prediction_acceptance_is_persisted_for_existing_managed_assets(tmp_path
         require_esm_license_for_use=True,
     )
     persisted = json.loads((tmp_path / ASSET_MANIFEST_FILENAME).read_text(encoding="utf-8"))
-    assert persisted["esm_license"]["accepted"] is True
-    assert persisted["esm_license"]["accepted_at"]
+    assert persisted["esm_license"]["accepted"] is False
+    assert persisted["esm_license"]["accepted_at"] is None
 
     resolve_prediction_assets(
         assets_dir=tmp_path,
@@ -939,3 +951,50 @@ def test_prediction_acceptance_is_persisted_for_existing_managed_assets(tmp_path
         accept_esm_license=False,
         require_esm_license_for_use=True,
     )
+
+
+@pytest.mark.parametrize("asset_version", ["0.1.2", "0.1.1-paper"])
+def test_setup_followup_command_reuses_selected_directory_and_bundle(tmp_path, monkeypatch, capsys, asset_version):
+    import shlex
+    from protcross.cli.predict import build_parser
+
+    def fake_download(spec, output_path, **kwargs):
+        output_path.write_bytes(b"asset")
+
+    monkeypatch.setattr("protcross.assets.download_asset", fake_download)
+    directory = tmp_path / "custom assets"
+    setup_assets(directory, asset_version=asset_version)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    command = next(line.removeprefix("Use with: ") for line in captured.err.splitlines() if line.startswith("Use with: "))
+    args = build_parser().parse_args(shlex.split(command)[2:])
+    assert Path(args.assets_dir) == directory
+    assert args.asset_version == asset_version
+
+
+def test_asset_quiet_suppresses_download_messages_and_restores_logging(tmp_path, monkeypatch, capsys):
+    from protcross.assets import asset_logging
+
+    monkeypatch.setattr("protcross.assets._http_get", lambda *args, **kwargs: _FakeResponse([b"asset"], status_code=200, content_length=5))
+    spec = AssetSpec("asset", "asset.bin", "https://example.invalid/asset.bin", _sha256(b"asset"))
+    with asset_logging(quiet=True):
+        download_asset(spec, tmp_path / "asset.bin")
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    download_asset(spec, tmp_path / "asset.bin")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[skip]" in captured.err
+
+
+def test_interrupted_download_retains_actionable_error(tmp_path, monkeypatch):
+    destination = tmp_path / "asset.bin"
+    destination.with_suffix(".bin.part").write_bytes(b"partial")
+
+    def denied(*args, **kwargs):
+        raise RuntimeError("Proxy authentication required (407)")
+
+    monkeypatch.setattr("protcross.assets._http_get", denied)
+    with pytest.raises(RuntimeError, match="Proxy authentication required"):
+        download_asset(AssetSpec("asset", "asset.bin", "https://example.invalid/asset.bin"), destination)
+    assert destination.with_suffix(".bin.part").read_bytes() == b"partial"

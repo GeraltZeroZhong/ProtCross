@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Quick start:\n"
             "  protcross inspect protein.pdb\n"
-            "  protcross predict protein.pdb --accept-esm-license\n\n"
+            "  protcross predict protein.pdb\n\n"
             f"Commands:\n{command_help}\n\n"
             "Run `protcross COMMAND --help` for command-specific options."
         ),

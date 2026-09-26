@@ -8,14 +8,34 @@ import os
 import re
 import shlex
 import shutil
+import sys
 from collections.abc import Iterable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 from typing import Callable
 import uuid
+
+
+_ASSET_QUIET = ContextVar("asset_quiet", default=False)
+
+
+@contextmanager
+def asset_logging(*, quiet: bool = False):
+    """Route asset messages to stderr and optionally suppress them for this operation."""
+    token = _ASSET_QUIET.set(quiet)
+    try:
+        yield
+    finally:
+        _ASSET_QUIET.reset(token)
+
+
+def _asset_message(message: str) -> None:
+    if not _ASSET_QUIET.get():
+        print(message, file=sys.stderr)
 
 
 RELEASE_TAG = "v0.1.2"
@@ -36,7 +56,7 @@ LEGACY_CHECKPOINT_RELEASE_FILENAME = "best-epoch.59.ckpt"
 LEGACY_PCA_FILENAME = "pca_esmc_128.pkl"
 DEFAULT_CHECKPOINT_URL = f"{GITHUB_RELEASE_BASE}/{DEFAULT_CHECKPOINT_FILENAME}"
 DEFAULT_PCA_URL = f"{GITHUB_RELEASE_BASE}/{DEFAULT_PCA_FILENAME}"
-ESM_LICENSE_URL = "https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement"
+ESM_LICENSE_URL = "https://huggingface.co/biohub/esmc-600m-2024-12"
 ESM_LICENSE_ACCEPT_ENV = "PROTCROSS_ACCEPT_ESM_LICENSE"
 TRUST_UNVERIFIED_ASSETS_ENV = "PROTCROSS_TRUST_UNVERIFIED_ASSETS"
 LEGACY_RELEASE_TAG = "v0.1.1"
@@ -275,13 +295,10 @@ def setup_assets(
         manifest_path = output_dir / ASSET_MANIFEST_FILENAME
         quarantine_path = output_dir / f"{ASSET_MANIFEST_FILENAME}.corrupt-{uuid.uuid4().hex}"
         manifest_path.replace(quarantine_path)
-        print(f"[warn] Quarantined unreadable asset manifest: {quarantine_path}")
+        _asset_message(f"[warn] Quarantined unreadable asset manifest: {quarantine_path}")
         existing_manifest = {}
-    license_accepted = bool(
-        accept_esm_license
-        or _env_truthy(ESM_LICENSE_ACCEPT_ENV)
-        or existing_manifest.get("esm_license", {}).get("accepted") is True
-    )
+    # Preserve historical acceptance metadata; the compatibility flag is ignored.
+    license_accepted = existing_manifest.get("esm_license", {}).get("accepted") is True
     specs = [
         AssetSpec(
             bundle.assets[0].name,
@@ -305,16 +322,12 @@ def setup_assets(
     ]
     download_specs = specs[1:] if skip_esm else specs
 
-    print(f"Installing ProtCross assets into {output_dir}")
-    print("Note: ESM-C weights are distributed by EvolutionaryScale under their Hugging Face model terms.")
+    _asset_message(f"Installing ProtCross assets into {output_dir}")
+    _asset_message("Note: ESM-C weights are distributed under the MIT license.")
     known_sha256: dict[str, str] = {}
     esm_path = output_dir / specs[0].filename
-    esm_needs_download = not skip_esm and (force or not esm_path.exists())
-    if not skip_esm and not esm_needs_download and verify and specs[0].sha256:
+    if not skip_esm and not force and esm_path.exists() and verify and specs[0].sha256:
         known_sha256[specs[0].filename] = sha256_file(esm_path)
-        esm_needs_download = known_sha256[specs[0].filename] != specs[0].sha256
-    if esm_needs_download:
-        _require_esm_license_acceptance(license_accepted)
     resolved_sha256: dict[str, str] = {}
     for spec in download_specs:
         actual_sha256 = download_asset(
@@ -337,10 +350,17 @@ def setup_assets(
         previous_manifest=existing_manifest,
         actual_sha256_by_filename=resolved_sha256,
     )
-    print("\nAsset setup complete.")
-    print("Use with: protcross predict input.pdb --out-dir protcross-results")
-    print(f"Environment file written to: {output_dir / 'protcross.env'}")
-    print(f"Asset manifest written to: {output_dir / ASSET_MANIFEST_FILENAME}")
+    _asset_message("\nAsset setup complete.")
+    command = ["protcross", "predict", "input.pdb", "--assets-dir", str(output_dir),
+               "--asset-version", bundle.version, "--out-dir", "protcross-results"]
+    if os.name == "nt":
+        import subprocess
+        command_text = subprocess.list2cmdline(command)
+    else:
+        command_text = shlex.join(command)
+    _asset_message(f"Use with: {command_text}")
+    _asset_message(f"Environment file written to: {output_dir / 'protcross.env'}")
+    _asset_message(f"Asset manifest written to: {output_dir / ASSET_MANIFEST_FILENAME}")
     return output_dir
 
 
@@ -389,16 +409,16 @@ def _download_asset_locked(
             if progress_callback:
                 size = output_path.stat().st_size
                 progress_callback(size, spec.size_bytes or size)
-            print(f"[skip] {spec.name}: {output_path}")
+            _asset_message(f"[skip] {spec.name}: {output_path}")
             return actual_sha256
-        print(f"[warn] Existing file failed SHA256 verification and will be replaced: {output_path}")
+        _asset_message(f"[warn] Existing file failed SHA256 verification and will be replaced: {output_path}")
 
     tmp_path = output_path.with_suffix(output_path.suffix + ".part")
     if force and tmp_path.exists():
         tmp_path.unlink()
 
-    print(f"[download] {spec.name}")
-    print(f"           {spec.url}")
+    _asset_message(f"[download] {spec.name}")
+    _asset_message(f"           {spec.url}")
     resume_from = tmp_path.stat().st_size if tmp_path.exists() else 0
     if spec.size_bytes and resume_from > spec.size_bytes:
         tmp_path.unlink()
@@ -417,7 +437,7 @@ def _download_asset_locked(
             tmp_path.replace(output_path)
             if progress_callback:
                 progress_callback(resume_from, spec.size_bytes or resume_from)
-            print(f"[ok] {output_path}")
+            _asset_message(f"[ok] {output_path}")
             return spec.sha256 if complete_by_hash else None
         tmp_path.unlink()
         resume_from = 0
@@ -467,6 +487,7 @@ def _download_asset_locked(
                     unit_scale=True,
                     unit_divisor=1024,
                     desc=spec.filename,
+                    disable=_ASSET_QUIET.get(),
                 ) as progress:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if cancel_event is not None and cancel_event.is_set():
@@ -494,7 +515,8 @@ def _download_asset_locked(
             tmp_path.unlink(missing_ok=True)
         if tmp_path.exists():
             raise RuntimeError(
-                f"Download interrupted; partial data retained at {tmp_path}. Rerun the same command to resume."
+                f"Download interrupted: {exc}. Partial data retained at {tmp_path}. "
+                "Rerun the same command to resume."
             ) from exc
         raise
 
@@ -520,7 +542,7 @@ def _download_asset_locked(
     tmp_path.replace(output_path)
     if progress_callback:
         progress_callback(output_path.stat().st_size, total)
-    print(f"[ok] {output_path}")
+    _asset_message(f"[ok] {output_path}")
     return actual_sha256
 
 
@@ -974,13 +996,6 @@ def resolve_prediction_assets(
             + ", ".join(mismatches)
             + ". Run `protcross setup-assets --force` or `protcross predict --refresh-assets`."
         )
-    if require_esm_license_for_use:
-        persisted_acceptance = _asset_manifest_accepts_esm_license(assets)
-        current_acceptance = accept_esm_license or _env_truthy(ESM_LICENSE_ACCEPT_ENV)
-        _require_esm_license_acceptance(current_acceptance or persisted_acceptance)
-        if current_acceptance and not persisted_acceptance:
-            _persist_esm_license_acceptance(assets)
-
     resolved_asset_version = _resolved_asset_version(
         assets,
         ckpt,
@@ -1161,18 +1176,8 @@ def _asset_needs_download(spec: AssetSpec, output_path: Path, *, force: bool, ve
     return bool(verify and spec.sha256 and sha256_file(output_path) != spec.sha256)
 
 
-def _require_esm_license_acceptance(accept_esm_license: bool) -> None:
-    if accept_esm_license or _env_truthy(ESM_LICENSE_ACCEPT_ENV):
-        return
-    raise RuntimeError(
-        "ESM-C weights are distributed under EvolutionaryScale's model terms. "
-        f"Review {ESM_LICENSE_URL} and rerun with --accept-esm-license "
-        f"or {ESM_LICENSE_ACCEPT_ENV}=1 before downloading or using ESM-C."
-    )
-
-
 def require_esm_license_acceptance(accept_esm_license: bool) -> None:
-    _require_esm_license_acceptance(accept_esm_license)
+    """Compatibility no-op: ESM-C is MIT licensed and needs no acceptance."""
 
 
 def _trust_unverified_assets(value: bool) -> bool:
@@ -1241,31 +1246,3 @@ def _export_line(name: str, value: str | Path) -> str:
 
 def _powershell_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
-
-
-def _asset_manifest_accepts_esm_license(assets: PredictorAssets) -> bool:
-    manifest = read_asset_manifest(assets.esm_weights.parent)
-    return bool(manifest and manifest.get("esm_license", {}).get("accepted") is True)
-
-
-def _persist_esm_license_acceptance(assets: PredictorAssets) -> bool:
-    """Persist explicit CLI acceptance when an existing managed manifest is reused."""
-    manifest_path = assets.esm_weights.parent / ASSET_MANIFEST_FILENAME
-    manifest = read_asset_manifest(assets.esm_weights.parent)
-    if not manifest:
-        return False
-    manifest["esm_license"] = {
-        "accepted": True,
-        "url": ESM_LICENSE_URL,
-        "accepted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    try:
-        from protcross import __version__ as package_version
-    except Exception:
-        package_version = manifest.get("package_version", "unknown")
-    manifest["package_version"] = package_version
-    try:
-        _write_text_atomic(manifest_path, json.dumps(manifest, indent=2), encoding="utf-8")
-    except OSError:
-        return False
-    return True
