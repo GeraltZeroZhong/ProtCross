@@ -74,7 +74,6 @@ def test_preprocess_passes_config_seed_to_pca_reducer(tmp_path, monkeypatch):
             pca_model_path=pca_path,
             pca_dim=16,
             seed=2718,
-            accept_esm_license=True,
         )
     )
 

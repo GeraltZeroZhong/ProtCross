@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/protcross?label=PyPI&color=0f766e)](https://pypi.org/project/protcross/)
 [![Windows Desktop](https://img.shields.io/badge/Windows-10%2F11%20x64-0078d4?logo=windows11&logoColor=white)](https://github.com/GeraltZeroZhong/ProtCross/releases)
 [![macOS Desktop](https://img.shields.io/badge/macOS-12%2B%20Apple%20Silicon-111827?logo=apple&logoColor=white)](https://github.com/GeraltZeroZhong/ProtCross/releases)
-[![Version](https://img.shields.io/badge/version-0.2.3-2563eb)](#version-history)
+[![Version](https://img.shields.io/badge/version-0.2.4-2563eb)](#version-history)
 [![Python](https://img.shields.io/badge/python-3.10-3776ab)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 [![Paper](https://img.shields.io/badge/DOI-10.1021%2Facs.jcim.5c03224-ca8a04)](https://doi.org/10.1021/acs.jcim.5c03224)
@@ -41,7 +41,7 @@ Choose the interface that matches your task:
 | Call ProtCross from a Python workflow | Install the CLI, then open [Python API](#python-api) |
 | Use a guided interface and 3D viewer | Download [ProtCross Desktop](#desktop-application) |
 
-ProtCross 0.2.3 requires Python 3.10. This first run installs the prediction
+ProtCross 0.2.4 requires Python 3.10. This first run installs the prediction
 dependencies, prepares the managed model assets, checks a structure, and writes
 one result package:
 
@@ -51,13 +51,13 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install "protcross[predict]"
 
-protcross setup-assets --accept-esm-license
+protcross setup-assets
 protcross inspect input.pdb
 protcross predict input.pdb --out-dir protcross-results
 ```
 
-Review the [ESM-C model terms](https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement)
-before recording acceptance. Initial asset setup downloads approximately
+ESM-C weights use the [MIT license](https://huggingface.co/biohub/esmc-600m-2024-12).
+Initial asset setup downloads approximately
 2.14 GiB; later predictions reuse the verified local cache.
 
 The prediction command creates:
@@ -72,7 +72,7 @@ protcross-results/
 
 For a graphical workflow, install the Windows x64 or macOS Apple Silicon build
 from [GitHub Releases](https://github.com/GeraltZeroZhong/ProtCross/releases),
-then follow the three readiness steps in **Setup**. Desktop manages its own
+then follow the two readiness steps in **Setup**. Desktop manages its own
 runtime and assets and opens completed predictions in Mol*.
 
 ## Contents
@@ -176,7 +176,7 @@ py -3.10 -m venv .venv
 Activate the environment to use the shorter commands shown throughout this
 README.
 
-After installation, run `protcross setup-assets --accept-esm-license` once, or
+After installation, run `protcross setup-assets` once, or
 open [Assets](#assets) to select another cache location or an existing ESM-C
 file.
 
@@ -341,7 +341,7 @@ device, precision, and effective microbatch size.
 ## Batch inference
 
 Use one `ProtCrossPredictor` to process a directory of structures. ProtCross
-0.2.3 preserves input order, keeps each structure in its own result directory,
+0.2.4 preserves input order, keeps each structure in its own result directory,
 and bounds ESM-C and PointNet++ microbatches by count and residue cost.
 
 ```python
@@ -358,13 +358,14 @@ inputs = sorted(
 if not inputs:
     raise FileNotFoundError(f"No PDB/mmCIF structures found in {structure_dir}")
 
-output_dir = Path("batch-results")
-output_dir.mkdir(parents=True, exist_ok=True)
+from datetime import datetime
+
+output_dir = Path("batch-results") / datetime.now().strftime("run-%Y%m%d-%H%M%S-%f")
+output_dir.mkdir(parents=True, exist_ok=False)
 
 predictor = ProtCrossPredictor.from_default_assets(
     device="auto",
     embedding_cache_dir=".protcross-feature-cache",
-    accept_esm_license=True,
 )
 
 output_paths = []
@@ -442,24 +443,27 @@ from pathlib import Path
 
 from protcross.inference import predict_pdb
 
-output_dir = Path("results")
-output_dir.mkdir(parents=True, exist_ok=True)
+from datetime import datetime
+
+output_dir = Path("results") / datetime.now().strftime("run-%Y%m%d-%H%M%S-%f")
+output_dir.mkdir(parents=True, exist_ok=False)
 
 result = predict_pdb(
     "examples/6fhu.pdb",
     device="cpu",
-    accept_esm_license=True,
-    output_pdb="results/6fhu.protcross.pdb",
-    scores_tsv="results/6fhu.protcross.scores.tsv",
-    pocket_json="results/6fhu.protcross.pockets.json",
-    summary_json="results/6fhu.protcross.summary.json",
+    output_pdb=output_dir / "6fhu.protcross.pdb",
+    scores_tsv=output_dir / "6fhu.protcross.scores.tsv",
+    pocket_json=output_dir / "6fhu.protcross.pockets.json",
+    summary_json=output_dir / "6fhu.protcross.summary.json",
 )
 
 print(result.format_summary())
 ```
 
 `predict_pdb` resolves and downloads missing managed assets by default. Set
-`offline=True` for a local-cache-only run.
+`offline=True` for a local-cache-only run. Python writers replace existing files
+at explicitly supplied output paths. The examples use a new run directory each
+time to preserve earlier results; the CLI instead requires `--overwrite`.
 
 ### Reusable predictor
 
@@ -470,7 +474,6 @@ from protcross.inference import ProtCrossPredictor
 
 predictor = ProtCrossPredictor.from_default_assets(
     device="cpu",
-    accept_esm_license=True,
 )
 
 result = predictor.predict("examples/6fhu.pdb", threshold=0.5)
@@ -515,7 +518,7 @@ Prediction uses three matched assets: a ProtCross checkpoint, its PCA reducer,
 and ESM-C 600M weights. For most users, install the managed bundle once:
 
 ```bash
-protcross setup-assets --accept-esm-license
+protcross setup-assets
 ```
 
 The command verifies and installs these files under
@@ -542,7 +545,7 @@ Release compatibility:
 
 | Interface | Version |
 | --- | --- |
-| Application and Desktop | `0.2.3` |
+| Application and Desktop | `0.2.4` |
 | Default checkpoint/PCA bundle | `0.1.2` |
 | Paper reproduction bundle | `0.1.1-paper` |
 | Pocket and summary schemas | `protcross-pocket-v2`, `protcross-summary-v2` |
@@ -554,11 +557,11 @@ Configure another managed directory with either interface:
 
 ```bash
 PROTCROSS_ASSETS_DIR=/data/protcross-assets \
-  protcross setup-assets --accept-esm-license
+  protcross setup-assets
 
 protcross setup-assets \
-  --output-dir /data/protcross-assets \
-  --accept-esm-license
+  --output-dir /data/protcross-assets
+protcross predict input.pdb --assets-dir /data/protcross-assets
 ```
 
 Use `--refresh-assets` for a fresh download and verification. Use `--offline`
@@ -569,10 +572,9 @@ or `--no-auto-assets` to limit prediction to local files.
 Reuse an existing ESM-C file with an absolute path:
 
 ```bash
-protcross setup-assets --skip-esm --accept-esm-license
+protcross setup-assets --skip-esm
 protcross predict input.pdb \
   --esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth \
-  --accept-esm-license \
   --out-dir protcross-results
 ```
 
@@ -585,8 +587,7 @@ protcross predict input.pdb \
   --checkpoint /trusted/custom/model.ckpt \
   --esm-weights /trusted/custom/esmc.pth \
   --pca /trusted/custom/reducer.pkl \
-  --trust-unverified-assets \
-  --accept-esm-license
+  --trust-unverified-assets
 ```
 
 Checkpoint, PCA, and PyTorch weight files can contain executable serialized
@@ -605,15 +606,18 @@ uses a per-session token for local API requests.
 ### Install
 
 Download the matching release artifact and `SHA256SUMS.txt` from
-[the v0.2.3 release](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.3):
+[the v0.2.4 release](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.4):
 
 ```text
-ProtCross_Desktop_0.2.3_x64-setup.exe
-ProtCross_Desktop_0.2.3_macos-aarch64.dmg
+ProtCross_Desktop_0.2.4_x64-setup.exe
+ProtCross_Desktop_0.2.4_macos-aarch64.dmg
 ```
 
-The guided first-launch workflow installs a CPU runtime, records ESM-C term
-acceptance, downloads or imports model assets, and validates readiness. Advanced
+The guided first-launch workflow installs a CPU runtime, downloads or imports
+model assets, and validates readiness. Installation shows its current stage;
+**Open runtime logs** works even when the backend cannot start. Reinstalling the
+recommended runtime also recovers from an unusable previously selected environment.
+Advanced
 runtime options provide NVIDIA CUDA on Windows, Apple MPS on macOS, custom Conda
 environments, and proxy configuration. Reserve approximately 5 GiB for the
 runtime and ESM-C asset.
@@ -621,10 +625,16 @@ runtime and ESM-C asset.
 Run a first Desktop prediction in five steps:
 
 1. Open **Setup**, install a backend, and validate it.
-2. Review the ESM-C terms, then download or import the ESM-C weights.
+2. Download or import the ESM-C weights.
 3. Open **Predict**, select a local PDB/mmCIF file, and inspect it.
 4. Select the chain scope and output directory; expand prediction settings when needed.
 5. Open **Results** to inspect the 0–1 score color scale, residue clusters, and output package.
+
+Single predictions show the active stage and elapsed time. **Cancel prediction**
+restarts the runtime after confirmation; completed result files are kept. Finish
+an active batch or pause its asset download before starting a single prediction.
+Stopped batches offer **Continue remaining**, retaining their original settings
+and skipping completed structures. Quitting during active work asks for confirmation.
 
 The interface follows the system appearance by default and also provides light
 and dark modes. Keyboard focus indicators, reduced-motion handling, high-contrast
@@ -770,16 +780,14 @@ protcross preprocess \
   --fit-pca \
   --esm-weights ~/.cache/protcross/assets/v0.1.2/esmc_600m_2024_12_v0.pth \
   --pca artifacts/protcross-pca-128.pkl \
-  --pca-dim 128 \
-  --accept-esm-license
+  --pca-dim 128
 
 protcross preprocess \
   --data-dir data/raw_af2 \
   --output-dir data/processed_af2 \
   --esm-weights ~/.cache/protcross/assets/v0.1.2/esmc_600m_2024_12_v0.pth \
   --pca artifacts/protcross-pca-128.pkl \
-  --is-af2 \
-  --accept-esm-license
+  --is-af2
 
 protcross map-labels \
   --processed-pdb-dir data/processed_pdb \
@@ -821,13 +829,11 @@ protcross train \
 
 ```bash
 protcross setup-assets \
-  --asset-version 0.1.1-paper \
-  --accept-esm-license
+  --asset-version 0.1.1-paper
 
 python reproduction/legacy/run_Predict_ProtCross.py \
   --pdb_file examples/6fhu.pdb \
-  --asset-version 0.1.1-paper \
-  --accept-esm-license
+  --asset-version 0.1.1-paper
 ```
 
 The [`reproduction/legacy/`](reproduction/legacy/) directory contains the archived PDBbind v2020
@@ -866,7 +872,6 @@ npm run tauri:dev
 | Symptom | Resolution |
 | --- | --- |
 | Unsupported Python version | Create a Python 3.10 environment and reinstall |
-| ESM-C acceptance prompt | Run `protcross setup-assets --accept-esm-license` |
 | Interrupted asset transfer | Repeat setup; the downloader resumes retained `.part` data |
 | Asset verification failure | Run setup with `--refresh-assets` |
 | Existing output path | Select another `--out-dir` or pass `--overwrite` |
@@ -884,6 +889,15 @@ exact command, `summary.json`, platform, Python/PyTorch versions, and sanitized
 diagnostics.
 
 ## Version history
+
+### 0.2.4
+
+- Removed ESM-C license acceptance under the upstream MIT license, retained
+  legacy arguments, and simplified Desktop setup to two steps.
+- Improved Desktop runtime recovery, same-file checks, filtered centroids,
+  offline logs, task progress and cancellation, batch continuation, and exit prompts.
+- Added early dependency checks, custom asset-directory instructions, quiet
+  asset logging, clearer download errors, and Python examples that preserve earlier runs.
 
 ### 0.2.3
 
@@ -958,10 +972,10 @@ If ProtCross contributes to a publication, cite:
 ## License
 
 ProtCross source code is distributed under the [MIT License](LICENSE).
-ESM-C weights use EvolutionaryScale's model terms.[^1] ProtCross checkpoint and
+ESM-C weights are distributed under the MIT license.[^1] ProtCross checkpoint and
 PCA bundles are distributed separately from ESM-C weights.
 
-[^1]: EvolutionaryScale. [Cambrian Non-Commercial License Agreement](https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement).
+[^1]: Biohub. [ESM-C model license](https://huggingface.co/biohub/esmc-600m-2024-12).
 
 [^2]: EvolutionaryScale. [ESM-C 600M 2024-12 model repository](https://huggingface.co/EvolutionaryScale/esmc-600m-2024-12).
 

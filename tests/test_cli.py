@@ -126,7 +126,7 @@ def test_predict_cli_rejects_cross_format_output_before_assets(tmp_path, monkeyp
     assert "same PDB or mmCIF format" in capsys.readouterr().err
 
 
-def test_predict_cli_forwards_resolved_asset_metadata(tmp_path, monkeypatch):
+def test_predict_cli_forwards_resolved_asset_metadata(tmp_path, monkeypatch, capsys):
     input_pdb = tmp_path / "input.pdb"
     input_pdb.write_text(MINIMAL_PDB, encoding="utf-8")
     metadata = {
@@ -136,6 +136,9 @@ def test_predict_cli_forwards_resolved_asset_metadata(tmp_path, monkeypatch):
     captured = {}
 
     def fake_resolve(args, *, auto_setup):
+        from protcross.assets import _asset_message
+
+        _asset_message("Resolving assets")
         args.ckpt_path = str(tmp_path / "model.ckpt")
         args.esm_weights = str(tmp_path / "esm.pth")
         args.pca_path = str(tmp_path / "pca.pkl")
@@ -150,6 +153,7 @@ def test_predict_cli_forwards_resolved_asset_metadata(tmp_path, monkeypatch):
         return FakePredictor()
 
     monkeypatch.setattr("protcross.cli.predict._resolve_prediction_asset_paths", fake_resolve)
+    monkeypatch.setattr("protcross.cli.predict._preflight_prediction_dependencies", lambda: None)
     monkeypatch.setattr("protcross.inference.ProtCrossPredictor.from_files", staticmethod(fake_from_files))
 
     exit_code = predict_main([str(input_pdb), "--summary-only", "--quiet"])
@@ -157,6 +161,8 @@ def test_predict_cli_forwards_resolved_asset_metadata(tmp_path, monkeypatch):
     assert exit_code == 0
     assert captured["asset_version"] == "0.1.2"
     assert captured["asset_metadata"] is metadata
+    captured_output = capsys.readouterr()
+    assert captured_output.out == captured_output.err == ""
 
 
 def test_predict_cli_accepts_offline_and_summary_only():
@@ -516,14 +522,14 @@ def test_predict_partial_assets_do_not_download_explicit_esm(tmp_path, monkeypat
     assert args.pca_path == str(tmp_path / DEFAULT_PCA_FILENAME)
 
 
-def test_predict_asset_resolution_requires_esm_license_for_use(tmp_path, monkeypatch):
+def test_predict_asset_resolution_needs_no_esm_license_acceptance(tmp_path, monkeypatch):
     _trust_managed_asset_hashes(monkeypatch)
     for filename in (DEFAULT_CHECKPOINT_FILENAME, "esmc_600m_2024_12_v0.pth", DEFAULT_PCA_FILENAME):
         (tmp_path / filename).write_bytes(b"asset")
     args = build_parser().parse_args(["input.pdb", "--assets-dir", str(tmp_path)])
 
-    with pytest.raises(RuntimeError, match="accept-esm-license"):
-        _resolve_prediction_asset_paths(args, auto_setup=False)
+    monkeypatch.delenv("PROTCROSS_ACCEPT_ESM_LICENSE", raising=False)
+    assert _resolve_prediction_asset_paths(args, auto_setup=False) is not None
 
 
 def test_predict_main_missing_input_does_not_setup_assets(monkeypatch, tmp_path, capsys):
@@ -988,6 +994,7 @@ def _patch_fake_predictor(monkeypatch):
     from protcross.inference import ProtCrossPredictor
 
     monkeypatch.setattr(ProtCrossPredictor, "from_files", classmethod(fake_from_files))
+    monkeypatch.setattr("protcross.cli.predict._preflight_prediction_dependencies", lambda: None)
 
 
 def _trust_managed_asset_hashes(monkeypatch):
@@ -997,3 +1004,16 @@ def _trust_managed_asset_hashes(monkeypatch):
         lambda path: expected_by_name.get(Path(path).name)
         or hashlib.sha256(Path(path).read_bytes()).hexdigest(),
     )
+
+
+def test_missing_prediction_dependencies_fail_before_asset_download(tmp_path, monkeypatch, capsys):
+    input_path = tmp_path / "input.pdb"
+    input_path.write_text(MINIMAL_PDB)
+    monkeypatch.setitem(sys.modules, "esm.models.esmc", None)
+
+    def unexpected_download(*args, **kwargs):
+        raise AssertionError("must validate dependencies before downloading assets")
+
+    monkeypatch.setattr("protcross.cli.predict._resolve_prediction_asset_paths", unexpected_download)
+    assert predict_main([str(input_path), "--summary-only"]) == 1
+    assert 'python -m pip install "protcross[predict]"' in capsys.readouterr().err

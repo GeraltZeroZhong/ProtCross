@@ -12,6 +12,20 @@ import torch
 from .structure import MAX_ESM_RESIDUES
 
 
+def load_esm_dependencies():
+    """Check the prediction extra before downloading weights or loading models."""
+    try:
+        from esm.models.esmc import ESMC
+        from esm.sdk.api import ESMProtein
+    except Exception as exc:
+        raise ImportError(
+            "Prediction dependencies could not be loaded. Install them with: "
+            'python -m pip install "protcross[predict]". '
+            f"Details: {exc}"
+        ) from exc
+    return ESMC, ESMProtein
+
+
 class ESMFeatureExtractor:
     """Load a local ESM-C 600M checkpoint and emit residue embeddings."""
 
@@ -21,11 +35,7 @@ class ESMFeatureExtractor:
         if not model_path.exists():
             raise FileNotFoundError(f"ESM-C weights not found: {model_path}")
 
-        try:
-            from esm.models.esmc import ESMC
-            from esm.sdk.api import ESMProtein
-        except ImportError as exc:
-            raise ImportError("The 'esm' package is required for ESM-C feature extraction.") from exc
+        ESMC, ESMProtein = load_esm_dependencies()
 
         self._protein_cls = ESMProtein
         self.tokenizer = self._build_tokenizer()

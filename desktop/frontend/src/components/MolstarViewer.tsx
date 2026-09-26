@@ -44,7 +44,7 @@ export function MolstarViewer({
   const [loadedStructureRequest, setLoadedStructureRequest] = useState(0);
   const [scoreCoverage, setScoreCoverage] = useState<ProtcrossScoreCoverage | null>(null);
   const selectedCluster = pockets?.clustered_pockets?.[selectedClusterIndex] ?? null;
-  const displayedCluster = selectedCluster ?? summary?.top_pocket ?? null;
+  const displayedCluster = pockets ? selectedCluster : summary?.top_pocket ?? null;
   const scoredResidueKeySignature = stableScoredResidueKeySignature(scoredResidueKeys);
 
   useEffect(() => {

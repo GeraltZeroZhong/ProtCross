@@ -223,7 +223,7 @@ def test_readme_keeps_quick_start_short_and_desktop_details_in_installation():
 
     assert "GitHub Releases" in quick_start
     assert "protcross inspect input.pdb" in quick_start
-    assert "protcross setup-assets --accept-esm-license" in quick_start
+    assert "protcross setup-assets" in quick_start
     assert "protcross predict input.pdb" in quick_start
     assert f"ProtCross_Desktop_{version}_x64-setup.exe" not in quick_start
     assert f"ProtCross_Desktop_{version}_macos-aarch64.dmg" not in quick_start

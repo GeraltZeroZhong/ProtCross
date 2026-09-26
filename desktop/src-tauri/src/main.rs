@@ -3,11 +3,13 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 struct BackendProcess {
     child: Mutex<Option<Child>>,
@@ -15,6 +17,9 @@ struct BackendProcess {
     port: Mutex<Option<u16>>,
     root_lease: Mutex<Option<RootLease>>,
     installing: Mutex<bool>,
+    busy: AtomicBool,
+    confirming_exit: AtomicBool,
+    allow_exit: AtomicBool,
 }
 
 struct RootLease {
@@ -45,6 +50,7 @@ fn start_backend(
     state: State<BackendProcess>,
     port: Option<u16>,
     root: Option<String>,
+    mode: Option<String>,
 ) -> Result<BackendStartResult, String> {
     let root_path = root
         .as_deref()
@@ -107,9 +113,13 @@ fn start_backend(
                 .as_ref()
                 .map(|path| path.join("bundled-assets").to_string_lossy().to_string())
         });
-    let python = std::env::var("PROTCROSS_DESKTOP_PYTHON").unwrap_or_else(|_| {
-        configured_python(Some(root_path.as_path())).unwrap_or_else(|| "python".to_string())
-    });
+    let python = if let Some(mode) = mode {
+        managed_python(&root_path, &mode)?
+    } else {
+        std::env::var("PROTCROSS_DESKTOP_PYTHON").unwrap_or_else(|_| {
+            configured_python(Some(root_path.as_path())).unwrap_or_else(|| "python".to_string())
+        })
+    };
     let token = generate_token()?;
     let selected_port = match port {
         Some(value) if value != 0 => value,
@@ -266,6 +276,65 @@ fn install_backend_blocking(
     ))
 }
 
+fn managed_python(root: &Path, mode: &str) -> Result<String, String> {
+    if !matches!(mode, "cpu" | "gpu") {
+        return Err("Select a managed cpu or gpu runtime.".to_string());
+    }
+    let python = root
+        .join("runtime")
+        .join(format!("{mode}-env"))
+        .join(env_python_relative());
+    if !python.is_file() {
+        return Err(format!(
+            "Install the {mode} runtime first: {}",
+            python.display()
+        ));
+    }
+    Ok(python.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn open_logs(app: AppHandle) -> Result<(), String> {
+    let path = app_data_root(&app).join("logs");
+    std::fs::create_dir_all(&path).map_err(|exc| format!("Cannot open logs: {exc}"))?;
+    open_path(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn set_activity(state: State<BackendProcess>, active: bool) {
+    state.busy.store(active, Ordering::SeqCst);
+}
+
+fn should_confirm_exit(app: &AppHandle) -> bool {
+    let state = app.state::<BackendProcess>();
+    !state.allow_exit.load(Ordering::SeqCst)
+        && (state.busy.load(Ordering::SeqCst)
+            || state.installing.lock().map(|value| *value).unwrap_or(true))
+}
+
+fn confirm_exit(app: &AppHandle) {
+    if app
+        .state::<BackendProcess>()
+        .confirming_exit
+        .swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let handle = app.clone();
+    app.dialog()
+        .message("Work is still in progress. Quitting interrupts prediction or download and may interrupt installation. Completed results are kept; unfinished predictions need to run again.")
+        .title("Quit ProtCross?")
+        .buttons(MessageDialogButtons::OkCancelCustom("Quit".into(), "Keep working".into()))
+        .show(move |quit| {
+            let state = handle.state::<BackendProcess>();
+            state.confirming_exit.store(false, Ordering::SeqCst);
+            if quit {
+                state.allow_exit.store(true, Ordering::SeqCst);
+                handle.exit(0);
+            }
+        });
+}
+
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
@@ -331,7 +400,7 @@ fn is_trusted_url(url: &str) -> bool {
     }) {
         return false;
     }
-    url == "https://www.evolutionaryscale.ai/policies/cambrian-non-commercial-license-agreement"
+    url == "https://huggingface.co/biohub/esmc-600m-2024-12"
         || url.starts_with("https://github.com/GeraltZeroZhong/ProtCross/")
 }
 
@@ -621,6 +690,9 @@ fn main() {
             port: Mutex::new(None),
             root_lease: Mutex::new(None),
             installing: Mutex::new(false),
+            busy: AtomicBool::new(false),
+            confirming_exit: AtomicBool::new(false),
+            allow_exit: AtomicBool::new(false),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -628,8 +700,26 @@ fn main() {
             stop_backend,
             install_backend,
             open_path,
+            open_logs,
+            set_activity,
             open_url
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ProtCross Desktop");
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if should_confirm_exit(window.app_handle()) {
+                    api.prevent_close();
+                    confirm_exit(window.app_handle());
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building ProtCross Desktop")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if should_confirm_exit(app) {
+                    api.prevent_exit();
+                    confirm_exit(app);
+                }
+            }
+        });
 }

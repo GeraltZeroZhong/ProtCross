@@ -25,14 +25,15 @@ def test_readme_asset_names_match_default_bundle():
         assert spec.filename in readme
 
 
-def test_readme_prediction_examples_acknowledge_esm_license_gate():
+def test_readme_prediction_examples_need_no_esm_license_acceptance():
     readme = Path("README.md").read_text(encoding="utf-8")
 
-    assert "protcross setup-assets --accept-esm-license" in readme
+    assert "protcross setup-assets" in readme
+    assert "--accept-esm-license" not in readme
+    assert "ESM-C weights are distributed under the MIT license" in readme
     existing_assets = readme.split("### Existing or custom assets", 1)[1]
     existing_esm_example = existing_assets.split("Explicit release assets", 1)[0]
     assert "--esm-weights /absolute/path/to/esmc_600m_2024_12_v0.pth" in existing_esm_example
-    assert "--accept-esm-license" in existing_esm_example
 
 
 def test_readme_batch_example_discovers_every_supported_structure_format():

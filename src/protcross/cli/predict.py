@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from protcross.assets import ESM_LICENSE_URL
+from protcross.assets import ESM_LICENSE_URL, asset_logging
 
 
 MAX_ESM_RESIDUES = 1022
@@ -23,7 +23,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         epilog=(
             "Recommended preflight: protcross inspect INPUT\n"
             "First managed setup downloads about 2.14 GiB of ESM-C weights and resumes retained .part files.\n"
-            f"ESM-C license: {ESM_LICENSE_URL}"
+            f"ESM-C MIT license: {ESM_LICENSE_URL}"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -142,7 +142,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--accept-esm-license",
         action="store_true",
-        help="Confirm that you reviewed the ESM-C license; managed asset manifests record acceptance for later runs.",
+        help="Deprecated compatibility option; ESM-C uses the MIT license and needs no acceptance.",
     )
     parser.add_argument(
         "--trust-unverified-assets",
@@ -238,6 +238,7 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
             input_path=input_path,
         )
         _preflight_device(args.device)
+        _preflight_prediction_dependencies()
     except Exception as exc:
         print(f"ProtCross prediction failed: {exc}", file=sys.stderr)
         return 1
@@ -253,10 +254,8 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
                 print(f"WARNING: {warning}", file=sys.stderr)
             print("[2/4] Resolving verified runtime assets (the first ESM-C download is about 2.14 GiB)...", file=sys.stderr)
         auto_setup = args.auto_assets and not args.offline
-        assets = _resolve_prediction_asset_paths(
-            args,
-            auto_setup=auto_setup,
-        )
+        with asset_logging(quiet=args.quiet):
+            assets = _resolve_prediction_asset_paths(args, auto_setup=auto_setup)
 
         from protcross.inference import ProtCrossPredictor
 
@@ -297,6 +296,12 @@ def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
         print(result.format_summary())
 
     return 0
+
+
+def _preflight_prediction_dependencies() -> None:
+    from protcross.data.esm import load_esm_dependencies
+
+    load_esm_dependencies()
 
 
 def _resolve_prediction_asset_paths(args: argparse.Namespace, *, auto_setup: bool):

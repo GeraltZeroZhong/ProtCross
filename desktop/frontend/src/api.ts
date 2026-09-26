@@ -142,11 +142,16 @@ export function runPrediction(payload: {
   pocket_cluster_cutoff: number;
   chain_id?: string;
   allow_truncation: boolean;
-}): Promise<PredictResponse> {
+}, signal?: AbortSignal): Promise<PredictResponse> {
   return request<PredictResponse>("/predict", {
+    signal,
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+export function getPredictionProgress(signal?: AbortSignal): Promise<{ stage: string }> {
+  return request<{ stage: string }>("/prediction/status", { signal });
 }
 
 export function openResult(summaryJson: string): Promise<PredictResponse> {

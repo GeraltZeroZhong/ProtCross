@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import sys
@@ -208,7 +209,6 @@ def _ready_backend(tmp_path, monkeypatch, predictor_factory=None):
         ),
     )
     backend.manifest.esm_expected_sha256 = sha256_file(esm_path)
-    backend.confirm_esm_license()
     backend.import_esm_weights(esm_path)
     backend.configure_backend("conda", conda_python=sys.executable)
     backend.manifest.backend_test_ok = True
@@ -242,13 +242,17 @@ def _wait_for_batch(backend, job_id, timeout=5.0):
     return status
 
 
-def test_esm_import_requires_license_confirmation(tmp_path):
+def test_esm_import_needs_no_license_confirmation(tmp_path):
     backend = DesktopBackend(root=tmp_path)
     esm_path = tmp_path / "esm.pth"
     esm_path.write_bytes(b"esm")
 
-    with pytest.raises(RuntimeError, match="license"):
-        backend.import_esm_weights(esm_path)
+    backend.manifest.esm_expected_sha256 = sha256_file(esm_path)
+    status = backend.import_esm_weights(esm_path)
+
+    assert status["present"] is True
+    assert status["verified"] is True
+    assert backend.manifest.esm_license_confirmed is False
 
 
 def test_license_and_import_write_manifest(tmp_path):
@@ -304,7 +308,6 @@ def test_async_esm_download_reports_progress_deduplicates_and_completes(tmp_path
     monkeypatch.setattr(desktop_service, "download_asset", fake_download)
     backend = DesktopBackend(root=tmp_path)
     backend.manifest.esm_expected_sha256 = digest
-    backend.confirm_esm_license()
 
     started = backend.start_esm_download()
     assert entered.wait(timeout=2)
@@ -362,7 +365,6 @@ def test_async_esm_download_can_cancel_and_retains_partial_file(tmp_path, monkey
 
     monkeypatch.setattr(desktop_service, "download_asset", cancellable_download)
     backend = DesktopBackend(root=tmp_path)
-    backend.confirm_esm_license()
 
     started = backend.start_esm_download()
     assert entered.wait(timeout=2)
@@ -386,7 +388,6 @@ def test_wrong_esm_hash_does_not_mark_assets_ready(tmp_path):
     esm_path = tmp_path / "esm.pth"
     esm_path.write_bytes(b"not-the-release-weight")
 
-    backend.confirm_esm_license()
     with pytest.raises(ValueError, match="SHA256"):
         backend.import_esm_weights(esm_path)
     backend.configure_backend("cpu")
@@ -819,7 +820,7 @@ def test_batch_history_restores_and_retry_only_failed_items(tmp_path, monkeypatc
     assert attempts == {"input.pdb": 1, "second.pdb": 2}
     assert completed_output.read_bytes() == completed_bytes
     assert completed_output.stat().st_mtime_ns == completed_mtime
-    with pytest.raises(ValueError, match="no failed or interrupted items"):
+    with pytest.raises(ValueError, match="no unfinished items"):
         restored.retry_failed_batch(retry["id"])
 
 
@@ -1238,3 +1239,79 @@ def test_desktop_server_rejects_cross_origin_side_effects(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_stopped_batch_continues_only_unfinished_items(tmp_path, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    attempts = []
+
+    class ControlledPredictor(FakePredictor):
+        def predict(self, input_structure, **kwargs):
+            attempts.append(Path(input_structure).name)
+            if len(attempts) == 1:
+                entered.set()
+                assert release.wait(timeout=5)
+            return super().predict(input_structure, **kwargs)
+
+    backend, first, _ = _ready_backend(tmp_path, monkeypatch, predictor_factory=lambda **kwargs: ControlledPredictor())
+    second = tmp_path / "second.pdb"
+    second.write_text(MINIMAL_PDB)
+    original = backend.submit_batch(items=[{"input_structure": first, "chain_id": "A"}, {"input_structure": second, "chain_id": "A"}], threshold=0.65)
+    try:
+        assert entered.wait(timeout=5)
+        backend.cancel_batch(original["id"])
+    finally:
+        release.set()
+    stopped = _wait_for_batch(backend, original["id"])
+    assert [item["status"] for item in stopped["items"]] == ["completed", "cancelled"]
+    completed_file = Path(stopped["items"][0]["output_files"]["structure"])
+    original_mtime = completed_file.stat().st_mtime_ns
+    retry = backend.retry_failed_batch(original["id"])
+    finished = _wait_for_batch(backend, retry["id"])
+    assert finished["status"] == "completed"
+    assert finished["settings"] == stopped["settings"]
+    assert [(item["input_structure"], item["chain_id"]) for item in finished["items"]] == [(str(second), "A")]
+    assert attempts == [first.name, second.name]
+    assert completed_file.stat().st_mtime_ns == original_mtime
+
+
+def test_single_prediction_reports_loading_and_scoring_and_clears_on_error(tmp_path, monkeypatch):
+    stages = []
+    backend = None
+
+    class FailingPredictor(FakePredictor):
+        def predict(self, *args, **kwargs):
+            stages.append(backend.prediction_status()["stage"])
+            raise RuntimeError("simulated prediction failure")
+
+    def factory(**kwargs):
+        stages.append(backend.prediction_status()["stage"])
+        return FailingPredictor()
+
+    backend, input_path, _ = _ready_backend(tmp_path, monkeypatch, predictor_factory=factory)
+    with pytest.raises(RuntimeError, match="simulated prediction failure"):
+        backend.predict_single(input_path)
+    assert stages == ["Loading prediction models", "Computing residue scores and writing results"]
+    assert backend.prediction_status()["stage"] == "Preparing prediction"
+
+
+def test_prediction_progress_remains_available_while_models_load(tmp_path, monkeypatch):
+    loading = threading.Event()
+    release = threading.Event()
+
+    def factory(**kwargs):
+        loading.set()
+        assert release.wait(timeout=5)
+        return FakePredictor()
+
+    backend, input_path, _ = _ready_backend(tmp_path, monkeypatch, predictor_factory=factory)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        prediction = executor.submit(backend.predict_single, input_path)
+        try:
+            assert loading.wait(timeout=5)
+            status = executor.submit(backend.prediction_status).result(timeout=1)
+            assert status["stage"] == "Loading prediction models"
+        finally:
+            release.set()
+        prediction.result(timeout=5)

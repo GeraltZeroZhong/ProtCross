@@ -38,6 +38,9 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             elif path == "/status":
                 self._require_auth(parsed_url)
                 self._json(self.backend.status())
+            elif path == "/prediction/status":
+                self._require_auth(parsed_url)
+                self._json(self.backend.prediction_status())
             elif path == "/file":
                 self._require_auth(parsed_url)
                 values = parse_qs(parsed_url.query).get("path", [])
