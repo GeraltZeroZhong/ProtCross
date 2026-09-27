@@ -611,15 +611,13 @@ uses a per-session token for local API requests.
 
 ### Install
 
-Once v0.2.5 is published, download the matching artifact and `SHA256SUMS.txt` from
+Download the matching artifact and `SHA256SUMS.txt` from
 [the v0.2.5 release](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.5):
 
 ```text
 ProtCross_Desktop_0.2.5_x64-setup.exe
 ProtCross_Desktop_0.2.5_macos-aarch64.dmg
 ```
-
-This source tree targets v0.2.5; the workflows below describe this release candidate.
 
 Choose **Example** in **Setup**, or **Try example** in **Results**, to inspect a real, precomputed crambin
 ([PDB 1CRN](https://www.rcsb.org/structure/1CRN)) result immediately, without a
