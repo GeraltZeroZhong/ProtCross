@@ -8,11 +8,13 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use protcross_desktop_lib::process_tree;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 struct BackendProcess {
     child: Mutex<Option<Child>>,
+    installer_child: Mutex<Option<Child>>,
     token: Mutex<Option<String>>,
     port: Mutex<Option<u16>>,
     root_lease: Mutex<Option<RootLease>>,
@@ -35,10 +37,16 @@ struct BackendStartResult {
 
 impl Drop for BackendProcess {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.child.lock() {
+        cleanup_processes(self);
+    }
+}
+
+fn cleanup_processes(state: &BackendProcess) {
+    state.allow_exit.store(true, Ordering::SeqCst);
+    for slot in [&state.installer_child, &state.child] {
+        if let Ok(mut guard) = slot.lock() {
             if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = process_tree::terminate(&mut child);
             }
         }
     }
@@ -61,6 +69,9 @@ fn start_backend(
         .child
         .lock()
         .map_err(|_| "backend lock poisoned".to_string())?;
+    if state.allow_exit.load(Ordering::SeqCst) {
+        return Err("ProtCross Desktop is shutting down".to_string());
+    }
     let mut token_guard = state
         .token
         .lock()
@@ -152,6 +163,7 @@ fn start_backend(
         .arg(&root_path)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(stderr_file));
+    process_tree::configure(&mut command);
     let mut child = command
         .spawn()
         .map_err(|exc| format!("failed to start backend: {exc}"))?;
@@ -186,8 +198,7 @@ fn stop_backend(state: State<BackendProcess>) -> Result<String, String> {
         .lock()
         .map_err(|_| "backend port lock poisoned".to_string())?;
     if let Some(mut child) = guard.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = process_tree::terminate(&mut child);
         *token_guard = None;
         *port_guard = None;
         return Ok("stopped".to_string());
@@ -259,11 +270,43 @@ fn install_backend_blocking(
 
     let mut command =
         runtime_install_command(&runtime_dir, &mode, &root_path, proxy_url.as_deref())?;
-    let status = command
+    command
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .status()
-        .map_err(|exc| format!("failed to run backend installer: {exc}"))?;
+        .stderr(Stdio::from(stderr));
+    process_tree::configure(&mut command);
+    let state = app.state::<BackendProcess>();
+    {
+        let mut guard = state
+            .installer_child
+            .lock()
+            .map_err(|_| "backend installer process lock poisoned".to_string())?;
+        if state.allow_exit.load(Ordering::SeqCst) {
+            return Err("ProtCross Desktop is shutting down".to_string());
+        }
+        *guard = Some(
+            command
+                .spawn()
+                .map_err(|exc| format!("failed to run backend installer: {exc}"))?,
+        );
+    }
+    let status = loop {
+        let mut guard = state
+            .installer_child
+            .lock()
+            .map_err(|_| "backend installer process lock poisoned".to_string())?;
+        let child = guard
+            .as_mut()
+            .ok_or("backend installation was interrupted")?;
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|exc| format!("failed to wait for backend installer: {exc}"))?
+        {
+            guard.take();
+            break status;
+        }
+        drop(guard);
+        thread::sleep(Duration::from_millis(100));
+    };
     if !status.success() {
         return Err(format!(
             "{mode} backend installer failed with {status}; see {}",
@@ -686,6 +729,7 @@ fn main() {
     tauri::Builder::default()
         .manage(BackendProcess {
             child: Mutex::new(None),
+            installer_child: Mutex::new(None),
             token: Mutex::new(None),
             port: Mutex::new(None),
             root_lease: Mutex::new(None),
@@ -715,7 +759,11 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building ProtCross Desktop")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let tauri::RunEvent::Exit = event {
+                // AppHandles held by a blocking installer can delay State::drop.
+                // Stop workers before the event loop and its data-root lease end.
+                cleanup_processes(&app.state::<BackendProcess>());
+            } else if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if should_confirm_exit(app) {
                     api.prevent_exit();
                     confirm_exit(app);

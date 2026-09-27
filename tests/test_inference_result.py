@@ -331,7 +331,7 @@ def test_prediction_result_writes_enhanced_scores_tsv_and_pocket_json(tmp_path):
         "rank_within_chain",
     ]
     assert lines[1].split("\t")[13:20] == [
-        "20.000000", "0.700000", "0.700000", "1", "1.000000", "2.000000", "3.000000"
+        "20.0", "0.7", "0.7", "1", "1.0", "2.0", "3.0"
     ]
     assert lines[1].split("\t")[-3:] == ["1", "1", "1"]
     assert legacy_scores_path.read_text(encoding="utf-8").splitlines()[0].split("\t") == [
@@ -451,6 +451,8 @@ def test_predict_pdb_invalid_options_do_not_resolve_assets(tmp_path, monkeypatch
         {"pocket_cluster_cutoff": 0},
         {"unscored_bfactor_policy": "drop"},
         {"max_len": 1023},
+        {"max_len": float("nan")},
+        {"max_len": True},
         {"device": "definitely-invalid"},
     )
     for kwargs in invalid_calls:
@@ -1502,3 +1504,89 @@ def _trust_managed_asset_hashes(monkeypatch):
         lambda path: expected_by_name.get(Path(path).name)
         or hashlib.sha256(Path(path).read_bytes()).hexdigest(),
     )
+
+
+@pytest.mark.parametrize("isolate_errors", [False, True])
+def test_batch_outputs_cannot_overwrite_another_input(tmp_path, isolate_errors):
+    first, second = tmp_path / "first.pdb", tmp_path / "second.pdb"
+    for path in (first, second):
+        path.write_text(MINIMAL_PDB, encoding="utf-8")
+    predictor = ProtCrossPredictor(device="cpu", esm_extractor=_FakeESM(),
+                                   pca_reducer=_FakePCA(), model=_FakeModel())
+    kwargs = {"output_paths": [{"structure": second}, None],
+              "return_exceptions": isolate_errors, "batch_size": 1}
+    if isolate_errors:
+        results = predictor.predict_many([first, second], **kwargs)
+        assert isinstance(results[0], ValueError)
+        assert isinstance(results[1], PredictionResult)
+    else:
+        with pytest.raises(ValueError, match="input structure"):
+            predictor.predict_many([first, second], **kwargs)
+    assert first.read_text() == second.read_text() == MINIMAL_PDB
+
+
+def test_annotation_refuses_an_input_changed_since_prediction(tmp_path):
+    source = tmp_path / "input.pdb"
+    source.write_text(MINIMAL_PDB, encoding="utf-8")
+    predictor = ProtCrossPredictor(device="cpu", esm_extractor=_FakeESM(),
+                                   pca_reducer=_FakePCA(), model=_FakeModel())
+    result = predictor.predict(source)
+    output = tmp_path / "annotated.pdb"
+    output.write_text("previous successful output", encoding="utf-8")
+    # A later edit must not combine old residue scores with new coordinates.
+    source.write_text(MINIMAL_PDB.replace("12.560", "92.560"), encoding="utf-8")
+    with pytest.raises(ValueError, match="changed since prediction"):
+        result.write_pdb(output)
+    assert output.read_text() == "previous successful output"
+    assert list(tmp_path.glob(".*.tmp*")) == []
+
+
+@pytest.mark.parametrize("name", ["max_len", "pca_dim"])
+@pytest.mark.parametrize("value", [True, 2.5, float("nan")])
+def test_predictor_rejects_non_integer_dimensions_before_loading_models(name, value):
+    with pytest.raises(ValueError, match=name):
+        ProtCrossPredictor(device="cpu", **{name: value})
+
+
+
+def test_extended_tsv_roundtrip_preserves_threshold_and_distance_boundaries(tmp_path):
+    import csv
+
+    source = PredictionResult(
+        input_pdb=Path("input.pdb"), residue_ids=["A_1", "A_2"],
+        probabilities=np.array([0.50000004, 0.9]), threshold=0.50000002,
+        ca_coords=np.array([[0.0, 0.0, 0.0], [8.00000049, 0.0, 0.0]]),
+        cluster_cutoff=8.0000002,
+    )
+    path = tmp_path / "scores.tsv"
+    source.write_scores_tsv(path)
+    with path.open() as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    reopened = PredictionResult(
+        input_pdb=source.input_pdb, residue_ids=[row["residue_id"] for row in rows],
+        probabilities=np.array([float(row["model_score"]) for row in rows]),
+        ca_coords=np.array([[float(row[key]) for key in ("x", "y", "z")] for row in rows]),
+        threshold=source.threshold, cluster_cutoff=source.cluster_cutoff,
+    )
+    np.testing.assert_array_equal(reopened.scores, source.scores)
+    np.testing.assert_array_equal(reopened.ca_coords, source.ca_coords)
+    assert len(reopened.binding_residues) == len(source.binding_residues) == 2
+    assert len(reopened.to_pocket_dict()["clustered_pockets"]) == 2
+
+
+
+def test_batch_protection_keeps_invalid_input_errors_isolated(tmp_path):
+    invalid = tmp_path / "loop.pdb"
+    try:
+        invalid.symlink_to(invalid.name)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    valid = tmp_path / "valid.pdb"
+    valid.write_text(MINIMAL_PDB, encoding="utf-8")
+    predictor = ProtCrossPredictor(device="cpu", esm_extractor=_FakeESM(),
+                                   pca_reducer=_FakePCA(), model=_FakeModel())
+    results = predictor.predict_many([invalid, valid], return_exceptions=True)
+    assert isinstance(results[0], (OSError, RuntimeError))
+    assert isinstance(results[1], PredictionResult)
+    assert results[1].input_pdb == valid
+    assert valid.read_text() == MINIMAL_PDB

@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/protcross?label=PyPI&color=0f766e)](https://pypi.org/project/protcross/)
 [![Windows Desktop](https://img.shields.io/badge/Windows-10%2F11%20x64-0078d4?logo=windows11&logoColor=white)](https://github.com/GeraltZeroZhong/ProtCross/releases)
 [![macOS Desktop](https://img.shields.io/badge/macOS-12%2B%20Apple%20Silicon-111827?logo=apple&logoColor=white)](https://github.com/GeraltZeroZhong/ProtCross/releases)
-[![Version](https://img.shields.io/badge/version-0.2.4-2563eb)](#version-history)
+[![Version](https://img.shields.io/badge/version-0.2.5-2563eb)](#version-history)
 [![Python](https://img.shields.io/badge/python-3.10-3776ab)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 [![Paper](https://img.shields.io/badge/DOI-10.1021%2Facs.jcim.5c03224-ca8a04)](https://doi.org/10.1021/acs.jcim.5c03224)
@@ -41,7 +41,7 @@ Choose the interface that matches your task:
 | Call ProtCross from a Python workflow | Install the CLI, then open [Python API](#python-api) |
 | Use a guided interface and 3D viewer | Download [ProtCross Desktop](#desktop-application) |
 
-ProtCross 0.2.4 requires Python 3.10. This first run installs the prediction
+ProtCross 0.2.5 requires Python 3.10. This first run installs the prediction
 dependencies, prepares the managed model assets, checks a structure, and writes
 one result package:
 
@@ -72,7 +72,7 @@ protcross-results/
 
 For a graphical workflow, install the Windows x64 or macOS Apple Silicon build
 from [GitHub Releases](https://github.com/GeraltZeroZhong/ProtCross/releases),
-then follow the two readiness steps in **Setup**. Desktop manages its own
+then choose **Prepare prediction** in **Setup**. Desktop manages its own
 runtime and assets and opens completed predictions in Mol*.
 
 ## Contents
@@ -196,8 +196,9 @@ protcross inspect input.cif --json
 
 Use the report to choose a chain, identify missing Cα atoms or modified
 residues, and check whether a chain exceeds the 1,022-residue ESM-C context.
-`--json` sends successful and failed inspections to stdout as machine-readable
-JSON and uses the process exit code to signal success or failure.
+`--json` sends structure-check results and errors to stdout as machine-readable
+JSON, with the process exit code indicating success or failure. Invalid command
+syntax is reported on stderr with exit code 2.
 
 ```text
 Input: examples/6fhu.pdb
@@ -302,7 +303,7 @@ protcross COMMAND --help
 PDB annotation preserves record order and updates B-factor columns on
 `ATOM`/`HETATM` records. mmCIF annotation retains coordinate categories and
 serializes an updated document. PDB B-factor values use two decimal places;
-TSV and JSON retain full numeric precision. The default
+The default extended TSV and JSON retain full numeric precision. The default
 `--unscored-bfactor-policy zero` assigns `0.0` to unscored atoms in the scored
 model. The `keep` policy retains input values for unscored atoms. Additional
 coordinate models retain their original values.
@@ -341,7 +342,7 @@ device, precision, and effective microbatch size.
 ## Batch inference
 
 Use one `ProtCrossPredictor` to process a directory of structures. ProtCross
-0.2.4 preserves input order, keeps each structure in its own result directory,
+0.2.5 preserves input order, keeps each structure in its own result directory,
 and bounds ESM-C and PointNet++ microbatches by count and residue cost.
 
 ```python
@@ -424,7 +425,7 @@ The residue and quadratic-cost settings bound both a microbatch and each
 individual structure. Select one chain or raise an explicit limit when a graph
 exceeds that budget. Accelerator memory errors trigger recursive microbatch
 splitting; a single item that still exhausts memory is reported through the
-selected exception mode. Desktop batch jobs use this API with groups of four.
+selected exception mode. Desktop batch jobs use this API with configurable groups of one to four (default four).
 
 With the default exception mode, the return type is
 `list[PredictionResult]`. With `return_exceptions=True`, it is
@@ -545,7 +546,7 @@ Release compatibility:
 
 | Interface | Version |
 | --- | --- |
-| Application and Desktop | `0.2.4` |
+| Application and Desktop | `0.2.5` |
 | Default checkpoint/PCA bundle | `0.1.2` |
 | Paper reproduction bundle | `0.1.1-paper` |
 | Pocket and summary schemas | `protcross-pocket-v2`, `protcross-summary-v2` |
@@ -594,6 +595,11 @@ Checkpoint, PCA, and PyTorch weight files can contain executable serialized
 objects. Load them from controlled storage. ESM-C weights are distributed
 through the EvolutionaryScale model repository.[^2]
 
+Custom checkpoints, PCA files, preprocessed `.pt` files, training configurations,
+and embedding-cache directories are trusted local inputs: loading them may deserialize
+Python objects or instantiate code. Use files from sources you trust and keep caches
+in a directory only you can modify. Official model downloads are SHA256-verified.
+
 CLI and Desktop assets use separate storage roots. Desktop records its selected
 assets in the operating-system application-data directory.
 
@@ -605,30 +611,52 @@ uses a per-session token for local API requests.
 
 ### Install
 
-Download the matching release artifact and `SHA256SUMS.txt` from
-[the v0.2.4 release](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.4):
+Download the matching artifact and `SHA256SUMS.txt` from
+[the v0.2.5 release](https://github.com/GeraltZeroZhong/ProtCross/releases/tag/v0.2.5):
 
 ```text
-ProtCross_Desktop_0.2.4_x64-setup.exe
-ProtCross_Desktop_0.2.4_macos-aarch64.dmg
+ProtCross_Desktop_0.2.5_x64-setup.exe
+ProtCross_Desktop_0.2.5_macos-aarch64.dmg
 ```
 
-The guided first-launch workflow installs a CPU runtime, downloads or imports
-model assets, and validates readiness. Installation shows its current stage;
-**Open runtime logs** works even when the backend cannot start. Reinstalling the
-recommended runtime also recovers from an unusable previously selected environment.
-Advanced
-runtime options provide NVIDIA CUDA on Windows, Apple MPS on macOS, custom Conda
-environments, and proxy configuration. Reserve approximately 5 GiB for the
-runtime and ESM-C asset.
+Choose **Example** in **Setup**, or **Try example** in **Results**, to inspect a real, precomputed crambin
+([PDB 1CRN](https://www.rcsb.org/structure/1CRN)) result immediately, without a
+Python runtime, model download, or network connection. This is a teaching
+example for the interface, not an experimentally validated binding-site benchmark.
+Its recorded model hashes, settings, and runtime are included with the result.
 
-Run a first Desktop prediction in five steps:
+For your own structures:
 
-1. Open **Setup**, install a backend, and validate it.
-2. Download or import the ESM-C weights.
-3. Open **Predict**, select a local PDB/mmCIF file, and inspect it.
-4. Select the chain scope and output directory; expand prediction settings when needed.
-5. Open **Results** to inspect the 0–1 score color scale, residue clusters, and output package.
+1. In **Setup**, choose **Prepare prediction** once. ProtCross installs and tests
+   the CPU runtime, then starts the resumable 2.14 GiB ESM-C download. You can
+   explore the example while setup runs. At 100% transfer, **Verifying ESM-C**
+   indicates the integrity check is still running. Reserve approximately 5 GiB locally.
+2. In **Predict**, select a PDB/mmCIF file and review the automatic structure check.
+   All scorable chains are selected initially; change the chain scope if needed.
+3. Choose **Run prediction**. The output folder is automatic; expand the optional
+   output location or **Prediction settings** only when needed. The result opens
+   after completion unless you have moved to another workspace.
+
+The top navigation prioritizes **Predict**, **Batch**, and **Results**; environment
+settings and diagnostics are secondary. The interface uses compact document rows
+and tables, with detailed guidance behind disclosures. **Prediction settings**,
+**Output**, runtime options, and batch history stay collapsed until needed.
+
+The basic workflow keeps scientific defaults. Advanced settings show a labelled
+**Default / Modified** summary, validate edits before running, and expose the score
+cutoff, clustering distance, long-chain truncation, and execution device. Device
+selection defaults to the active runtime; CPU, automatic selection, CUDA device
+indices, and Apple MPS can be specified. Batch settings also expose microbatch
+size (1–4); use a smaller group when device memory is limited. Running forms are
+locked to the submitted settings. Scientific definitions remain available in
+**Parameter reference** without crowding the default form.
+
+**Runtime options** provide NVIDIA CUDA on Windows, Apple MPS on macOS,
+Conda environments, and a network proxy. **Apply and test** checks a candidate
+interpreter before saving and restarting the runtime; a failed candidate keeps
+the saved configuration. A failed test of the active runtime clears its ready
+status until it passes again. **Open runtime logs** also works offline. Reinstalling
+the recommended runtime can recover from an unusable previously selected environment.
 
 Single predictions show the active stage and elapsed time. **Cancel prediction**
 restarts the runtime after confirmation; completed result files are kept. Finish
@@ -637,7 +665,7 @@ Stopped batches offer **Continue remaining**, retaining their original settings
 and skipping completed structures. Quitting during active work asks for confirmation.
 
 The interface follows the system appearance by default and also provides light
-and dark modes. Keyboard focus indicators, reduced-motion handling, high-contrast
+and dark modes in the header options menu. Keyboard focus indicators, reduced-motion handling, high-contrast
 support, resizable layouts, semantic status messages, and compact-window reflow
 are built into the frontend design system.
 
@@ -655,10 +683,13 @@ Desktop batch jobs reuse one predictor and the input inspection reports. Each
 staged file has its own chain selector, including all scorable chains and blank
 chain IDs. The monitor exposes per-item status and full errors, supports
 cancellation between microbatches, and can start a new queue containing only
-failed or interrupted items.
+failed or interrupted items. The monitor shows the frozen settings for that run;
+retries retain them. To change device or group size, start a new queue containing
+the unfinished structures.
 
 For a batch run, open **Batch**, add the structures, review the deduplicated
-list, choose one output root, and start the queue. Progress and per-item status
+list, choose one output root, and select **Run batch**. Once submitted, the
+monitor takes priority; **New batch** and **History** remain available as disclosures. Progress and per-item status
 remain visible while the queue runs. Each input receives a unique subdirectory
 with the four-file result package. Select any completed row to inspect it in
 **Results**. Recent batch history is stored in the Desktop application-data
@@ -671,13 +702,26 @@ application-data `outputs/<structure>/` directory and batch predictions under
 `outputs/batch/<job-id>/`. The active platform path is displayed below the
 output field.
 
-The **Results** workspace colors scored residues by model score and gives
+The **Results** workspace pairs the 3D structure with a compact parameter, cluster,
+and residue inspector. The score legend sits outside the canvas so 3D hover labels
+remain readable. It colors scored residues by model score and gives
 unscored residues a neutral gray color, including residues outside a selected
 chain or a truncated sequence context. Adjust the displayed score cutoff and
 Cα clustering distance to regroup the complete residue table immediately;
 this updates the viewer and cluster inspector without running the model or
-changing output files. Reopen a previous package by selecting its
-`*.protcross.summary.json` file. Use **Diagnostics** to test the runtime, review
+changing output files. Filters and cluster selection survive workspace switches.
+Use **3D tools** for molecular controls. Manual color changes are labelled
+**Custom colors**; **Restore score colors** returns to the model palette while
+keeping the camera and cluster representation.
+Copy the original run metadata or the current filter and cluster settings as separate
+JSON records from **Run record & files**; the latter includes the source identity.
+Reopen a previous package by selecting its `*.protcross.summary.json` file.
+Opening saved files requires the local runtime but does not require model weights.
+If the runtime is missing, **Prepare result viewer** installs and tests only the CPU
+runtime; it does not start the ESM-C download. When residue scores are unavailable,
+the inspector labels saved statistics and disables recalculation. Unknown counts
+are shown as unavailable, not as zero.
+Use **Diagnostics** to test the runtime, review
 asset health, and export a sanitized support ZIP with bounded log excerpts.
 
 ## Model and inference pipeline
@@ -889,6 +933,17 @@ exact command, `summary.json`, platform, Python/PyTorch versions, and sanitized
 diagnostics.
 
 ## Version history
+
+### 0.2.5
+
+- Redesigned Desktop around compact research workspaces, concise labels, and
+  progressive disclosure for scientific and execution settings.
+- Added an offline 1CRN example, viewer-only runtime setup, complete run records,
+  and recoverable input, batch, download, and environment workflows.
+- Corrected molecular color/coverage semantics and lossless TSV round-trips;
+  protected input files and made batch errors, persisted state, and worker shutdown
+  recoverable without losing valid results.
+
 
 ### 0.2.4
 

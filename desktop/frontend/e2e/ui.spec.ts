@@ -70,16 +70,17 @@ test("keyboard navigation reaches content with a visible skip link", async ({ pa
 
 test("setup, appearance, result, and diagnostic disclosures are operable", async ({ page }) => {
   await page.goto("/?preview=setup");
-  await page.getByText("Advanced runtime options").click();
-  await expect(page.locator(".setup-backend .segmented")).toBeVisible();
+  await page.getByText("Runtime options").click();
+  await expect(page.locator(".runtime-options .segmented")).toBeVisible();
 
+  await page.getByLabel("Workspace options").click();
   await page.getByLabel("Appearance").selectOption("dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 
   await page.goto("/?preview=results");
-  await page.getByLabel("Displayed predicted-residue cluster").selectOption("1");
+  await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption("1");
   await expect(page.getByText("0.8170").first()).toBeVisible();
-  const fallback = page.getByText("3D rendering is unavailable");
+  const fallback = page.getByText("3D unavailable");
   if (await fallback.isVisible()) {
     await expect(fallback).toBeVisible();
   } else {
@@ -87,31 +88,32 @@ test("setup, appearance, result, and diagnostic disclosures are operable", async
   }
 
   await page.goto("/?preview=diagnostics");
-  await page.getByText("Show runtime report").click();
+  await page.getByText("Full report").click();
   await expect(page.locator(".diagnostic-json")).toBeVisible();
 });
 
 test("results regroup locally and keep the complete residue ranking", async ({ page }) => {
   await page.goto("/?preview=results");
-  await expect(page.getByText("12 ranked residues")).toBeVisible();
-  await expect(page.getByText("12 scored", { exact: true })).toBeVisible();
+  await expect(page.locator(".result-counts")).toContainText("12 scored residues");
+  await page.locator(".result-rankings > summary").click();
+  await expect(page.locator(".all-residue-table tbody tr")).toHaveCount(12);
 
-  await page.getByLabel("Displayed score cutoff").fill("0.9");
-  await expect(page.getByText("2 selected residues")).toBeVisible();
-  await page.getByLabel("Displayed cluster distance (Å)").fill("1");
-  await expect(page.getByText("2 displayed clusters")).toBeVisible();
-  await expect(page.getByText("Original run")).toBeVisible();
+  await page.getByLabel("Score cutoff").fill("0.9");
+  await expect(page.locator(".result-counts")).toContainText("2 selected");
+  await page.getByLabel("Distance (Å)").fill("1");
+  await expect(page.locator(".result-counts")).toContainText("2 clusters");
+  await expect(page.locator(".parameter-comparison")).toContainText("Run");
 
-  await page.getByRole("button", { name: "Reset display" }).click();
-  await expect(page.getByText("8 selected residues")).toBeVisible();
-  await expect(page.getByText("2 displayed clusters")).toBeVisible();
+  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect(page.locator(".result-counts")).toContainText("8 selected");
+  await expect(page.locator(".result-counts")).toContainText("2 clusters");
 
-  const distanceInput = page.getByLabel("Displayed cluster distance (Å)");
+  const distanceInput = page.getByLabel("Distance (Å)");
   await distanceInput.fill("0");
-  await expect(page.getByText("Display settings are invalid")).toBeVisible();
+  await expect(page.getByText("Invalid value. Showing the last valid view.")).toBeVisible();
   await expect(distanceInput).toBeEnabled();
-  await page.getByRole("button", { name: "Reset display" }).click();
-  await expect(page.getByText("8 selected residues")).toBeVisible();
+  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect(page.locator(".result-counts")).toContainText("8 selected");
 });
 
 test("local regrouping matches prediction threshold, linkage, and ordering semantics", async ({ page }) => {
@@ -197,16 +199,36 @@ test("score coverage treats an empty exact result as authoritative", async ({ pa
 
 test("batch monitor keeps multiline errors and exposes restored history", async ({ page }) => {
   await page.goto("/?preview=batch");
-  await expect(page.getByRole("heading", { name: "Recent batches" })).toBeVisible();
-  await expect(page.getByText("Recovered interrupted batch")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Retry failed" })).toBeVisible();
+  await expect(page.locator(".batch-history > summary")).toContainText("History");
+  await expect(page.locator(".batch-monitor .callout")).toContainText("Interrupted");
+  await page.locator(".batch-history > summary").click();
+  await expect(page.locator(".batch-history-list")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry unfinished" })).toBeVisible();
   await expect(page.getByText("Check that chain B contains Cα coordinates.")).toBeVisible();
 });
 
 test("results never present an unloaded batch item as a prediction", async ({ page }) => {
   await page.goto("/?preview=batch");
-  await expect(page.getByRole("heading", { name: "Recent batches" })).toBeVisible();
+  await expect(page.locator(".batch-history > summary")).toContainText("History");
   await page.getByRole("button", { name: /^Results/ }).click();
-  await expect(page.getByRole("heading", { name: "No prediction loaded" })).toBeVisible();
-  await expect(page.getByText(/0 selected residues/)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Explore a prediction" })).toBeVisible();
+  await expect(page.locator(".result-counts")).toHaveCount(0);
+});
+
+
+test("workspace options dismiss without blocking the working document", async ({ page }) => {
+  await page.goto("/?preview=predict");
+  const options = page.getByLabel("Workspace options");
+  const appearance = page.getByLabel("Appearance");
+  await options.click();
+  await appearance.focus();
+  await page.keyboard.press("Escape");
+  await expect(appearance).not.toBeVisible();
+  await expect(options).toBeFocused();
+  await options.click();
+  await appearance.selectOption("dark");
+  await expect(appearance).toBeVisible();
+  await page.getByLabel("Structure file").click();
+  await expect(appearance).not.toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });

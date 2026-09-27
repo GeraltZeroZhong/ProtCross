@@ -22,6 +22,7 @@ import protcross_desktop.config as desktop_config
 import protcross_desktop.manifest as desktop_manifest
 import protcross_desktop.service as desktop_service
 from protcross_desktop.config import DesktopPaths
+from protcross_desktop.diagnostics import EnvTestResult
 from protcross_desktop.server import create_server
 from protcross_desktop.service import DesktopBackend
 from validate_bundled_assets import validate_bundled_assets
@@ -791,8 +792,10 @@ def test_batch_history_restores_and_retry_only_failed_items(tmp_path, monkeypatc
         pocket_cluster_cutoff=6.5,
         allow_truncation=True,
         device="cpu",
+        batch_size=1,
     )
     original_status = _wait_for_batch(backend, original["id"])
+    assert original_status["settings"]["batch_size"] == 1
     assert original_status["status"] == "completed_with_errors"
     completed_output = Path(original_status["items"][0]["output_files"]["structure"])
     completed_bytes = completed_output.read_bytes()
@@ -1315,3 +1318,353 @@ def test_prediction_progress_remains_available_while_models_load(tmp_path, monke
         finally:
             release.set()
         prediction.result(timeout=5)
+
+
+@pytest.mark.parametrize("use_current_python", [False, True])
+def test_candidate_environment_failure_does_not_replace_active_test(tmp_path, monkeypatch, use_current_python):
+    backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    candidate = Path(sys.executable) if use_current_python else tmp_path / "candidate-python"
+    if not use_current_python:
+        candidate.write_text("candidate interpreter", encoding="utf-8")
+    before = backend.paths.manifest_path.read_bytes()
+
+    def failing_env(python, *, backend):
+        return EnvTestResult(
+            backend=backend,
+            python=str(python),
+            ok=False,
+            returncode=1,
+            checks={"esm": {"ok": False, "error": "Missing ESM dependency"}},
+            stdout="diagnostic stdout",
+            stderr="diagnostic stderr",
+            error="Candidate environment is incomplete",
+        )
+
+    monkeypatch.setattr(desktop_service, "test_python_env", failing_env)
+    result = backend.test_backend("conda", conda_python=str(candidate), persist=False)
+
+    assert result["ok"] is False
+    assert result["backend"] == "conda"
+    assert result["python"] == str(candidate)
+    assert result["checks"]["esm"]["error"] == "Missing ESM dependency"
+    assert result["stderr"] == "diagnostic stderr"
+    assert backend.manifest.backend_test_ok is True
+    assert backend.paths.manifest_path.read_bytes() == before
+
+
+def test_candidate_environment_test_is_persisted_only_for_its_configured_python(tmp_path, monkeypatch):
+    backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    candidate = tmp_path / "candidate-python"
+    candidate.write_text("candidate interpreter", encoding="utf-8")
+    before = backend.paths.manifest_path.read_bytes()
+
+    def successful_env(python, *, backend):
+        return EnvTestResult(
+            backend=backend, python=str(python), ok=True, returncode=0,
+            checks={"protcross": {"distribution_version": __version__}}, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(desktop_service, "test_python_env", successful_env)
+    candidate_result = backend.test_backend("conda", conda_python=candidate)
+    assert candidate_result["ok"] is True
+    assert backend.paths.manifest_path.read_bytes() == before
+
+    backend.configure_backend("conda", conda_python=candidate)
+    result = backend.test_backend()
+    restored = desktop_manifest.DesktopManifest.load(backend.paths.manifest_path)
+    assert result["python"] == str(candidate)
+    assert restored.backend_test_ok is True
+    assert restored.backend_test_mode == "conda"
+    assert restored.backend_test_python == str(candidate)
+    assert restored.backend_test_package_version == __version__
+    assert restored.backend_tested_at
+
+
+def test_environment_test_does_not_mark_a_newly_selected_python_as_tested(tmp_path, monkeypatch):
+    backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    new_python = tmp_path / "new-python"
+    new_python.write_text("new interpreter", encoding="utf-8")
+
+    def reconfigured_during_test(python, *, backend: str):
+        service.configure_backend("conda", conda_python=new_python)
+        return EnvTestResult(
+            backend=backend, python=str(python), ok=True, returncode=0,
+            checks={"protcross": {"distribution_version": __version__}}, stdout="", stderr="",
+        )
+
+    service = backend
+    monkeypatch.setattr(desktop_service, "test_python_env", reconfigured_during_test)
+    result = backend.test_backend()
+
+    assert result["python"] == sys.executable
+    assert backend.manifest.conda_python == str(new_python)
+    assert backend.manifest.backend_test_ok is None
+    assert backend.manifest.backend_test_python is None
+
+
+@pytest.mark.parametrize("path_kind", ["missing", "directory"])
+def test_invalid_conda_path_cannot_replace_saved_environment(tmp_path, monkeypatch, path_kind):
+    backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    candidate = tmp_path / "missing-python" if path_kind == "missing" else tmp_path
+    before = backend.paths.manifest_path.read_bytes()
+
+    with pytest.raises(ValueError, match="existing executable file"):
+        backend.configure_backend("conda", conda_python=candidate)
+    with pytest.raises(ValueError, match="existing executable file"):
+        backend.test_backend("conda", conda_python=candidate, persist=False)
+
+    assert backend.paths.manifest_path.read_bytes() == before
+    assert backend.manifest.backend_test_ok is True
+
+
+@pytest.mark.parametrize("options, message", [
+    ({"mode": "unknown"}, "backend mode"),
+    ({"mode": "cpu", "conda_python": "unused"}, "only supported for conda"),
+    ({"mode": "conda", "persist": "false"}, "true or false"),
+])
+def test_candidate_environment_validates_request_options(tmp_path, options, message):
+    backend = DesktopBackend(root=tmp_path)
+    with pytest.raises(ValueError, match=message):
+        backend.test_backend(**options)
+
+
+@pytest.mark.parametrize("batch_size, expected_groups", [(1, [1, 1, 1, 1, 1]), (4, [4, 1])])
+def test_batch_size_bounds_execution_and_survives_restore(tmp_path, monkeypatch, batch_size, expected_groups):
+    calls = []
+
+    class BoundedPredictor(FakePredictor):
+        def predict_many(self, structures, **kwargs):
+            calls.append((list(structures), kwargs))
+            return [self.predict(
+                structure,
+                threshold=kwargs["threshold"],
+                pocket_cluster_cutoff=kwargs["pocket_cluster_cutoff"],
+                output_pdb=paths["structure"],
+                scores_tsv=paths["scores_tsv"],
+                pocket_json=paths["pockets_json"],
+                summary_json=paths["summary_json"],
+            ) for structure, paths in zip(structures, kwargs["output_paths"])]
+
+    backend, input_pdb, _ = _ready_backend(tmp_path, monkeypatch, predictor_factory=lambda **kw: BoundedPredictor())
+    inputs = [input_pdb]
+    for index in range(4):
+        path = tmp_path / f"input-{index}.pdb"
+        path.write_text(MINIMAL_PDB, encoding="utf-8")
+        inputs.append(path)
+    job = backend.submit_batch(inputs, batch_size=batch_size, threshold=0.65, pocket_cluster_cutoff=6.5)
+    status = _wait_for_batch(backend, job["id"])
+
+    assert status["status"] == "completed"
+    assert [len(structures) for structures, _ in calls] == expected_groups
+    assert [options["batch_size"] for _, options in calls] == expected_groups
+    assert all(options["threshold"] == 0.65 and options["pocket_cluster_cutoff"] == 6.5 for _, options in calls)
+    assert [structure for structures, _ in calls for structure in structures] == [str(path) for path in inputs]
+    assert status["settings"]["batch_size"] == batch_size
+    restored = DesktopBackend(root=tmp_path)
+    assert restored.batch_status(job["id"])["settings"]["batch_size"] == batch_size
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, 5, 1.5, True, "2", None])
+def test_invalid_batch_size_is_rejected_before_model_loading(tmp_path, monkeypatch, batch_size):
+    backend, input_pdb, factory_calls = _ready_backend(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="integer from 1 to 4"):
+        backend.submit_batch([input_pdb], batch_size=batch_size)
+    assert factory_calls == []
+    assert backend.status()["activity"]["batch_jobs"] == []
+
+
+def test_legacy_batch_history_defaults_to_four_structures_per_group(tmp_path, monkeypatch):
+    backend, input_pdb, _ = _ready_backend(tmp_path, monkeypatch)
+    job = backend.submit_batch([input_pdb])
+    _wait_for_batch(backend, job["id"])
+    history_path = backend.paths.root / desktop_service.BATCH_HISTORY_FILENAME
+    payload = json.loads(history_path.read_text(encoding="utf-8"))
+    payload["jobs"][0]["settings"].pop("batch_size")
+    history_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = DesktopBackend(root=tmp_path)
+    assert restored.batch_status(job["id"])["settings"]["batch_size"] == 4
+
+
+
+def test_candidate_python_symlink_is_not_confused_with_the_active_environment(tmp_path, monkeypatch):
+    backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    candidate = tmp_path / "candidate-env" / "bin" / "python"
+    candidate.parent.mkdir(parents=True)
+    try:
+        candidate.symlink_to(sys.executable)
+    except OSError as exc:
+        pytest.skip(f"Python symlinks unavailable: {exc}")
+    before = backend.paths.manifest_path.read_bytes()
+
+    def successful_env(python, *, backend):
+        return EnvTestResult(
+            backend=backend, python=str(python), ok=True, returncode=0,
+            checks={"protcross": {"distribution_version": __version__}}, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(desktop_service, "test_python_env", successful_env)
+    result = backend.test_backend("conda", conda_python=candidate)
+
+    assert result["python"] == str(candidate)
+    assert backend.paths.manifest_path.read_bytes() == before
+
+
+@pytest.mark.network
+def test_desktop_server_returns_failed_candidate_details_without_changing_configuration(tmp_path, monkeypatch):
+    backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    before = backend.paths.manifest_path.read_bytes()
+
+    def failing_env(python, *, backend):
+        return EnvTestResult(
+            backend=backend, python=str(python), ok=False, returncode=1,
+            checks={"torch": {"ok": False, "error": "Missing dependency"}}, stdout="", stderr="details",
+        )
+
+    monkeypatch.setattr(desktop_service, "test_python_env", failing_env)
+    server = create_server("127.0.0.1", 0, backend=backend, token="secret-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        conn.request(
+            "POST", "/backend/test",
+            body=json.dumps({"mode": "conda", "conda_python": sys.executable, "persist": False}),
+            headers={"Content-Type": "application/json", "X-ProtCross-Desktop-Token": "secret-token"},
+        )
+        response = conn.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert body["ok"] is False
+        assert body["backend"] == "conda"
+        assert body["python"] == sys.executable
+        assert body["checks"]["torch"]["error"] == "Missing dependency"
+        assert body["stderr"] == "details"
+        assert backend.paths.manifest_path.read_bytes() == before
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('operation', ['status', 'cancel'])
+def test_batch_remains_observable_and_cancellable_while_models_load(tmp_path, monkeypatch, operation):
+    loading = threading.Event()
+    release = threading.Event()
+    predictions = []
+
+    class ObservedPredictor(FakePredictor):
+        def predict(self, *args, **kwargs):
+            predictions.append(args[0])
+            return super().predict(*args, **kwargs)
+
+    def factory(**kwargs):
+        loading.set()
+        assert release.wait(timeout=5)
+        return ObservedPredictor()
+
+    backend, input_path, _ = _ready_backend(tmp_path, monkeypatch, predictor_factory=factory)
+    job_id = backend.submit_batch([input_path])['id']
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            assert loading.wait(timeout=5)
+            call = backend.batch_status if operation == 'status' else backend.cancel_batch
+            snapshot = executor.submit(call, job_id).result(timeout=1)
+            assert snapshot['status'] == 'running'
+            if operation == 'cancel':
+                assert snapshot['cancel_requested'] is True
+        finally:
+            release.set()
+    finished = _wait_for_batch(backend, job_id)
+    if operation == 'cancel':
+        assert finished['status'] == 'cancelled'
+        assert predictions == []
+
+
+def test_runtime_identity_distinguishes_environments_with_a_shared_python_binary(tmp_path, monkeypatch):
+    backend = DesktopBackend(root=tmp_path / 'app')
+    active = tmp_path / 'active-env' / 'bin' / 'python'
+    candidate = tmp_path / 'candidate-env' / 'bin' / 'python'
+    alias = active.with_name('python3.10')
+    for entrypoint in (active, candidate, alias):
+        entrypoint.parent.mkdir(parents=True, exist_ok=True)
+        entrypoint.symlink_to(sys.executable)
+    monkeypatch.setattr(sys, 'executable', str(active))
+    backend.configure_backend('conda', conda_python=candidate)
+    assert backend.backend_status()['runtime_matches_config'] is False
+    assert any('Restart the desktop backend' in issue for issue in backend.readiness_issues())
+    backend.configure_backend('conda', conda_python=alias)
+    assert backend.backend_status()['runtime_matches_config'] is True
+
+
+@pytest.mark.parametrize('payload', [None, [], {'extra': None}, {'checkpoint_path': []}, {'backend_test_ok': 'true'}])
+def test_desktop_manifest_quarantines_invalid_field_types(tmp_path, payload):
+    manifest_path = tmp_path / 'assets' / 'protcross-desktop-assets.json'
+    manifest_path.parent.mkdir(parents=True)
+    original = json.dumps(payload)
+    manifest_path.write_text(original, encoding='utf-8')
+    backend = DesktopBackend(root=tmp_path)
+    assert backend.status()['readiness']['ready'] is False
+    quarantined = list(manifest_path.parent.glob(manifest_path.name + '.corrupt-*'))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text(encoding='utf-8') == original
+
+
+@pytest.mark.parametrize('payload', [None, [], {'schema_version': desktop_service.BATCH_HISTORY_SCHEMA, 'jobs': [None]}])
+def test_invalid_batch_history_does_not_prevent_backend_startup(tmp_path, payload):
+    history = tmp_path / desktop_service.BATCH_HISTORY_FILENAME
+    history.write_text(json.dumps(payload), encoding='utf-8')
+    backend = DesktopBackend(root=tmp_path)
+    assert backend.status()['activity']['batch_jobs'] == []
+    assert list(tmp_path.glob(history.name + '.corrupt-*'))
+
+
+def test_corrupt_batch_entry_keeps_other_completed_history(tmp_path):
+    valid = desktop_service.BatchJob(id='retained-completed', items=[], status='completed').to_persistence_dict()
+    history = tmp_path / desktop_service.BATCH_HISTORY_FILENAME
+    history.write_text(json.dumps({'schema_version': desktop_service.BATCH_HISTORY_SCHEMA, 'jobs': [None, valid]}), encoding='utf-8')
+    backend = DesktopBackend(root=tmp_path)
+    assert backend.batch_status('retained-completed')['status'] == 'completed'
+    assert list(tmp_path.glob(history.name + '.corrupt-*'))
+
+
+@pytest.mark.parametrize('proxy_url', [
+    'http://alice:fixture-password@proxy.example:badport',
+    'http://alice:fixture-password@[broken',
+    'https://alice:fixture-password@[::1]:8080',
+])
+def test_diagnostics_redacts_credentials_even_in_malformed_proxy_urls(tmp_path, proxy_url):
+    from protcross_desktop.diagnostics import export_diagnostics
+
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    (logs / 'installer.log').write_text(f'Proxy failure: {proxy_url}\n', encoding='utf-8')
+    output = export_diagnostics(tmp_path / 'diagnostics.zip', manifest={'proxy_url': proxy_url}, env_results=[], logs_dir=logs)
+    with zipfile.ZipFile(output) as archive:
+        for name in ('diagnostics.json', 'logs/installer.log'):
+            text = archive.read(name).decode('utf-8')
+            assert 'fixture-password' not in text
+            assert 'alice' not in text
+            assert '<redacted>@' in text
+
+
+@pytest.mark.parametrize('asset', ['checkpoint', 'pca', 'esm'])
+def test_asset_path_replaced_by_directory_keeps_setup_recoverable(tmp_path, monkeypatch, asset):
+    backend, _, _ = _ready_backend(tmp_path, monkeypatch)
+    paths = {'checkpoint': backend.manifest.checkpoint_path, 'pca': backend.manifest.pca_path, 'esm': backend.manifest.esm_weights_path}
+    path = Path(paths[asset])
+    path.unlink()
+    path.mkdir()
+    status = backend.status()
+    assert status['assets'][asset]['present'] is False
+    assert status['readiness']['ready'] is False
+
+
+def test_weights_without_verified_checksum_cannot_become_prediction_ready(tmp_path, monkeypatch):
+    backend, input_path, calls = _ready_backend(tmp_path, monkeypatch)
+    backend.manifest.esm_expected_sha256 = None
+    backend.manifest.esm_verified = None
+    assert backend.status()['readiness']['ready'] is False
+    with pytest.raises(RuntimeError, match='SHA256'):
+        backend.predict_single(input_path)
+    assert calls == []

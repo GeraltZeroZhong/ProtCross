@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args, get_origin, get_type_hints
 import uuid
 
 from protcross.assets import sha256_file
@@ -53,6 +53,13 @@ class DesktopManifest:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 raise ValueError("manifest root is not a JSON object")
+            for name, annotation in get_type_hints(cls).items():
+                if name not in data:
+                    continue
+                alternatives = get_args(annotation) if type(None) in get_args(annotation) else (annotation,)
+                allowed_types = tuple(get_origin(item) or item for item in alternatives)
+                if type(data[name]) not in allowed_types:
+                    raise ValueError(f"invalid manifest field type: {name}")
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
             quarantine = path.with_name(f"{path.name}.corrupt-{uuid.uuid4().hex}")
             path.replace(quarantine)
@@ -63,6 +70,7 @@ class DesktopManifest:
         payload = {key: value for key, value in data.items() if key in known}
         extra = {key: value for key, value in data.items() if key not in known}
         manifest = cls(**payload)
+        manifest.extra = {key: value for key, value in manifest.extra.items() if key not in known}
         manifest.extra.update(extra)
         return manifest
 
@@ -121,7 +129,7 @@ class DesktopManifest:
 
     def refresh_esm_verification_if_stale(self) -> bool:
         path = Path(self.esm_weights_path).expanduser() if self.esm_weights_path else None
-        if not path or not path.exists():
+        if not path or not path.is_file():
             changed = any(
                 value is not None
                 for value in (self.esm_actual_sha256, self.esm_size_bytes, self.esm_mtime_ns, self.esm_verified)
@@ -143,7 +151,7 @@ class DesktopManifest:
 
     def esm_status(self) -> dict[str, Any]:
         path = Path(self.esm_weights_path).expanduser() if self.esm_weights_path else None
-        present = bool(path and path.exists())
+        present = bool(path and path.is_file())
         return {
             "license_confirmed": self.esm_license_confirmed,
             "path": str(path) if path else None,
@@ -158,7 +166,7 @@ class DesktopManifest:
         }
 
     def _refresh_esm_metadata(self, path: Path, *, stat: Any | None = None) -> None:
-        if not path.exists():
+        if not path.is_file():
             self.esm_actual_sha256 = None
             self.esm_size_bytes = None
             self.esm_mtime_ns = None

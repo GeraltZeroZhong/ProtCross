@@ -196,6 +196,12 @@ class PredictionResult:
                 "Annotated structure output must use the same PDB or mmCIF format as the input; "
                 "use a dedicated structure converter separately."
             )
+        recorded_hash = (self.input_metadata or {}).get("sha256")
+        if recorded_hash and _input_file_metadata(self.input_pdb)["sha256"] != recorded_hash:
+            raise ValueError(
+                f"Input structure changed since prediction: {self.input_pdb}. "
+                "Run prediction again before writing an annotated structure."
+            )
         final_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self._temporary_output_path(final_path)
         try:
@@ -257,7 +263,7 @@ class PredictionResult:
                     f"{self._format_optional_value(record['resname'])}\t"
                     f"{self._format_optional_value(record['one_letter_code'])}\t"
                     f"{self._format_optional_float(record['input_bfactor'])}\t"
-                    f"{record['score']:.6f}\t{record['probability']:.6f}\t{record['is_binding']}\t"
+                    f"{record['score']}\t{record['probability']}\t{record['is_binding']}\t"
                     f"{self._format_optional_float(record['x'])}\t"
                     f"{self._format_optional_float(record['y'])}\t"
                     f"{self._format_optional_float(record['z'])}\t{cluster_id}\t"
@@ -763,7 +769,7 @@ class PredictionResult:
 
     @staticmethod
     def _format_optional_float(value: float | None) -> str:
-        return "" if value is None else f"{value:.6f}"
+        return "" if value is None else str(float(value))
 
     @staticmethod
     def _format_optional_value(value: object | None) -> str:
@@ -836,11 +842,10 @@ class ProtCrossPredictor:
         feature_pipeline_fingerprint: str | None = None,
     ) -> None:
         self.device = self._resolve_device(device)
-        if max_len <= 0 or max_len > MAX_ESM_RESIDUES:
-            raise ValueError(f"max_len must be between 1 and {MAX_ESM_RESIDUES}.")
+        _validate_max_len(max_len)
         self.max_len = max_len
-        if pca_dim <= 0:
-            raise ValueError("pca_dim must be greater than 0.")
+        if isinstance(pca_dim, bool) or not isinstance(pca_dim, Integral) or pca_dim <= 0:
+            raise ValueError("pca_dim must be a positive integer.")
         self.pca_dim = pca_dim
         self.embedding_cache_dir = Path(embedding_cache_dir).expanduser() if embedding_cache_dir else None
         injected_feature_pipeline = esm_extractor is not None or pca_reducer is not None
@@ -1163,7 +1168,18 @@ class ProtCrossPredictor:
         results: list[PredictionResult | Exception | None] = [None] * len(structures)
         resolved_paths: list[tuple[Path | None, ...] | None] = [None] * len(structures)
         claimed_outputs: dict[Path, int] = {}
+        # Every input remains protected, including items in later microbatches.
+        protected_inputs: set[Path] = set()
         for index, structure in enumerate(structures):
+            try:
+                protected_inputs.add(Path(structure).expanduser().resolve(strict=False))
+            except Exception as exc:
+                if not return_exceptions:
+                    raise
+                results[index] = exc
+        for index, structure in enumerate(structures):
+            if results[index] is not None:
+                continue
             try:
                 paths = (
                     self._mapped_output_paths(output_paths[index])
@@ -1177,6 +1193,8 @@ class ProtCrossPredictor:
                     if path is None:
                         continue
                     resolved = path.resolve(strict=False)
+                    if resolved in protected_inputs:
+                        raise ValueError(f"Batch output must not overwrite an input structure: {path}.")
                     if resolved in claimed_outputs:
                         raise ValueError(
                             f"Batch output path {path} is shared by inputs at indices "
@@ -1890,6 +1908,11 @@ def predict_pdb(
     )
 
 
+def _validate_max_len(max_len: int) -> None:
+    if isinstance(max_len, bool) or not isinstance(max_len, Integral) or not 1 <= max_len <= MAX_ESM_RESIDUES:
+        raise ValueError(f"max_len must be an integer between 1 and {MAX_ESM_RESIDUES}.")
+
+
 def _validate_prediction_options(
     *,
     threshold: float,
@@ -1903,8 +1926,7 @@ def _validate_prediction_options(
         raise ValueError("threshold must be in [0, 1].")
     if not math.isfinite(cutoff_value) or cutoff_value <= 0:
         raise ValueError("pocket_cluster_cutoff must be greater than 0.")
-    if max_len <= 0 or max_len > MAX_ESM_RESIDUES:
-        raise ValueError(f"max_len must be between 1 and {MAX_ESM_RESIDUES}.")
+    _validate_max_len(max_len)
     if unscored_bfactor_policy not in {"keep", "zero"}:
         raise ValueError("unscored_bfactor_policy must be 'keep' or 'zero'.")
 

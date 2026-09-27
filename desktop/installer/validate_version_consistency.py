@@ -99,6 +99,11 @@ def validate_version_consistency(
             rf"/blob/v({VERSION_RE})/README\.md#model-and-inference-pipeline",
         ),
         (
+            "Results technical guide tag",
+            root / "desktop" / "frontend" / "src" / "components" / "ResultsPanel.tsx",
+            rf"/blob/v({VERSION_RE})/README\.md#model-and-inference-pipeline",
+        ),
+        (
             "README version badge",
             root / "README.md",
             rf"shields\.io/badge/version-({VERSION_RE})-",

@@ -742,6 +742,17 @@ def read_asset_manifest(assets_dir: str | Path) -> dict | None:
             f"Asset manifest must contain a JSON object: {manifest_path}. "
             "Run `protcross setup-assets --refresh-assets` to quarantine and rebuild it."
         )
+    for field in ("esm_license", "files"):
+        if field in payload and not isinstance(payload[field], dict):
+            raise RuntimeError(
+                f"Asset manifest field {field!r} must contain a JSON object: {manifest_path}. "
+                "Run `protcross setup-assets --refresh-assets` to quarantine and rebuild it."
+            )
+    if any(not isinstance(entry, dict) for entry in payload.get("files", {}).values()):
+        raise RuntimeError(
+            f"Asset manifest file entries must contain JSON objects: {manifest_path}. "
+            "Run `protcross setup-assets --refresh-assets` to quarantine and rebuild it."
+        )
     return payload
 
 

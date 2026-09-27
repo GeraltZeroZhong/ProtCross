@@ -188,6 +188,7 @@ export interface BatchJob {
     pocket_cluster_cutoff: number;
     allow_truncation: boolean;
     device?: string | null;
+    batch_size?: number;
   };
   completed: number;
   failed: number;
