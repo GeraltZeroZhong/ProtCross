@@ -128,6 +128,7 @@ def test_release_version_consistency_validator_accepts_repository():
         ("backend_pin", "desktop backend protcross pin"),
         ("frontend", "frontend package version"),
         ("frontend_lock", "frontend lockfile version"),
+        ("results_guide", "Results technical guide tag"),
         ("tauri_cargo", "Tauri Cargo package version"),
         ("tauri_lock", "Tauri Cargo lock package version"),
         ("tauri", "Tauri config version"),
@@ -540,6 +541,7 @@ def _copy_version_fixture(root: Path) -> Path:
         "desktop/frontend/package.json",
         "desktop/frontend/package-lock.json",
         "desktop/frontend/src/App.tsx",
+        "desktop/frontend/src/components/ResultsPanel.tsx",
         "desktop/src-tauri/Cargo.toml",
         "desktop/src-tauri/Cargo.lock",
         "desktop/src-tauri/tauri.conf.json",
@@ -566,6 +568,8 @@ def _make_version_surface_stale(root: Path, surface: str, *, current: str, stale
         assert current_literal in text
         path.write_text(text.replace(current_literal, f"protcross=={stale}", 1), encoding="utf-8")
         return
+    elif surface == "results_guide":
+        paths = (root / "desktop/frontend/src/components/ResultsPanel.tsx",)
     elif surface == "frontend":
         paths = (root / "desktop/frontend/package.json",)
     elif surface == "frontend_lock":
@@ -610,3 +614,15 @@ def _make_version_surface_stale(root: Path, surface: str, *, current: str, stale
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_native_worker_cleanup_terminates_descendant_processes(tmp_path):
+    rustc = shutil.which("rustc")
+    if rustc is None:
+        pytest.skip("Rust compiler is unavailable for native lifecycle regression")
+    executable = tmp_path / ("process-tree-tests.exe" if sys.platform == "win32" else "process-tree-tests")
+    source = Path("desktop/src-tauri/src/process_tree.rs")
+    build = subprocess.run([rustc, "--edition=2021", "--test", str(source), "-o", str(executable)], capture_output=True, text=True, check=False)
+    assert build.returncode == 0, build.stderr
+    result = subprocess.run([str(executable), "--nocapture"], capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr

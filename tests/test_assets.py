@@ -998,3 +998,33 @@ def test_interrupted_download_retains_actionable_error(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="Proxy authentication required"):
         download_asset(AssetSpec("asset", "asset.bin", "https://example.invalid/asset.bin"), destination)
     assert destination.with_suffix(".bin.part").read_bytes() == b"partial"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("esm_license", None),
+    ("esm_license", []),
+    ("files", [{"filename": "unexpected"}]),
+    ("files", {"checkpoint": []}),
+])
+def test_setup_refresh_recovers_invalid_nested_manifest(tmp_path, monkeypatch, field, value):
+    payload = {"asset_version": DEFAULT_ASSET_BUNDLE.version, field: value}
+    manifest_path = tmp_path / ASSET_MANIFEST_FILENAME
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    downloads = []
+
+    def fake_download(spec, output_path, **kwargs):
+        downloads.append(spec.filename)
+        output_path.write_bytes(b"asset")
+
+    monkeypatch.setattr("protcross.assets.download_asset", fake_download)
+    with pytest.raises(RuntimeError, match="Asset manifest"):
+        setup_assets(tmp_path)
+    assert downloads == []
+    assert json.loads(manifest_path.read_text()) == payload
+
+    setup_assets(tmp_path, force=True)
+    quarantined = list(tmp_path.glob(f"{ASSET_MANIFEST_FILENAME}.corrupt-*"))
+    assert len(quarantined) == 1
+    assert json.loads(quarantined[0].read_text()) == payload
+    assert len(downloads) == 3
+    assert isinstance(json.loads(manifest_path.read_text())["files"], dict)

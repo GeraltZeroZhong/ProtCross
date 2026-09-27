@@ -16,6 +16,7 @@ import { Icon } from "./Icon";
 
 interface Props {
   structurePath?: string;
+  structureData?: string;
   summary?: SummaryJson | null;
   pockets?: PocketJson | null;
   selectedClusterIndex?: number;
@@ -25,6 +26,7 @@ interface Props {
 
 export function MolstarViewer({
   structurePath,
+  structureData,
   summary,
   pockets,
   selectedClusterIndex = 0,
@@ -40,11 +42,15 @@ export function MolstarViewer({
   const [selectionMessage, setSelectionMessage] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
   const [showControls, setShowControls] = useState(false);
+  const [scoreColorState, setScoreColorState] = useState<"score" | "custom" | "hidden">("score");
+  const scoreColorsActive = scoreColorState === "score";
+  const [restoringColors, setRestoringColors] = useState(false);
   const [webglAvailable, setWebglAvailable] = useState<boolean | null>(null);
   const [loadedStructureRequest, setLoadedStructureRequest] = useState(0);
   const [scoreCoverage, setScoreCoverage] = useState<ProtcrossScoreCoverage | null>(null);
+  const scoreMappingUnavailable = scoreCoverage?.source === "unavailable";
   const selectedCluster = pockets?.clustered_pockets?.[selectedClusterIndex] ?? null;
-  const displayedCluster = pockets ? selectedCluster : summary?.top_pocket ?? null;
+  const hasClusterData = Array.isArray(pockets?.clustered_pockets);
   const scoredResidueKeySignature = stableScoredResidueKeySignature(scoredResidueKeys);
 
   useEffect(() => {
@@ -55,6 +61,8 @@ export function MolstarViewer({
       }
       try {
         const molstar = await import("molstar/build/viewer/molstar");
+        // An inactive mount must not create (then dispose) a viewer in the live host.
+        if (cancelled || !hostRef.current || viewerRef.current) return;
         const viewer = await molstar.Viewer.create(hostRef.current, {
           extensions: [],
           layoutIsExpanded: false,
@@ -64,6 +72,7 @@ export function MolstarViewer({
           layoutShowLog: false,
           layoutShowLeftPanel: false,
           viewportShowExpand: true,
+          viewportShowControls: false,
           viewportShowSelectionMode: true,
           viewportShowAnimation: false,
           viewportShowTrajectoryControls: false,
@@ -107,11 +116,13 @@ export function MolstarViewer({
   }, [darkMode, viewerReady]);
 
   useEffect(() => {
-    viewerRef.current?.plugin?.layout?.setProps({ showControls });
+    viewerRef.current?.plugin?.layout?.updateProps({ showControls });
   }, [showControls, viewerReady]);
 
+  // Reopening a saved run may overwrite the same path with the same residue keys.
+  // A new summary object also invalidates the loaded coordinates and score colors.
   useEffect(() => {
-    if (!viewerReady || !viewerRef.current || !structurePath) {
+    if (!viewerReady || !viewerRef.current) {
       setLoadedStructureRequest(0);
       setScoreCoverage(null);
       return;
@@ -124,6 +135,7 @@ export function MolstarViewer({
     setScoreCoverage(null);
     setError(null);
     setSelectionMessage(null);
+    setScoreColorState("score");
 
     const operation = operationQueueRef.current.catch(() => undefined).then(async () => {
       if (request !== structureRequestRef.current || !viewerRef.current) {
@@ -132,10 +144,12 @@ export function MolstarViewer({
       try {
         const viewer = viewerRef.current;
         await viewer.plugin.clear();
-        if (request !== structureRequestRef.current || !viewerRef.current) {
+        if (request !== structureRequestRef.current || !viewerRef.current || !structurePath) {
           return;
         }
-        const blob = await fetchDesktopFile(structurePath, controller.signal);
+        const blob = structureData !== undefined
+          ? new Blob([structureData], { type: "text/plain" })
+          : await fetchDesktopFile(structurePath, controller.signal);
         if (request !== structureRequestRef.current || !viewerRef.current) {
           return;
         }
@@ -170,7 +184,7 @@ export function MolstarViewer({
         structureRequestRef.current += 1;
       }
     };
-  }, [structurePath, viewerReady, scoredResidueKeySignature]);
+  }, [structurePath, structureData, summary, viewerReady, scoredResidueKeySignature]);
 
   useEffect(() => {
     if (
@@ -199,7 +213,7 @@ export function MolstarViewer({
           request === selectionRequestRef.current &&
           structureRequest === structureRequestRef.current
         ) {
-          setSelectionMessage(message);
+          setSelectionMessage(hasClusterData ? message : "No saved cluster.");
         }
       } catch (exc) {
         if (request === selectionRequestRef.current) {
@@ -213,55 +227,87 @@ export function MolstarViewer({
         selectionRequestRef.current += 1;
       }
     };
-  }, [loadedStructureRequest, selectedCluster, viewerReady]);
+  }, [loadedStructureRequest, selectedCluster, hasClusterData, viewerReady]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewerReady || !viewer || loadedStructureRequest === 0) return;
+    const updateThemeState = (event?: { inTransaction?: boolean }) => {
+      if (!event?.inTransaction) setScoreColorState(getScoreColorState(viewer));
+    };
+    const subscriptions = [
+      viewer.plugin.state.data.events.changed.subscribe(updateThemeState),
+      viewer.plugin.state.data.events.cell.stateUpdated.subscribe(updateThemeState)
+    ];
+    updateThemeState();
+    return () => subscriptions.forEach((subscription) => subscription.unsubscribe());
+  }, [viewerReady, loadedStructureRequest]);
+
+  function restoreScoreColors() {
+    const viewer = viewerRef.current;
+    const request = loadedStructureRequest;
+    if (!viewer || request === 0 || restoringColors) return;
+    setRestoringColors(true);
+    const operation = operationQueueRef.current.catch(() => undefined).then(async () => {
+      try {
+        if (viewerRef.current !== viewer || structureRequestRef.current !== request) return;
+        await applyScoreTheme(viewer, scoreColorState === "hidden");
+        if (viewerRef.current === viewer) setScoreColorState(getScoreColorState(viewer));
+      } catch (exc) {
+        if (viewerRef.current === viewer) setError(exc instanceof Error ? exc.message : String(exc));
+      } finally {
+        if (viewerRef.current === viewer) setRestoringColors(false);
+      }
+    });
+    operationQueueRef.current = operation;
+  }
 
   return (
     <section className="viewer-panel">
       <div className="viewer-toolbar">
-        <div>
-          <h3>Structure Viewer</h3>
-          <span>{structurePath || "No annotated structure loaded"}</span>
-        </div>
-        {displayedCluster ? (
-          <div className="center-readout">
-            <strong>Score-weighted Cα centroid</strong>
-            <span>{displayedCluster.center.map((value) => value.toFixed(3)).join(", ")} Å</span>
-            <small>Coordinates only; no 3D centroid marker is drawn.</small>
-          </div>
-        ) : null}
-        <button aria-pressed={showControls} className="viewer-tools-button" disabled={webglAvailable === false} onClick={() => setShowControls((current) => !current)}>
-          <Icon name="settings" size={15} /> {showControls ? "Hide tools" : "Viewer tools"}
+        <h3>Structure</h3>
+        <button aria-pressed={showControls} className="viewer-tools-button" disabled={!viewerReady || webglAvailable === false || !structurePath || loadedStructureRequest === 0} onClick={() => setShowControls((current) => !current)}>
+          <Icon name="settings" size={15} /> {showControls ? "Hide tools" : "3D tools"}
         </button>
       </div>
       <div className={`molstar-frame ${webglAvailable === false ? "viewer-unavailable" : ""}`}>
         <div className="molstar-host" ref={hostRef} />
-        {webglAvailable === false ? (
+        {webglAvailable === false || !structurePath ? (
           <div className="viewer-fallback" role="status">
-            <span className="empty-icon"><Icon name="warning" size={24} /></span>
-            <strong>3D rendering is unavailable</strong>
-            <p>Restart ProtCross with hardware acceleration enabled. Cluster metrics, residue scores, and exported files remain available in the inspector.</p>
+            <Icon name={structurePath ? "warning" : "file"} size={24} />
+            <strong>{structurePath ? "3D unavailable" : "No structure file"}</strong>
+            <p>{structurePath ? "Enable hardware acceleration and restart. Residue data remain available." : "Residue data remain available in the inspector."}</p>
           </div>
         ) : null}
-        <div className="score-legend" aria-label="ProtCross model score color scale from zero to one; residues not scored by the model are neutral gray">
-          <span>Model score</span>
-          <div className="score-gradient" aria-hidden="true" />
-          <div style={{ alignItems: "center", color: "var(--text-secondary)", display: "flex", fontSize: 9, gap: 5 }}>
-            <span
-              aria-hidden="true"
-              style={{ background: PROTCROSS_UNSCORED_COLOR_CSS, borderRadius: 2, display: "inline-block", height: 8, width: 12 }}
-            />
-            <span>Not scored</span>
-          </div>
-          <div><span>0.00</span><span>0.50</span><span>1.00</span></div>
-        </div>
+
       </div>
       {error ? <div className="inline-error" role="alert">{error}</div> : null}
-      <div className="viewer-note">
-        {selectionMessage ? <span role="status">{selectionMessage} </span> : null}
-        {scoreCoverage ? <span role="status">{scoreCoverageMessage(scoreCoverage)} </span> : null}
-        The structure color scale maps ProtCross model scores from 0 to 1. Ball-and-stick residues mark the selected
-        predicted-residue cluster. Residues absent from the scored result are neutral gray; a genuine score of 0 uses
-        the 0.00 end of the color scale. The score-weighted Cα centroid is reported numerically above.
+      <div className="viewer-footer">
+        {loadedStructureRequest > 0 && webglAvailable !== false ? scoreColorsActive ? scoreMappingUnavailable ? (
+          <div className="score-legend score-legend-unavailable" role="status" aria-label="Model score colors unavailable">
+            <div className="legend-heading"><span>Score colors unavailable</span></div>
+          </div>
+        ) : (
+        <div className="score-legend" aria-label="ProtCross model score color scale from zero to one; residues not scored by the model are neutral gray">
+          <div className="legend-heading"><span>Model score</span><span>uncalibrated</span></div>
+          <div className="score-gradient" aria-hidden="true" />
+          <div className="score-scale-ticks"><span>0.00</span><span>0.50</span><span>1.00</span></div>
+          <div className="unscored-key"><span aria-hidden="true" style={{ background: PROTCROSS_UNSCORED_COLOR_CSS }} /><span>Not scored</span></div>
+        </div>
+        ) : (
+          <div className="score-legend score-legend-custom" role="status" aria-label={scoreColorState === "hidden" ? "Score view hidden; model score scale is inactive" : "Custom 3D colors; model score scale is inactive"}>
+            <div className="legend-heading"><span>{scoreColorState === "hidden" ? "Score view hidden" : "Custom colors"}</span></div>
+            <button aria-label={scoreColorState === "hidden" ? "Show score view" : "Restore score colors"} title={scoreColorState === "hidden" ? "Show the structure with model score colors" : "Restore model score colors, including painted residues"} disabled={restoringColors} onClick={restoreScoreColors}><Icon name="refresh" size={14} />{restoringColors ? "Restoring…" : scoreColorState === "hidden" ? "Show scores" : "Score colors"}</button>
+          </div>
+        ) : null}
+        <div className="viewer-status" role="status">
+          {selectionMessage ? <span>{selectionMessage}</span> : null}
+          {scoreCoverage ? <span>{scoreCoverageMessage(scoreCoverage)}</span> : null}
+        </div>
+        <details className="viewer-display-notes">
+          <summary><Icon name="info" size={14} /> Display key</summary>
+          <p>{scoreColorsActive ? scoreMappingUnavailable ? "Residue identities are unavailable; gray does not indicate whether a residue was scored." : "Unscored residues are gray; score 0 uses the 0.00 color." : scoreColorState === "hidden" ? "No score representation is visible. Show scores to restore it." : "Custom colors are active. Restore score colors for the model palette."} Default: ball-and-stick marks the cluster. Centroids have no 3D marker.</p>
+        </details>
       </div>
     </section>
   );
@@ -276,21 +322,67 @@ function stableScoredResidueKeySignature(keys: readonly string[] | undefined): s
 
 function scoreCoverageMessage(coverage: ProtcrossScoreCoverage): string {
   if (coverage.source === "result-keys") {
-    return `${coverage.scoredResidueCount} scored residues mapped; ${coverage.unscoredResidueCount} structure residues are neutral gray.`;
+    return `${coverage.scoredResidueCount} scored residues mapped · ${coverage.unscoredResidueCount} unscored`;
   }
   if (coverage.source === "result-keys-partial") {
-    return `${coverage.scoredResidueCount} of ${coverage.expectedScoredResidueCount ?? "the expected"} scored residue identities mapped; ${coverage.unmatchedScoredResidueCount} did not match the loaded structure.`;
+    return `${coverage.scoredResidueCount}/${coverage.expectedScoredResidueCount ?? "?"} scored residues mapped · ${coverage.unmatchedScoredResidueCount} unmatched`;
   }
-  return "Scored-residue identities are unavailable. Residues are neutral gray, while a genuine score of 0 remains on the color scale.";
+  return "Residue identities missing: score colors unavailable.";
 }
 
-async function applyScoreTheme(viewer: any): Promise<void> {
+function isSelectedClusterComponent(component: any): boolean {
+  // Mol* prefixes component keys when storing them as transform tags.
+  return (component.cell?.transform?.tags ?? []).includes("structure-component-protcross-selected-predicted-cluster");
+}
+
+function getScoreColorState(viewer: any): "score" | "custom" | "hidden" {
   const structures = viewer.plugin.managers.structure.hierarchy.current.structures ?? [];
-  for (const structure of structures) {
-    await viewer.plugin.managers.structure.component.updateRepresentationsTheme(
-      structure.components ?? [],
-      { color: "protcross-score" as any }
-    );
+  const representations = structures
+    .filter((structure: any) => !structure.cell.state.isHidden)
+    .flatMap((structure: any) => (structure.components ?? [])
+      .filter((component: any) => !isSelectedClusterComponent(component) && !component.cell.state.isHidden)
+      .flatMap((component: any) => component.representations ?? []))
+    .filter((representation: any) => !representation.cell.state.isHidden);
+  if (!representations.length) return "hidden";
+  return representations.every((representation: any) => {
+    const state = representation.cell.obj?.data?.repr?.state;
+    const painted = (state?.themeStrength?.overpaint ?? 1) > 0
+      && (state?.overpaint?.layers ?? []).some((layer: any) => !layer.clear);
+    return representation.cell.transform.params?.colorTheme?.name === "protcross-score" && !painted;
+  }) ? "score" : "custom";
+}
+
+async function applyScoreTheme(viewer: any, reveal = false): Promise<void> {
+  const plugin = viewer.plugin;
+  for (const structure of plugin.managers.structure.hierarchy.current.structures ?? []) {
+    let components = (structure.components ?? []).filter((component: any) => !isSelectedClusterComponent(component));
+    if (reveal && !components.some((component: any) => component.representations?.length)) {
+      const polymer = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, "polymer");
+      if (polymer) {
+        await plugin.builders.structure.representation.addRepresentation(polymer, { type: "cartoon", color: "protcross-score" });
+      }
+      const refreshed = plugin.managers.structure.hierarchy.current.structures.find((item: any) => item.cell.transform.ref === structure.cell.transform.ref);
+      components = (refreshed?.components ?? []).filter((component: any) => !isSelectedClusterComponent(component));
+    }
+    if (reveal) {
+      plugin.state.data.updateCellState(structure.cell.transform.ref, { isHidden: false });
+      for (const component of components) {
+        if (component.cell.state.isHidden) plugin.managers.structure.component.toggleVisibility([component]);
+        for (const representation of component.representations ?? []) {
+          if (representation.cell.state.isHidden) plugin.managers.structure.component.toggleVisibility([component], representation);
+        }
+      }
+    }
+    await plugin.managers.structure.component.updateRepresentationsTheme(components, { color: "protcross-score" as any });
+    // Selection coloring is a child transform; changing the base theme does not remove it.
+    const representationRefs = new Set(components.flatMap((component: any) => (component.representations ?? []).map((representation: any) => representation.cell.transform.ref)));
+    const paintCells = [...plugin.state.data.cells.values()].filter((cell: any) => representationRefs.has(cell.transform.parent)
+      && cell.transform.transformer.id.startsWith("ms-plugin.overpaint-structure-representation-3d-")) as any[];
+    if (paintCells.length) {
+      const update = plugin.state.data.build();
+      for (const cell of paintCells) update.delete(cell.transform.ref);
+      await update.commit({ canUndo: "Restore score colors" });
+    }
   }
 }
 
@@ -317,24 +409,24 @@ async function selectPredictedCluster(viewer: any, residues: ResidueSummary[]): 
   const plugin = viewer.plugin;
   await clearClusterSelection(viewer);
   if (residues.length === 0) {
-    return "No predicted-residue cluster exists at the current model-score threshold.";
+    return "No cluster at this cutoff.";
   }
 
   const selectors = uniqueAuthResidueSelectors(residues);
   if (selectors.length === 0) {
-    return "The predicted-residue cluster lacks auth chain/residue identifiers, so it could not be selected in 3D.";
+    return "3D selection unavailable: missing auth residue identifiers.";
   }
 
   const structureRef = plugin.managers.structure.hierarchy.current.structures?.[0];
   const structure = structureRef?.cell?.obj?.data;
   if (!structureRef || !structure) {
-    return "The annotated structure loaded without a selectable molecular structure.";
+    return "No selectable molecular structure.";
   }
 
   const expression = clusterExpression(selectors);
   const selection = Script.getStructureSelection(expression, structure);
   if (StructureSelection.isEmpty(selection)) {
-    return "No annotated-structure residues matched the cluster's auth chain/residue/insertion-code identifiers.";
+    return "3D selection unavailable: auth chain/residue/insertion-code identifiers do not match.";
   }
 
   const loci = StructureSelection.toLociWithSourceUnits(selection);
@@ -342,7 +434,7 @@ async function selectPredictedCluster(viewer: any, residues: ResidueSummary[]): 
     structureRef.cell,
     expression,
     "protcross-selected-predicted-cluster",
-    { label: "Selected predicted-residue cluster" }
+    { label: "Selected cluster" }
   );
   if (component) {
     await plugin.builders.structure.representation.addRepresentation(component, {
@@ -357,7 +449,7 @@ async function selectPredictedCluster(viewer: any, residues: ResidueSummary[]): 
   plugin.managers.structure.selection.fromLoci("set", loci, false);
   plugin.managers.interactivity.lociHighlights.highlightOnly({ loci }, false);
   plugin.managers.camera.focusLoci(loci, { extraRadius: 8, minRadius: 8, durationMs: 250 });
-  return `Selected and highlighted the predicted-residue cluster (${selectors.length} reported residues) by auth chain/residue/insertion code.`;
+  return `${selectors.length} residue${selectors.length === 1 ? "" : "s"} in selected cluster`;
 }
 
 async function clearClusterSelection(viewer: any): Promise<void> {
@@ -370,7 +462,7 @@ async function clearClusterSelection(viewer: any): Promise<void> {
     plugin.managers.structure.selection.clear();
     const components = (plugin.managers.structure.hierarchy.current.structures ?? [])
       .flatMap((structure: any) => structure.components ?? [])
-      .filter((component: any) => component.key === "protcross-selected-predicted-cluster");
+      .filter((component: any) => isSelectedClusterComponent(component));
     if (components.length > 0) {
       await plugin.managers.structure.hierarchy.remove(components, false);
     }

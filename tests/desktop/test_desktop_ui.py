@@ -27,7 +27,7 @@ def test_desktop_shell_exposes_navigation_and_async_state_semantics():
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
 
     assert 'aria-label="Primary navigation"' in app
-    assert 'aria-current={selected ? "page" : undefined}' in app
+    assert 'aria-current={tab === item.id ? "page" : undefined}' in app
     assert 'role="status"' in app
     assert 'role="alert"' in app
     assert 'className="skip-link"' in app
@@ -37,8 +37,9 @@ def test_desktop_shell_exposes_navigation_and_async_state_semantics():
     assert "const processed = props.batchJob?.completed ?? 0" in app
     assert "processed - (props.batchJob?.failed ?? 0)" in app
     assert "completed ?? 0) +" not in app
-    assert "backendIsHealthy(props.status)" in app
-    assert 'props.status?.readiness?.ready === true' in app
+    setup = (FRONTEND / "components" / "SetupPanel.tsx").read_text(encoding="utf-8")
+    assert "!props.backendConnectionLost && backendIsHealthy(props.status)" in setup
+    assert '!props.backendConnectionLost && props.status?.readiness?.ready === true' in setup
 
 
 def test_result_view_uses_protcross_score_theme_and_legend():
@@ -51,7 +52,10 @@ def test_result_view_uses_protcross_score_theme_and_legend():
     assert "scoredResidueKeys?: readonly string[]" in viewer
     assert "configureProtcrossScoreTheme(loadedStructures, scoredResidueKeys)" in viewer
     assert "Not scored" in viewer
-    assert "a genuine score of 0" in viewer
+    assert "score 0 uses the 0.00 color" in viewer
+    assert "Unscored residues are gray" in viewer
+    assert "uncalibrated" in viewer
+    assert "Centroids have no 3D marker" in viewer
     assert "B_iso_or_equiv.value(element)" in theme
     assert "domain: [0, 1]" in theme
     assert "normalizeProtcrossResidueKey" in theme
@@ -95,7 +99,9 @@ def test_diagnostic_export_opens_the_created_package_folder():
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
 
     assert 'await invoke("open_path", { path: parentPath(result.path) });' in app
-    assert "Create a local ZIP and open its folder" in app
+    diagnostics = (FRONTEND / "components" / "DiagnosticsPanel.tsx").read_text(encoding="utf-8")
+    assert "Export versions, configuration and local logs as ZIP" in diagnostics
+    assert "Diagnostic package saved and its folder opened." in app
 
 
 def test_batch_ui_supports_per_item_chains_retry_and_restored_history():
@@ -106,9 +112,11 @@ def test_batch_ui_supports_per_item_chains_retry_and_restored_history():
     assert "Scorable chain for" in app
     assert "chain_id: batchPreflights[path].chainId" in app
     assert "Retry failed" in app
-    assert "Recovered interrupted batch" in app
+    assert "Completed outputs kept. Retry unfinished inputs." in app
     assert '["queued", "running", "interrupted"].includes(job.status)' in app
-    assert "Recent batches" in app
+    assert 'className="disclosure batch-history"' in app
+    assert "<summary>History" in app
+    assert "onSelectHistory(job.id)" in app
     assert "firstLine(item.error)" not in app
     assert "retryBatch(jobId" in api
     assert "chain_id=${encodeURIComponent(chainId)}" in api
@@ -117,14 +125,21 @@ def test_batch_ui_supports_per_item_chains_retry_and_restored_history():
 
 def test_results_ui_reclusters_locally_and_exposes_all_ranked_residues():
     app = (FRONTEND / "App.tsx").read_text(encoding="utf-8")
+    results_panel = (FRONTEND / "components" / "ResultsPanel.tsx").read_text(encoding="utf-8")
     local_results = (FRONTEND / "localResults.ts").read_text(encoding="utf-8")
 
-    assert "recomputeLocalResult" in app
-    assert "Displayed score cutoff" in app
-    assert "Original run" in app
-    assert "without model inference or output-file changes" in app
-    assert "All residue rankings" in app
-    assert "rank_global" in app
+    assert "recomputeLocalResult" in results_panel
+    assert 'label="Score cutoff"' in results_panel
+    assert 'aria-label="Displayed result parameters"' in results_panel
+    assert "<dt>Run</dt>" in results_panel
+    assert "<dt>View</dt>" in results_panel
+    assert "originalThreshold" in results_panel
+    assert "displayThreshold" in results_panel
+    assert "View changes do not alter saved files or rerun inference" in results_panel
+    assert "uncalibrated, not binding probabilities" in results_panel
+    assert "All residues" in results_panel
+    assert 'className="disclosure result-rankings"' in results_panel
+    assert "rank_global" in results_panel
     assert "cutoffSquared" in local_results
     assert "<= cutoffSquared" in local_results
     assert "score > threshold" in local_results

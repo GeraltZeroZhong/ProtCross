@@ -36,7 +36,7 @@ export async function fetchDesktopFile(path: string, signal?: AbortSignal): Prom
   return response.blob();
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}, allowFailedReport = false): Promise<T> {
   const response = await fetch(`${requireBaseUrl()}${path}`, {
     ...options,
     headers: {
@@ -54,7 +54,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const payload = contentType.includes("application/json")
     ? await response.json()
     : { error: await response.text() };
-  if (!response.ok || payload.ok === false) {
+  if (!response.ok || (!allowFailedReport && payload.ok === false)) {
     throw new Error(payload.error ?? `Request failed: ${response.status}`);
   }
   return payload as T;
@@ -89,11 +89,11 @@ export function configureBackend(mode: BackendMode, condaPython?: string, proxyU
   });
 }
 
-export function testBackend(mode?: BackendMode): Promise<Record<string, unknown>> {
+export function testBackend(mode?: BackendMode, condaPython?: string, persist = true): Promise<Record<string, unknown>> {
   return request<Record<string, unknown>>("/backend/test", {
     method: "POST",
-    body: JSON.stringify(mode ? { mode } : {})
-  });
+    body: JSON.stringify({ mode, conda_python: condaPython || undefined, persist })
+  }, true);
 }
 
 export function importEsm(path: string, copyToCache = true): Promise<Record<string, unknown>> {
@@ -128,8 +128,9 @@ export function getEsmDownload(jobId: string, signal?: AbortSignal): Promise<Ass
   return request<AssetDownloadJob>(`/asset-download/${jobId}`, { signal });
 }
 
-export function cancelEsmDownload(jobId: string): Promise<AssetDownloadJob> {
+export function cancelEsmDownload(jobId: string, signal?: AbortSignal): Promise<AssetDownloadJob> {
   return request<AssetDownloadJob>(`/asset-download/${jobId}/cancel`, {
+    signal,
     method: "POST",
     body: JSON.stringify({})
   });
@@ -142,6 +143,7 @@ export function runPrediction(payload: {
   pocket_cluster_cutoff: number;
   chain_id?: string;
   allow_truncation: boolean;
+  device?: string;
 }, signal?: AbortSignal): Promise<PredictResponse> {
   return request<PredictResponse>("/predict", {
     signal,
@@ -180,6 +182,8 @@ export function submitBatch(payload: {
   threshold: number;
   pocket_cluster_cutoff: number;
   allow_truncation: boolean;
+  device?: string;
+  batch_size?: number;
 }): Promise<BatchJob> {
   return request<BatchJob>("/batch", {
     method: "POST",
@@ -204,8 +208,9 @@ export function getBatchResult(
   );
 }
 
-export function cancelBatch(jobId: string): Promise<BatchJob> {
+export function cancelBatch(jobId: string, signal?: AbortSignal): Promise<BatchJob> {
   return request<BatchJob>(`/batch/${jobId}/cancel`, {
+    signal,
     method: "POST",
     body: JSON.stringify({})
   });

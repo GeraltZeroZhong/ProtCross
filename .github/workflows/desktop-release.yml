@@ -6,7 +6,7 @@ on:
       tag:
         description: "Release tag to create or update"
         required: true
-        default: "v0.2.4"
+        default: "v0.2.5"
 
 permissions:
   contents: read
@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DESKTOP_VERSION: "0.2.4"
+  DESKTOP_VERSION: "0.2.5"
 
 jobs:
   validate-input:
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: Require the canonical 0.2.4 tag
+      - name: Require the canonical 0.2.5 tag
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -318,26 +318,26 @@ jobs:
           test -f "release-assets/ProtCross_Desktop_${DESKTOP_VERSION}_macos-aarch64.dmg"
           (cd release-assets && sha256sum * > SHA256SUMS.txt)
           cat > release-notes.txt <<'NOTES'
-          # ProtCross Desktop 0.2.4
+          # ProtCross Desktop 0.2.5
 
           Windows and macOS desktop packages are currently unsigned. Windows SmartScreen and macOS Gatekeeper may display a warning during installation.
 
           ## Downloads
 
-          - Windows 10/11 x64: `ProtCross_Desktop_0.2.4_x64-setup.exe`
-          - macOS 12+ on Apple Silicon (arm64): `ProtCross_Desktop_0.2.4_macos-aarch64.dmg`
+          - Windows 10/11 x64: `ProtCross_Desktop_0.2.5_x64-setup.exe`
+          - macOS 12+ on Apple Silicon (arm64): `ProtCross_Desktop_0.2.5_macos-aarch64.dmg`
           - Checksums: `SHA256SUMS.txt`
 
           ## Highlights
 
-          - Use MIT-licensed ESM-C weights without a separate license acceptance step.
-          - Complete Desktop setup in two steps: prediction runtime and model assets.
-          - Keep existing CLI/Python scripts compatible with legacy acceptance arguments.
-          - Recover broken runtimes, reopen the same input safely, and inspect filtered results consistently.
-          - Follow prediction progress, cancel single predictions, continue stopped batches, and access logs offline.
-          - Receive early dependency checks and clearer asset setup instructions.
+          - Work in a compact research interface with basic and advanced parameter layers.
+          - Explore the offline 1CRN example immediately, or prepare only the runtime needed for saved results.
+          - Inspect score-aware 3D structures, regroup residues locally, and export original run or current view records.
+          - Recover failed setup and interrupted work with accurate status, logs, and preserved batch history.
+          - Protect current inputs and results from stale requests, changed files, and conflicting batch output paths.
+          - Keep CLI/Python workflows compatible with the existing checkpoint and PCA bundle.
 
-          The release uses the stable `0.1.2` checkpoint/PCA bundle. Install the Python package with `python -m pip install protcross==0.2.4`.
+          The release uses the stable `0.1.2` checkpoint/PCA bundle. Install the Python package with `python -m pip install protcross==0.2.5`.
 
           ESM-C weights are MIT licensed and are not bundled. Download or import them separately in the app; no license confirmation is required.
           NOTES

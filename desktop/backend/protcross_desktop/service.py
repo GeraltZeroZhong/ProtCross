@@ -61,6 +61,8 @@ class QueueItem:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "QueueItem":
+        if not isinstance(payload, Mapping):
+            raise ValueError("batch item must be a JSON object")
         return cls(
             input_structure=str(payload["input_structure"]),
             chain_id=_optional_chain_id(payload.get("chain_id")),
@@ -86,6 +88,7 @@ class BatchJob:
     pocket_cluster_cutoff: float = 8.0
     allow_truncation: bool = False
     device: str | None = None
+    batch_size: int = DEFAULT_PREDICTION_MICROBATCH_SIZE
     retry_of: str | None = None
     completed_at: float | None = None
 
@@ -110,6 +113,7 @@ class BatchJob:
                 "pocket_cluster_cutoff": self.pocket_cluster_cutoff,
                 "allow_truncation": self.allow_truncation,
                 "device": self.device,
+                "batch_size": self.batch_size,
             },
             "item_count": len(self.items),
             "items_offset": bounded_offset,
@@ -125,6 +129,8 @@ class BatchJob:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "BatchJob":
+        if not isinstance(payload, Mapping):
+            raise ValueError("batch job must be a JSON object")
         settings = dict(payload.get("settings") or {})
         return cls(
             id=str(payload["id"]),
@@ -140,6 +146,7 @@ class BatchJob:
             pocket_cluster_cutoff=float(settings.get("pocket_cluster_cutoff", 8.0)),
             allow_truncation=bool(settings.get("allow_truncation", False)),
             device=str(settings["device"]) if settings.get("device") else None,
+            batch_size=_validate_batch_size(settings.get("batch_size", DEFAULT_PREDICTION_MICROBATCH_SIZE)),
             retry_of=str(payload["retry_of"]) if payload.get("retry_of") else None,
             completed_at=float(payload["completed_at"]) if payload.get("completed_at") is not None else None,
         )
@@ -256,6 +263,8 @@ class DesktopBackend:
             raise ValueError("backend mode must be one of: cpu, gpu, conda")
         if mode == "conda" and not conda_python:
             raise ValueError("conda_python is required for conda backend mode")
+        if mode == "conda":
+            conda_python = _validate_conda_python(conda_python)
         with self._lock:
             self.manifest.backend_mode = mode
             self.manifest.conda_python = str(Path(conda_python).expanduser()) if conda_python else None
@@ -435,14 +444,16 @@ class DesktopBackend:
         package_version = _required_package_version()
         mode = self.manifest.backend_mode
         python = self._configured_python()
-        sidecar_python = Path(sys.executable).resolve()
-        resolved_python = _resolve_existing_path(python)
+        sidecar_python = Path(sys.executable).absolute()
+        runtime_identity = _runtime_python_identity(python)
         return {
             "mode": mode,
             "python": str(python) if python else None,
             "python_present": bool(python and python.exists()),
             "sidecar_python": str(sidecar_python),
-            "runtime_matches_config": bool(resolved_python and resolved_python == sidecar_python),
+            "runtime_matches_config": bool(
+                runtime_identity and runtime_identity == _runtime_python_identity(sidecar_python)
+            ),
             "backend_test_ok": self.manifest.backend_test_ok,
             "backend_tested_at": self.manifest.backend_tested_at,
             "backend_test_mode": self.manifest.backend_test_mode,
@@ -486,17 +497,31 @@ class DesktopBackend:
             issues.append("ProtCross PCA asset failed SHA256 verification; import the expected release PCA.")
         if not status["esm"]["present"]:
             issues.append("Download or import ESM-C weights.")
-        elif status["esm"]["verified"] is False:
-            issues.append("ESM-C weights failed SHA256 verification; repair or import the expected file.")
+        elif status["esm"]["verified"] is not True:
+            issues.append("ESM-C weights have not passed SHA256 verification; repair or import the expected file.")
         return issues
 
-    def test_backend(self, mode: str | None = None) -> dict[str, Any]:
-        selected = mode or self.manifest.backend_mode
-        if selected not in {"cpu", "gpu", "conda"}:
-            raise ValueError("Select a backend before running environment tests.")
-        python = self.paths.env_python(selected) if selected in {"cpu", "gpu"} else self._configured_python()
-        if python is None:
-            raise ValueError("Choose a conda environment Python before testing the conda backend.")
+    def test_backend(
+        self,
+        mode: str | None = None,
+        *,
+        conda_python: str | Path | None = None,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        """Test a candidate environment without activating or overwriting its configuration."""
+        if not isinstance(persist, bool):
+            raise ValueError("persist must be true or false")
+        with self._lock:
+            selected = self.manifest.backend_mode if mode is None else mode
+            if selected not in {"cpu", "gpu", "conda"}:
+                raise ValueError("Select a backend mode: cpu, gpu, or conda before testing.")
+            if conda_python is not None and selected != "conda":
+                raise ValueError("conda_python is only supported for conda backend mode")
+            python = (
+                self.paths.env_python(selected)
+                if selected in {"cpu", "gpu"}
+                else _validate_conda_python(conda_python if conda_python is not None else self.manifest.conda_python)
+            )
         result = test_python_env(python, backend=selected).to_dict()
         package_version = _required_package_version()
         installed_version = result.get("checks", {}).get("protcross", {}).get("distribution_version")
@@ -506,14 +531,21 @@ class DesktopBackend:
                 f"Backend has ProtCross {installed_version or 'unknown'}, but Desktop requires {package_version}. "
                 "Reinstall this backend to upgrade it."
             )
-        if selected == self.manifest.backend_mode:
+        if persist:
             from .manifest import utc_now
 
             with self._lock:
+                configured_python = self._configured_python()
+                if (
+                    selected != self.manifest.backend_mode
+                    or configured_python is None
+                    or os.path.normcase(str(python.absolute())) != os.path.normcase(str(configured_python.absolute()))
+                ):
+                    return result
                 self.manifest.backend_test_ok = bool(result["ok"])
                 self.manifest.backend_tested_at = utc_now()
                 self.manifest.backend_test_mode = selected
-                self.manifest.backend_test_python = str(python)
+                self.manifest.backend_test_python = str(configured_python)
                 self.manifest.backend_test_package_version = installed_version
                 self.manifest.save(self.paths.manifest_path)
         return result
@@ -597,6 +629,7 @@ class DesktopBackend:
         pocket_cluster_cutoff: float = 8.0,
         allow_truncation: bool = False,
         device: str | None = None,
+        batch_size: int = DEFAULT_PREDICTION_MICROBATCH_SIZE,
     ) -> dict[str, Any]:
         return self._submit_batch(
             structures=structures,
@@ -606,6 +639,7 @@ class DesktopBackend:
             pocket_cluster_cutoff=pocket_cluster_cutoff,
             allow_truncation=allow_truncation,
             device=device,
+            batch_size=batch_size,
             retry_of=None,
         )
 
@@ -619,8 +653,10 @@ class DesktopBackend:
         pocket_cluster_cutoff: float,
         allow_truncation: bool,
         device: str | None,
+        batch_size: int,
         retry_of: str | None,
     ) -> dict[str, Any]:
+        batch_size = _validate_batch_size(batch_size)
         batch_inputs = _normalize_batch_inputs(structures=structures, items=items)
         if not batch_inputs:
             raise ValueError("Batch requires at least one input structure.")
@@ -666,6 +702,7 @@ class DesktopBackend:
             pocket_cluster_cutoff=float(pocket_cluster_cutoff),
             allow_truncation=bool(allow_truncation),
             device=device,
+            batch_size=batch_size,
             retry_of=retry_of,
         )
         with self._lock:
@@ -702,6 +739,7 @@ class DesktopBackend:
                 "pocket_cluster_cutoff": original.pocket_cluster_cutoff,
                 "allow_truncation": original.allow_truncation,
                 "device": original.device,
+                "batch_size": original.batch_size,
             }
         if not retry_items:
             raise ValueError(f"Batch job {job_id} has no unfinished items to retry.")
@@ -870,7 +908,7 @@ class DesktopBackend:
             with self._predict_lock:
                 predictor = self._get_predictor(device=job.device)
             supports_microbatch = callable(getattr(predictor, "predict_many", None))
-            microbatch_size = DEFAULT_PREDICTION_MICROBATCH_SIZE if supports_microbatch else 1
+            microbatch_size = job.batch_size if supports_microbatch else 1
             for batch_start in range(0, len(job.items), microbatch_size):
                 with self._lock:
                     if job.cancel_requested:
@@ -987,19 +1025,33 @@ class DesktopBackend:
     def _load_batch_history(self) -> None:
         if not self._batch_history_path.exists():
             return
+        invalid = False
+        jobs: dict[str, BatchJob] = {}
         try:
             payload = json.loads(self._batch_history_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("batch history must be a JSON object")
             if payload.get("schema_version") != BATCH_HISTORY_SCHEMA:
                 return
-            jobs = {
-                job.id: job
-                for job in (BatchJob.from_dict(item) for item in list(payload.get("jobs") or []))
-            }
+            entries = payload.get("jobs", [])
+            if not isinstance(entries, list):
+                raise ValueError("batch history jobs must be a JSON array")
+            for item in entries:
+                try:
+                    job = BatchJob.from_dict(item)
+                    jobs[job.id] = job
+                except (TypeError, ValueError, KeyError, OverflowError):
+                    invalid = True
         except (OSError, TypeError, ValueError, KeyError):
-            return
+            invalid = True
+        if invalid:
+            quarantine = self._batch_history_path.with_name(
+                f"{self._batch_history_path.name}.corrupt-{uuid.uuid4().hex}"
+            )
+            self._batch_history_path.replace(quarantine)
 
         self._jobs = jobs
-        changed = False
+        changed = invalid
         interrupted_at = time.time()
         for job in self._jobs.values():
             if job.status in {"queued", "running"}:
@@ -1059,18 +1111,22 @@ class DesktopBackend:
             if self._predictor is not None and self._predictor_key == key:
                 return self._predictor
             factory = self._predictor_factory or _default_predictor_factory
-            self._predictor = factory(
-                ckpt_path=checkpoint,
-                esm_weights=esm,
-                pca_path=pca,
-                device=selected_device,
-                asset_version="0.1.2-desktop",
-                asset_metadata=self._asset_metadata(),
-                embedding_cache_dir=self.paths.root / "feature-cache",
-                accept_esm_license=True,
-            )
+            metadata = self._asset_metadata()
+        # Callers hold _predict_lock. Model loading must not block status or cancellation.
+        predictor = factory(
+            ckpt_path=checkpoint,
+            esm_weights=esm,
+            pca_path=pca,
+            device=selected_device,
+            asset_version="0.1.2-desktop",
+            asset_metadata=metadata,
+            embedding_cache_dir=self.paths.root / "feature-cache",
+            accept_esm_license=True,
+        )
+        with self._lock:
+            self._predictor = predictor
             self._predictor_key = key
-            return self._predictor
+        return predictor
 
     def _invalidate_predictor(self) -> None:
         with self._lock:
@@ -1166,7 +1222,7 @@ def _required_package_version() -> str:
 
 
 def _file_status(path: Path | None, expected_sha256: str | None) -> dict[str, Any]:
-    present = bool(path and path.exists())
+    present = bool(path and path.is_file())
     actual = sha256_file(path) if present and path else None
     return {
         "path": str(path) if path else None,
@@ -1371,10 +1427,12 @@ def _next_available_run_dir(root: Path) -> Path:
     raise RuntimeError(f"Could not allocate a unique result directory under {root}")
 
 
-def _resolve_existing_path(path: Path | None) -> Path | None:
-    if path is None or not path.exists():
+def _runtime_python_identity(path: Path | None) -> tuple[Path, Path] | None:
+    if path is None or not path.is_file():
         return None
-    return path.resolve()
+    # Venvs can share the same binary through symlinks; their entrypoint directories
+    # determine which environment Python activates. Aliases inside one env are safe.
+    return path.absolute().parent.resolve(), path.resolve()
 
 
 def _copy_atomic(source: Path, target: Path) -> None:
@@ -1414,6 +1472,23 @@ def _validate_structure_path(input_structure: str | Path) -> Path:
     if path.suffix.lower() not in {".pdb", ".cif", ".mmcif"}:
         raise ValueError(f"Unsupported input structure extension: {path.suffix or '<none>'}")
     return path
+
+
+def _validate_conda_python(value: str | Path | None) -> Path:
+    if not value:
+        raise ValueError("Choose a conda environment Python before testing or saving the conda backend.")
+    # Preserve the environment entry point: resolving a venv's Python symlink
+    # could select the base interpreter outside that environment.
+    path = Path(value).expanduser().absolute()
+    if not path.is_file():
+        raise ValueError(f"Conda Python must be an existing executable file: {path}")
+    return path
+
+
+def _validate_batch_size(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= DEFAULT_PREDICTION_MICROBATCH_SIZE:
+        raise ValueError("batch_size must be an integer from 1 to 4")
+    return value
 
 
 def _validate_prediction_options(threshold: float, pocket_cluster_cutoff: float) -> None:

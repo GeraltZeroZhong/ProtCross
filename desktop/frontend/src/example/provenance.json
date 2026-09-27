@@ -1,0 +1,66 @@
+{
+  "schema_version": "protcross-gui-example-provenance-v1",
+  "purpose": "Real precomputed prediction for learning the ProtCross results interface, not a validated binding-site benchmark.",
+  "source": {
+    "pdb_id": "1CRN",
+    "entry_url": "https://www.rcsb.org/structure/1CRN",
+    "download_url": "https://files-beta.rcsb.org/pub/wwpdb/pdb/data/entries/cr/pdb_00001crn/structures/pdb_00001crn.pdb.gz",
+    "input_sha256": "42199a30a0701864a2a5cc76cd7f35cc544cd0e65fbcf63e03c166543249b811"
+  },
+  "inference": {
+    "protcross_version": "0.2.4",
+    "asset_version": "0.1.2-desktop",
+    "device": "cuda",
+    "threshold": 0.5,
+    "cluster_cutoff": 8.0,
+    "residues_scored": 46,
+    "selected_residue_count": 27,
+    "cluster_count": 1,
+    "runtime": {
+      "biopython": "1.86",
+      "esm": "3.2.1.post1",
+      "numpy": "2.2.6",
+      "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+      "python": "3.10.19",
+      "torch": "2.11.0.dev20260206+cu128",
+      "torch_geometric": "2.7.0",
+      "execution_mode": "single_fp32",
+      "precision": "float32",
+      "effective_microbatch_size": "1",
+      "elapsed_seconds_interpretation": "single_item_compute_time"
+    }
+  },
+  "timings": {
+    "preparation_seconds": 5.751299252999843,
+    "prediction_wall_seconds": 28.42868276100012,
+    "total_seconds": 34.17998239899998
+  },
+  "preparation": "Generated with actual DesktopBackend.predict_single, verified official model assets, and the current 0.2.4 source wheel. No model outputs were mocked or manually invented. Absolute local paths and file modification timestamps were removed or made relative for portability; prediction values and coordinates are unchanged.",
+  "validation_boundary": "Executed in a developer Conda environment on Linux/WSL2 with RTX 5070 Laptop CUDA. This is not a Windows/macOS packaged-runtime acceptance test. Runtime package versions are recorded above.",
+  "files": {
+    "1CRN.pdb": {
+      "sha256": "42199a30a0701864a2a5cc76cd7f35cc544cd0e65fbcf63e03c166543249b811",
+      "bytes": 49491
+    },
+    "1CRN.protcross.pdb": {
+      "sha256": "86305f1d1e705c38b9629d74ed8782d511b5ca7d8ddcac835a331799ea8324b6",
+      "bytes": 49491
+    },
+    "1CRN.protcross.pockets.json": {
+      "sha256": "8581c8536e037497dbca69ab4b999214542fc98806db7e74b31a818b5ab704ba",
+      "bytes": 44187
+    },
+    "1CRN.protcross.scores.tsv": {
+      "sha256": "96713ea1d26d6eabaf436eb41f804eb521cd904bcfdbdad385c2dc9a299e5823",
+      "bytes": 7167
+    },
+    "1CRN.protcross.summary.json": {
+      "sha256": "1383127ec32617866e54418a03c43453d77b62c0fcc131d127028b44476e4807",
+      "bytes": 9878
+    },
+    "response.json": {
+      "sha256": "0cc166c0b916575bba67d919f24c4265cf88ac03339a67ad50de985531590eb3",
+      "bytes": 108794
+    }
+  }
+}

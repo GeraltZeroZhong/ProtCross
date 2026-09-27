@@ -257,12 +257,11 @@ def _redact_proxy_credentials(value: str) -> str:
         try:
             parts = urlsplit(url)
         except ValueError:
+            # A malformed proxy may be the reason diagnostics were requested.
+            return re.sub(r"^(https?://)[^/?#]*@", r"\1<redacted>@", url)
+        if "@" not in parts.netloc:
             return url
-        if not parts.hostname or "@" not in parts.netloc:
-            return url
-        host = parts.hostname
-        if parts.port:
-            host = f"{host}:{parts.port}"
+        host = parts.netloc.rsplit("@", 1)[1]
         return urlunsplit((parts.scheme, f"<redacted>@{host}", parts.path, parts.query, parts.fragment))
 
     return re.sub(r"https?://[^\s\"'<>]+", replace, value)
